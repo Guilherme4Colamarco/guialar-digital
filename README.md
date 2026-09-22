@@ -1,5 +1,8 @@
 # GuiaLar Digital
 
+[![Build and Test](https://github.com/Guilherme4Colamarco/guialar-digital/actions/workflows/build-and-test.yml/badge.svg)](https://github.com/Guilherme4Colamarco/guialar-digital/actions/workflows/build-and-test.yml)
+[![Quick Check](https://github.com/Guilherme4Colamarco/guialar-digital/actions/workflows/quick-check.yml/badge.svg)](https://github.com/Guilherme4Colamarco/guialar-digital/actions/workflows/quick-check.yml)
+
 **Assistente para configuração de DNS seguro e adblockers (Linux + esboço Windows)**
 
 Projeto desenvolvido como parte da disciplina Projetos Integrados I  
