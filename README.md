@@ -11,6 +11,24 @@ Projeto desenvolvido como parte da disciplina Projetos Integrados I
 
 ---
 
+## 🎯 Correções do Review Linux (PR #1)
+
+**✅ TODAS as correções críticas e médias foram implementadas!**
+
+### CRÍTICO — DNS:
+1. ✅ systemd-resolved: Drop-in `/etc/systemd/resolved.conf.d/99-guialar.conf` (não trunca arquivo principal)
+2. ✅ NetworkManager: Backup REAL em `~/.guialar/backups/`
+3. ✅ resolv.conf: Verifica symlink stub, inclui IPv6, implementa Netplan
+4. ✅ obterConexaoAtiva: Filtra VPN/docker, prioriza ethernet/wifi
+
+### MÉDIO — Navegadores / CI:
+5. ✅ Detecção navegadores: .desktop, Flatpak, Snap, Brave Origin
+6. ✅ verificar() e reverter(): Implementação real com busca de backups
+7. ✅ CI report: Status real de cada job (não imprime "todos passaram" cegamente)
+8. ✅ Smoke test: Via stub (resolvectl query / dig @127.0.0.53), não direto contra 1.1.1.3
+
+---
+
 ## 📋 Sobre o Projeto
 
 O GuiaLar Digital é uma aplicação Java que automatiza a configuração de proteções básicas de privacidade e segurança, com foco em **Linux** (MVP completo) e esboço para **Windows**.
@@ -162,13 +180,16 @@ dig @1.1.1.3 example.com
 
 #### 3. Verificação Automática (Smoke Test Integrado)
 
-**O GuiaLar Digital executa verificação automática pós-DNS!**
+**O GuiaLar Digital executa verificação automática pós-DNS VIA STUB DO SISTEMA!**
 
-Após configurar o DNS, o programa automaticamente:
-- ✅ Testa `malware.testcategory.com` (IPv4 e IPv6)
-- ✅ Testa `nudity.testcategory.com` (IPv4 e IPv6)
-- ✅ Testa `example.com` (IPv4 e IPv6)
-- ✅ Exibe relatório de sucesso/falha
+Após configurar o DNS, o programa automaticamente testa **via stub local** (não diretamente contra 1.1.1.3):
+- ✅ Usa `resolvectl query` (prova que o sistema usa o DNS configurado)
+- ✅ Fallback `dig @127.0.0.53` (stub do systemd-resolved)
+- ✅ Fallback Java `InetAddress` (resolver nativo)
+- ✅ Testa `malware.testcategory.com` (IPv4 e IPv6) — deve bloquear
+- ✅ Testa `nudity.testcategory.com` (IPv4 e IPv6) — deve bloquear
+- ✅ Testa `example.com` (IPv4 e IPv6) — deve permitir
+- ✅ Exibe relatório detalhado de sucesso/falha
 
 **Resultado esperado no programa:**
 
@@ -361,10 +382,19 @@ src/main/java/br/uniube/pi/guialar/
 ### Diferenças Técnicas por OS (Documentadas)
 
 #### ✅ Linux (MVP - Implementado)
-- **DNS:** NetworkManager (nmcli), systemd-resolved (resolvectl), Netplan
+- **DNS:** NetworkManager (nmcli), systemd-resolved (resolvectl), Netplan, resolv.conf
+  - **NetworkManager**: Modifica conexão ativa, backup em `~/.guialar/backups/`
+  - **systemd-resolved**: Drop-in `/etc/systemd/resolved.conf.d/99-guialar.conf`
+  - **Netplan**: YAML em `/etc/netplan/99-guialar-dns.yaml` (Ubuntu Server)
+  - **resolv.conf**: Verifica symlink stub antes de editar, inclui IPv6
+  - **Conexão ativa**: Filtra VPN/docker, prioriza ethernet > wifi
 - **Browsers:** PATH `/usr/bin/`, `.desktop` files, perfis `~/.mozilla/`, `~/.config/`
+  - **Detecção**: which, perfis, .desktop, Flatpak, Snap
+  - **Brave Origin**: `~/.config/BraveSoftware/Brave-Origin`
 - **Extensões:** `policies.json` (Firefox), managed policies (Chromium)
 - **Distros:** Debian, Ubuntu, Fedora, Arch
+- **Verificação**: Via stub (resolvectl query / dig @127.0.0.53)
+- **Reversão**: Busca backup mais recente e restaura automaticamente
 
 #### 🔧 macOS (Futuro - Interface apenas)
 - **DNS:** `networksetup`, `scutil` (**≠** NetworkManager/systemd-resolved!)
