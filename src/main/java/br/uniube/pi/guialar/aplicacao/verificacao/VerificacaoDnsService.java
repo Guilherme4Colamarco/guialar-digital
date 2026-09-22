@@ -16,7 +16,8 @@ import java.util.List;
  * - nudity.testcategory.com deve retornar 0.0.0.0 (bloqueado)
  * - example.com deve funcionar normalmente
  * 
- * Testa IPv4 e IPv6.
+ * Testa via STUB LOCAL (resolvectl query ou dig @127.0.0.53) para provar
+ * que o SISTEMA está usando o DNS Families, não testando diretamente contra 1.1.1.3.
  * 
  * Funciona em Docker e VM.
  */
@@ -27,99 +28,87 @@ public class VerificacaoDnsService {
 
     /**
      * Executa verificação completa do DNS.
+     * Testa via STUB do sistema, não diretamente contra 1.1.1.3
      * 
      * @return Lista de resultados da verificação
      */
     public List<ResultadoVerificacao> verificar() {
         List<ResultadoVerificacao> resultados = new ArrayList<>();
 
-        ServidorDns servidor = ServidorDns.getPadrao();
-
-        System.out.println("🔍 Verificando DNS Cloudflare Families...");
+        System.out.println("🔍 Verificando DNS Cloudflare Families VIA STUB DO SISTEMA...");
+        System.out.println("   (não testando diretamente contra 1.1.1.3, mas via stub local)");
         System.out.println("─────────────────────────────────────────────────────────────────");
         System.out.println();
 
         // Testar malware (IPv4)
-        resultados.add(testarBloqueio(
+        resultados.add(testarBloqueioViaStub(
             ServidorDns.URL_TESTE_MALWARE,
-            servidor.getPrimario(),
             "IPv4",
             true
         ));
 
         // Testar malware (IPv6)
-        resultados.add(testarBloqueio(
+        resultados.add(testarBloqueioViaStub(
             ServidorDns.URL_TESTE_MALWARE,
-            servidor.getPrimarioIpv6(),
             "IPv6",
             true
         ));
 
         // Testar nudity (IPv4)
-        resultados.add(testarBloqueio(
+        resultados.add(testarBloqueioViaStub(
             ServidorDns.URL_TESTE_NUDITY,
-            servidor.getPrimario(),
             "IPv4",
             true
         ));
 
         // Testar nudity (IPv6)
-        resultados.add(testarBloqueio(
+        resultados.add(testarBloqueioViaStub(
             ServidorDns.URL_TESTE_NUDITY,
-            servidor.getPrimarioIpv6(),
             "IPv6",
             true
         ));
 
         // Testar site normal (IPv4)
-        resultados.add(testarBloqueio(
+        resultados.add(testarBloqueioViaStub(
             "example.com",
-            servidor.getPrimario(),
             "IPv4",
             false
         ));
 
         // Testar site normal (IPv6)
-        resultados.add(testarBloqueio(
+        resultados.add(testarBloqueioViaStub(
             "example.com",
-            servidor.getPrimarioIpv6(),
             "IPv6",
             false
         ));
 
         return resultados;
     }
-
+    
     /**
-     * Testa bloqueio de uma URL específica.
-     * 
-     * @param url URL a testar
-     * @param dnsServer Servidor DNS a usar
-     * @param tipoIp "IPv4" ou "IPv6"
-     * @param deveSer blocked true se deve estar bloqueado, false se deve funcionar
-     * @return Resultado da verificação
+     * Testa bloqueio VIA STUB do sistema (resolvectl query ou dig @127.0.0.53).
+     * Isso prova que o SISTEMA está usando o DNS Families.
      */
-    private ResultadoVerificacao testarBloqueio(String url, String dnsServer, 
-                                                String tipoIp, boolean deveSerBloqueado) {
-        System.out.print("  Testando " + url + " (" + tipoIp + ")... ");
+    private ResultadoVerificacao testarBloqueioViaStub(String url, String tipoIp, boolean deveSerBloqueado) {
+        System.out.print("  Testando " + url + " (" + tipoIp + ") via stub... ");
 
         try {
-            // Tentar com dig primeiro
-            String ip = testarComDig(url, dnsServer, tipoIp);
+            // 1. Tentar com resolvectl query (prova que o sistema usa o DNS configurado)
+            String ip = testarComResolvectl(url, tipoIp);
             
+            // 2. Se não funcionar, tentar dig @127.0.0.53 (stub do systemd-resolved)
             if (ip == null) {
-                // Se dig não funcionar, tentar com resolvectl
-                ip = testarComResolvectl(url, tipoIp);
+                ip = testarComDigStub(url, tipoIp);
             }
 
+            // 3. Se nada funcionar, tentar lookup Java nativo (usa o resolver do sistema)
             if (ip == null) {
-                // Se nada funcionar, tentar lookup Java nativo
                 ip = testarComJava(url);
             }
 
             if (ip == null) {
-                System.out.println("⚠️ Não foi possível resolver");
-                return ResultadoVerificacao.erro(url, tipoIp, "Nenhum método de resolução disponível");
+                System.out.println("⚠️ Não foi possível resolver via stub");
+                return ResultadoVerificacao.erro(url, tipoIp, "Nenhum método de resolução via stub disponível");
             }
 
             // Verificar se o resultado é esperado
@@ -150,14 +139,16 @@ public class VerificacaoDnsService {
     }
 
     /**
-     * Testa usando comando dig.
+     * Testa usando dig via STUB (127.0.0.53 do systemd-resolved).
+     * Isso prova que o sistema está usando o DNS configurado.
      */
-    private String testarComDig(String url, String dnsServer, String tipoIp) {
+    private String testarComDigStub(String url, String tipoIp) {
         try {
             String recordType = tipoIp.equals("IPv6") ? "AAAA" : "A";
             
+            // Testar via stub do systemd-resolved
             ProcessBuilder pb = new ProcessBuilder(
-                "dig", "@" + dnsServer, url, recordType, "+short"
+                "dig", "@127.0.0.53", url, recordType, "+short"
             );
             pb.redirectErrorStream(true);
             Process process = pb.start();

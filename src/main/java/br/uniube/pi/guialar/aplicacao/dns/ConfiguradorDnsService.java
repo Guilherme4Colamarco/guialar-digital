@@ -61,7 +61,10 @@ public class ConfiguradorDnsService {
     }
 
     private ConfiguracaoDns configurarDebian(ServidorDns servidor, InfoDistro distro) {
-        if ("NetworkManager".equals(distro.getGerenciadorRede())) {
+        // Verificar se usa Netplan (Ubuntu Server)
+        if (Files.exists(Path.of("/etc/netplan"))) {
+            return configurarNetplan(servidor);
+        } else if ("NetworkManager".equals(distro.getGerenciadorRede())) {
             return configurarNetworkManager(servidor);
         } else if ("systemd-resolved".equals(distro.getGerenciadorRede())) {
             return configurarSystemdResolved(servidor);
@@ -119,6 +122,77 @@ public class ConfiguradorDnsService {
             return ConfiguracaoDns.sucesso(servidor, "NetworkManager");
         } catch (Exception e) {
             return ConfiguracaoDns.erro("NetworkManager", e.getMessage());
+        }
+    }
+
+    /**
+     * Configura DNS via Netplan (Ubuntu Server, derivados).
+     * Cria arquivo YAML em /etc/netplan/ com configuração DNS.
+     */
+    private ConfiguracaoDns configurarNetplan(ServidorDns servidor) {
+        try {
+            Path netplanDir = Path.of("/etc/netplan");
+            if (!Files.exists(netplanDir)) {
+                return ConfiguracaoDns.erro("Netplan", "Diretório /etc/netplan não encontrado");
+            }
+            
+            // Encontrar arquivo de configuração existente
+            Path configFile = null;
+            try (java.nio.file.DirectoryStream<Path> stream = Files.newDirectoryStream(netplanDir, "*.yaml")) {
+                for (Path entry : stream) {
+                    configFile = entry;
+                    break;
+                }
+            }
+            
+            // Se não encontrou, criar um novo
+            if (configFile == null) {
+                configFile = netplanDir.resolve("99-guialar-dns.yaml");
+            }
+            
+            // Backup do arquivo se existir
+            if (Files.exists(configFile)) {
+                String timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss"));
+                Path backup = Path.of(configFile.toString() + BACKUP_SUFFIX + timestamp);
+                Files.copy(configFile, backup, StandardCopyOption.REPLACE_EXISTING);
+                System.out.println("  ℹ️  Backup: " + backup);
+            }
+            
+            // Criar configuração Netplan YAML
+            List<String> linhas = new ArrayList<>();
+            linhas.add("# Configurado por GuiaLar Digital");
+            linhas.add("# Cloudflare 1.1.1.1 for Families (Malware + Adulto)");
+            linhas.add("# Para reverter: sudo rm " + configFile + " && sudo netplan apply");
+            linhas.add("");
+            linhas.add("network:");
+            linhas.add("  version: 2");
+            linhas.add("  ethernets:");
+            linhas.add("    all:");
+            linhas.add("      match:");
+            linhas.add("        name: en*");
+            linhas.add("      dhcp4: true");
+            linhas.add("      dhcp6: true");
+            linhas.add("      nameservers:");
+            linhas.add("        addresses:");
+            linhas.add("          - " + servidor.getPrimario());
+            linhas.add("          - " + servidor.getSecundario());
+            linhas.add("          - " + servidor.getPrimarioIpv6());
+            linhas.add("          - " + servidor.getSecundarioIpv6());
+            
+            Files.write(configFile, linhas, StandardOpenOption.CREATE, 
+                StandardOpenOption.TRUNCATE_EXISTING);
+            
+            // Aplicar configuração
+            executarComando("netplan", "apply");
+            
+            System.out.println("  ℹ️  Para reverter:");
+            System.out.println("     sudo rm " + configFile);
+            System.out.println("     sudo netplan apply");
+            
+            return ConfiguracaoDns.sucesso(servidor, "Netplan");
+            
+        } catch (Exception e) {
+            return ConfiguracaoDns.erro("Netplan", e.getMessage());
         }
     }
 
