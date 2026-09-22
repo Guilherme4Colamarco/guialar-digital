@@ -284,39 +284,108 @@ sudo pacman -S firefox chromium
 
 ## 📁 Estrutura do Projeto
 
+### Arquitetura: Core Comum + Adaptadores por OS
+
+O projeto segue uma **arquitetura limpa** com interfaces comuns e implementações específicas por sistema operacional.
+
+**MVP:** Apenas Linux implementado  
+**Futuro:** Interfaces definidas para Mac, Windows e Android (sem código funcional)
+
 ```
 src/main/java/br/uniube/pi/guialar/
 ├── GuiaLarApplication.java              # Classe principal
-├── dominio/
+├── dominio/                             # Core comum (interfaces e modelos)
+│   ├── sistema/
+│   │   ├── TipoSistema.java            # Enum: LINUX, WINDOWS, MAC...
+│   │   └── SistemaOperacional.java     # Interface base OS
+│   ├── adaptadores/                     # ⭐ Interfaces por OS
+│   │   ├── DnsChanger.java             # Interface troca DNS
+│   │   ├── BrowserDetector.java        # Interface detecção browsers
+│   │   └── ExtensionInstaller.java     # Interface instalação extensões
 │   ├── distro/
 │   │   ├── TipoDistro.java             # Enum: DEBIAN, FEDORA, ARCH
 │   │   └── InfoDistro.java             # Informações da distribuição
 │   ├── dns/
 │   │   ├── ConfiguracaoDns.java        # Modelo de configuração DNS
-│   │   └── ServidorDns.java            # Servidores DNS (Cloudflare, etc)
-│   └── navegador/
-│       ├── TipoNavegador.java          # Enum: FIREFOX, CHROMIUM
-│       ├── Navegador.java              # Modelo de navegador detectado
-│       └── ExtensaoAdblocker.java      # uBlock Origin / uBlock Origin Lite
-├── aplicacao/
+│   │   └── ServidorDns.java            # Servidores DNS (Cloudflare Families)
+│   ├── navegador/
+│   │   ├── TipoNavegador.java          # Enum: FIREFOX, CHROMIUM
+│   │   ├── Navegador.java              # Modelo de navegador detectado
+│   │   └── ExtensaoAdblocker.java      # uBlock Origin / uBlock Origin Lite
+│   ├── verificacao/
+│   │   └── ResultadoVerificacao.java   # Resultado smoke tests
+│   └── autorizacao/
+│       └── PlanoAcao.java              # Plano de ações transparente
+├── aplicacao/                           # Implementações
+│   ├── adaptadores/                     # ⭐ Implementações por OS
+│   │   └── linux/                      # ✅ MVP: ÚNICO OS IMPLEMENTADO
+│   │       ├── LinuxDnsChanger.java    # NetworkManager/systemd-resolved
+│   │       ├── LinuxBrowserDetector.java # PATH/.desktop/perfis
+│   │       └── LinuxExtensionInstaller.java # policies.json
+│   │   ├── macos/                       # 🔧 Futuro: apenas design
+│   │   ├── windows/                     # 🔧 Futuro: apenas design
+│   │   └── android/                     # 🔧 Futuro: apenas design
 │   ├── deteccao/
+│   │   ├── DetectorSistemaService.java # Detecta Linux/Windows/Mac
 │   │   ├── DetectorDistroService.java  # Detecta Debian/Fedora/Arch
 │   │   └── DetectorNavegadorService.java # Detecta Firefox/Chromium
 │   ├── dns/
-│   │   └── ConfiguradorDnsService.java # Troca DNS do sistema
-│   └── extensao/
-│       └── InstaladorExtensaoService.java # Instala uBlock Origin/Lite
+│   │   ├── ConfiguradorDnsService.java # Troca DNS Linux
+│   │   └── ConfiguradorDnsWindowsService.java # Esboço Windows
+│   ├── extensao/
+│   │   └── InstaladorExtensaoService.java # Instala uBlock Origin/Lite
+│   ├── verificacao/
+│   │   └── VerificacaoDnsService.java  # Smoke tests pós-DNS
+│   └── autorizacao/
+│       └── AutorizadorService.java     # Sistema autorização
 └── cli/
     └── GuiaLarCli.java                  # Interface linha de comando
-
-src/main/resources/
-├── application.properties               # Configurações
-└── dns-servers.properties              # Lista de servidores DNS seguros
 ```
 
 ---
 
-## 🎯 Arquitetura - Módulos
+## 🏗️ Arquitetura Multi-OS (Design Futuro)
+
+### Interfaces Definidas (Core Comum)
+
+| Interface | Responsabilidade | Implementações |
+|-----------|-----------------|----------------|
+| `SistemaOperacional` | Detectar OS | Linux ✅, Mac 🔧, Windows 🔧, Android 🔧 |
+| `DnsChanger` | Trocar DNS | LinuxDnsChanger ✅ |
+| `BrowserDetector` | Detectar browsers | LinuxBrowserDetector ✅ |
+| `ExtensionInstaller` | Instalar extensões | LinuxExtensionInstaller ✅ |
+
+### Diferenças Técnicas por OS (Documentadas)
+
+#### ✅ Linux (MVP - Implementado)
+- **DNS:** NetworkManager (nmcli), systemd-resolved (resolvectl), Netplan
+- **Browsers:** PATH `/usr/bin/`, `.desktop` files, perfis `~/.mozilla/`, `~/.config/`
+- **Extensões:** `policies.json` (Firefox), managed policies (Chromium)
+- **Distros:** Debian, Ubuntu, Fedora, Arch
+
+#### 🔧 macOS (Futuro - Interface apenas)
+- **DNS:** `networksetup`, `scutil` (**≠** NetworkManager/systemd-resolved!)
+- **Browsers:** `/Applications/*.app/`, Homebrew `/opt/homebrew/Caskroom/`
+- **Perfis:** `~/Library/Application Support/Firefox/`, `~/Library/Application Support/Google/Chrome/`
+- **Extensões:** Similar a Linux mas caminhos diferentes
+
+#### 🔧 Windows (Futuro - Interface apenas)
+- **DNS:** `netsh`, PowerShell `Set-DnsClientServerAddress` (**≠** nmcli!)
+- **Browsers:** `C:\Program Files\`, `C:\Program Files (x86)\`, Registry
+- **AppData:** `%LOCALAPPDATA%\`, `%APPDATA%\`
+- **Extensões:** Registry `HKLM\SOFTWARE\Policies\`
+
+#### 🔧 Android (Futuro - Interface apenas)
+- **DNS:** Private DNS over TLS (sem root, **≠** desktop)
+  - Não muda DNS do sistema como desktop
+  - Usuário configura manualmente em Settings
+- **Browsers:** `pm list packages` (sem acesso a perfis sem root)
+- **Extensões:** Instalação manual via store (Play Store, F-Droid)
+- **Limitações severas:** Sem root = sem controle total
+
+---
+
+## 🎯 Arquitetura - Módulos Linux (MVP)
 
 ### 1. Detecção de Distribuição
 Identifica se o sistema é Debian, Fedora ou Arch Linux através de:
