@@ -115,9 +115,49 @@ jobs:
     steps:
     - name: Check results
       run: |
-        echo "🎉 Todos os testes passaram!"
-        echo "✅ Build"
-        echo "✅ Debian 12"
-        echo "✅ Ubuntu 24.04"
-        echo "✅ Fedora 40"
-        echo "✅ Arch Linux"
+        echo "📊 RELATÓRIO DE TESTES"
+        echo "======================"
+        
+        # Verificar cada job
+        BUILD_STATUS="${{ needs.build.result }}"
+        DEBIAN_STATUS="${{ needs.smoke-test-debian.result }}"
+        UBUNTU_STATUS="${{ needs.smoke-test-ubuntu.result }}"
+        FEDORA_STATUS="${{ needs.smoke-test-fedora.result }}"
+        ARCH_STATUS="${{ needs.smoke-test-arch.result }}"
+        
+        # Função para exibir status
+        function show_status() {
+          if [ "$2" == "success" ]; then
+            echo "✅ $1: PASSOU"
+          elif [ "$2" == "failure" ]; then
+            echo "❌ $1: FALHOU"
+          elif [ "$2" == "cancelled" ]; then
+            echo "🚫 $1: CANCELADO"
+          elif [ "$2" == "skipped" ]; then
+            echo "⏭️  $1: PULADO"
+          else
+            echo "⚠️  $1: $2"
+          fi
+        }
+        
+        show_status "Build" "$BUILD_STATUS"
+        show_status "Debian 12" "$DEBIAN_STATUS"
+        show_status "Ubuntu 24.04" "$UBUNTU_STATUS"
+        show_status "Fedora 40" "$FEDORA_STATUS"
+        show_status "Arch Linux" "$ARCH_STATUS"
+        
+        echo ""
+        echo "======================"
+        
+        # Verificar se todos passaram
+        if [ "$BUILD_STATUS" == "success" ] && \
+           [ "$DEBIAN_STATUS" == "success" ] && \
+           [ "$UBUNTU_STATUS" == "success" ] && \
+           [ "$FEDORA_STATUS" == "success" ] && \
+           [ "$ARCH_STATUS" == "success" ]; then
+          echo "🎉 TODOS OS TESTES PASSARAM!"
+          exit 0
+        else
+          echo "❌ ALGUNS TESTES FALHARAM"
+          exit 1
+        fi
