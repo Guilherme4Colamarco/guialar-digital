@@ -1,0 +1,54 @@
+name: Quick Check
+
+on:
+  push:
+    branches: [ main, cursor/** ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  quick-build:
+    name: Quick Build Check
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout código
+      uses: actions/checkout@v4
+      
+    - name: Configurar Java 17
+      uses: actions/setup-java@v4
+      with:
+        distribution: 'temurin'
+        java-version: '17'
+        
+    - name: Instalar Apache Ant
+      run: |
+        sudo apt-get update -qq
+        sudo apt-get install -y ant
+        
+    - name: Compilar código
+      run: ant clean compile
+      
+    - name: Criar JAR
+      run: ant jar
+      
+    - name: Verificar estrutura
+      run: |
+        echo "📦 Verificando estrutura do projeto..."
+        echo ""
+        echo "✅ Código compilado:"
+        ls -1 build/classes/br/uniube/pi/guialar/ | head -5
+        echo ""
+        echo "✅ JAR criado:"
+        ls -lh build/jar/guialar-digital.jar
+        echo ""
+        echo "✅ Classes principais:"
+        find build/classes -name "*.class" | wc -l
+        echo " classes compiladas"
+        
+    - name: Status
+      run: |
+        echo "🎉 Quick check passou!"
+        echo "✅ Compilação OK"
+        echo "✅ JAR gerado"
+        echo "✅ Estrutura OK"

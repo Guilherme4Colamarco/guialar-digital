@@ -1,0 +1,42 @@
+FROM fedora:40
+
+LABEL maintainer="GuiaLar Digital"
+LABEL description="Smoke test environment - Fedora 40"
+
+# Instalar dependências
+RUN dnf install -y \
+    java-17-openjdk-devel \
+    ant \
+    bind-utils \
+    firefox \
+    chromium \
+    curl \
+    git \
+    && dnf clean all
+
+WORKDIR /app
+
+# Copiar código
+COPY . /app
+
+# Compilar
+RUN ant clean jar
+
+# Verificar build
+RUN test -f build/jar/guialar-digital.jar || exit 1
+
+CMD ["sh", "-c", "echo '=== GuiaLar Digital - Smoke Test Fedora 40 ===' && \
+                  java -version && \
+                  ant -version && \
+                  echo '' && \
+                  echo 'JAR criado:' && \
+                  ls -lh build/jar/guialar-digital.jar && \
+                  echo '' && \
+                  echo 'Distribuição detectada:' && \
+                  cat /etc/os-release | grep PRETTY_NAME && \
+                  echo '' && \
+                  echo 'Navegadores instalados:' && \
+                  which firefox && \
+                  which chromium && \
+                  echo '' && \
+                  echo '✅ Smoke test passou - Fedora 40'"]

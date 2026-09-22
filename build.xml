@@ -1,0 +1,124 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project name="GuiaLarDigital" default="jar" basedir=".">
+    <description>
+        GuiaLar Digital - Assistente para configuração de DNS seguro e adblockers em Linux
+        Projeto Integrados I - Uniube
+    </description>
+
+    <!-- Propriedades do projeto -->
+    <property name="src.dir" location="src/main/java"/>
+    <property name="build.dir" location="build"/>
+    <property name="classes.dir" location="${build.dir}/classes"/>
+    <property name="jar.dir" location="${build.dir}/jar"/>
+    <property name="lib.dir" location="lib"/>
+    <property name="dist.dir" location="dist"/>
+    
+    <property name="main.class" value="br.uniube.pi.guialar.GuiaLarApplication"/>
+    <property name="jar.name" value="guialar-digital.jar"/>
+    <property name="version" value="0.1.0"/>
+
+    <!-- Classpath -->
+    <path id="classpath">
+        <fileset dir="${lib.dir}" includes="**/*.jar" erroronmissingdir="false"/>
+    </path>
+
+    <!-- Target: init - Cria diretórios necessários -->
+    <target name="init">
+        <echo message="Inicializando build do GuiaLar Digital ${version}..."/>
+        <mkdir dir="${build.dir}"/>
+        <mkdir dir="${classes.dir}"/>
+        <mkdir dir="${jar.dir}"/>
+        <mkdir dir="${lib.dir}"/>
+        <mkdir dir="${dist.dir}"/>
+    </target>
+
+    <!-- Target: clean - Remove arquivos compilados -->
+    <target name="clean" description="Remove arquivos de build">
+        <echo message="Limpando diretórios de build..."/>
+        <delete dir="${build.dir}"/>
+        <delete dir="${dist.dir}"/>
+    </target>
+
+    <!-- Target: compile - Compila o código Java -->
+    <target name="compile" depends="init" description="Compila o código-fonte Java">
+        <echo message="Compilando código-fonte..."/>
+        <javac srcdir="${src.dir}" 
+               destdir="${classes.dir}"
+               includeantruntime="false"
+               encoding="UTF-8"
+               source="17"
+               target="17"
+               debug="true">
+            <classpath refid="classpath"/>
+        </javac>
+        <echo message="Compilação concluída com sucesso!"/>
+    </target>
+
+    <!-- Target: jar - Cria o JAR executável -->
+    <target name="jar" depends="compile" description="Cria o arquivo JAR executável">
+        <echo message="Criando arquivo JAR..."/>
+        <jar destfile="${jar.dir}/${jar.name}" basedir="${classes.dir}">
+            <manifest>
+                <attribute name="Main-Class" value="${main.class}"/>
+                <attribute name="Implementation-Title" value="GuiaLar Digital"/>
+                <attribute name="Implementation-Version" value="${version}"/>
+                <attribute name="Implementation-Vendor" value="Guilherme Amaral - Uniube"/>
+            </manifest>
+        </jar>
+        <echo message="JAR criado: ${jar.dir}/${jar.name}"/>
+    </target>
+
+    <!-- Target: dist - Cria distribuição completa -->
+    <target name="dist" depends="jar" description="Cria distribuição completa">
+        <echo message="Criando distribuição..."/>
+        <copy file="${jar.dir}/${jar.name}" todir="${dist.dir}"/>
+        <copy todir="${dist.dir}/lib">
+            <fileset dir="${lib.dir}" includes="**/*.jar" erroronmissingdir="false"/>
+        </copy>
+        <copy file="README.md" todir="${dist.dir}"/>
+        <echo message="Distribuição criada em: ${dist.dir}"/>
+    </target>
+
+    <!-- Target: run - Executa a aplicação (requer sudo) -->
+    <target name="run" depends="jar" description="Executa a aplicação">
+        <echo message="ATENÇÃO: Esta aplicação requer privilégios administrativos!"/>
+        <echo message="Execute com: sudo ant run"/>
+        <echo message=""/>
+        <java jar="${jar.dir}/${jar.name}" fork="true">
+            <classpath>
+                <path refid="classpath"/>
+            </classpath>
+        </java>
+    </target>
+
+    <!-- Target: rebuild - Limpa e reconstrói tudo -->
+    <target name="rebuild" depends="clean,jar" description="Limpa e reconstrói o projeto">
+        <echo message="Rebuild concluído!"/>
+    </target>
+
+    <!-- Target: help - Mostra ajuda -->
+    <target name="help" description="Mostra ajuda sobre os targets disponíveis">
+        <echo message=""/>
+        <echo message="╔════════════════════════════════════════════════════════════════╗"/>
+        <echo message="║         GuiaLar Digital ${version} - Build com Apache Ant        ║"/>
+        <echo message="╚════════════════════════════════════════════════════════════════╝"/>
+        <echo message=""/>
+        <echo message="Targets disponíveis:"/>
+        <echo message=""/>
+        <echo message="  ant clean    - Remove arquivos de build"/>
+        <echo message="  ant compile  - Compila o código-fonte"/>
+        <echo message="  ant jar      - Cria o JAR executável (padrão)"/>
+        <echo message="  ant dist     - Cria distribuição completa"/>
+        <echo message="  ant run      - Executa a aplicação (requer sudo)"/>
+        <echo message="  ant rebuild  - Limpa e reconstrói tudo"/>
+        <echo message="  ant help     - Mostra esta ajuda"/>
+        <echo message=""/>
+        <echo message="Exemplos:"/>
+        <echo message=""/>
+        <echo message="  ant jar                 # Compila e cria o JAR"/>
+        <echo message="  sudo ant run            # Executa a aplicação"/>
+        <echo message="  sudo java -jar build/jar/${jar.name}  # Executa diretamente"/>
+        <echo message=""/>
+    </target>
+
+</project>

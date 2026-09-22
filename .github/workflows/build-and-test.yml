@@ -1,0 +1,163 @@
+name: Build and Test
+
+on:
+  push:
+    branches: [ main, cursor/** ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    name: Build JAR
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout código
+      uses: actions/checkout@v4
+      
+    - name: Configurar Java 17
+      uses: actions/setup-java@v4
+      with:
+        distribution: 'temurin'
+        java-version: '17'
+        
+    - name: Instalar Apache Ant
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y ant
+        
+    - name: Verificar versões
+      run: |
+        java -version
+        ant -version
+        
+    - name: Compilar com Ant
+      run: ant clean jar
+      
+    - name: Verificar JAR criado
+      run: |
+        ls -lh build/jar/guialar-digital.jar
+        test -f build/jar/guialar-digital.jar
+        
+    - name: Upload do JAR
+      uses: actions/upload-artifact@v4
+      with:
+        name: guialar-digital-jar
+        path: build/jar/guialar-digital.jar
+        retention-days: 7
+
+  smoke-test-debian:
+    name: Smoke Test - Debian 12
+    runs-on: ubuntu-latest
+    needs: build
+    
+    steps:
+    - name: Checkout código
+      uses: actions/checkout@v4
+      
+    - name: Build imagem Docker Debian
+      run: docker build -t guialar-debian -f docker/Dockerfile.debian .
+      
+    - name: Run smoke test Debian
+      run: docker run --rm guialar-debian
+      
+  smoke-test-ubuntu:
+    name: Smoke Test - Ubuntu 24.04
+    runs-on: ubuntu-latest
+    needs: build
+    
+    steps:
+    - name: Checkout código
+      uses: actions/checkout@v4
+      
+    - name: Build imagem Docker Ubuntu
+      run: docker build -t guialar-ubuntu -f docker/Dockerfile.ubuntu .
+      
+    - name: Run smoke test Ubuntu
+      run: docker run --rm guialar-ubuntu
+
+  smoke-test-fedora:
+    name: Smoke Test - Fedora 40
+    runs-on: ubuntu-latest
+    needs: build
+    
+    steps:
+    - name: Checkout código
+      uses: actions/checkout@v4
+      
+    - name: Build imagem Docker Fedora
+      run: docker build -t guialar-fedora -f docker/Dockerfile.fedora .
+      
+    - name: Run smoke test Fedora
+      run: docker run --rm guialar-fedora
+
+  smoke-test-arch:
+    name: Smoke Test - Arch Linux
+    runs-on: ubuntu-latest
+    needs: build
+    
+    steps:
+    - name: Checkout código
+      uses: actions/checkout@v4
+      
+    - name: Build imagem Docker Arch
+      run: docker build -t guialar-arch -f docker/Dockerfile.arch .
+      
+    - name: Run smoke test Arch
+      run: docker run --rm guialar-arch
+
+  report:
+    name: Report Status
+    runs-on: ubuntu-latest
+    needs: [build, smoke-test-debian, smoke-test-ubuntu, smoke-test-fedora, smoke-test-arch]
+    if: always()
+    
+    steps:
+    - name: Check results
+      run: |
+        echo "📊 RELATÓRIO DE TESTES"
+        echo "======================"
+        
+        # Verificar cada job
+        BUILD_STATUS="${{ needs.build.result }}"
+        DEBIAN_STATUS="${{ needs.smoke-test-debian.result }}"
+        UBUNTU_STATUS="${{ needs.smoke-test-ubuntu.result }}"
+        FEDORA_STATUS="${{ needs.smoke-test-fedora.result }}"
+        ARCH_STATUS="${{ needs.smoke-test-arch.result }}"
+        
+        # Função para exibir status
+        function show_status() {
+          if [ "$2" == "success" ]; then
+            echo "✅ $1: PASSOU"
+          elif [ "$2" == "failure" ]; then
+            echo "❌ $1: FALHOU"
+          elif [ "$2" == "cancelled" ]; then
+            echo "🚫 $1: CANCELADO"
+          elif [ "$2" == "skipped" ]; then
+            echo "⏭️  $1: PULADO"
+          else
+            echo "⚠️  $1: $2"
+          fi
+        }
+        
+        show_status "Build" "$BUILD_STATUS"
+        show_status "Debian 12" "$DEBIAN_STATUS"
+        show_status "Ubuntu 24.04" "$UBUNTU_STATUS"
+        show_status "Fedora 40" "$FEDORA_STATUS"
+        show_status "Arch Linux" "$ARCH_STATUS"
+        
+        echo ""
+        echo "======================"
+        
+        # Verificar se todos passaram
+        if [ "$BUILD_STATUS" == "success" ] && \
+           [ "$DEBIAN_STATUS" == "success" ] && \
+           [ "$UBUNTU_STATUS" == "success" ] && \
+           [ "$FEDORA_STATUS" == "success" ] && \
+           [ "$ARCH_STATUS" == "success" ]; then
+          echo "🎉 TODOS OS TESTES PASSARAM!"
+          exit 0
+        else
+          echo "❌ ALGUNS TESTES FALHARAM"
+          exit 1
+        fi
