@@ -157,7 +157,8 @@ public class VerificacaoDnsService {
             String recordType = tipoIp.equals("IPv6") ? "AAAA" : "A";
             
             ProcessBuilder pb = new ProcessBuilder(
-                "dig", "@" + dnsServer, url, recordType, "+short"
+                "dig", "@" + dnsServer, url, recordType, "+short",
+                "+time=2", "+tries=1"
             );
             pb.redirectErrorStream(true);
             Process process = pb.start();

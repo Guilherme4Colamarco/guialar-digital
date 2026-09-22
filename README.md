@@ -100,9 +100,31 @@ ant clean     # Remove arquivos compilados
 ant compile   # Compila o código-fonte
 ant jar       # Cria o JAR executável (padrão)
 ant dist      # Cria distribuição completa
-ant run       # Executa a aplicação (requer sudo)
+ant run       # Executa a aplicação em modo CLI (requer sudo)
+ant run-gui   # Executa a interface gráfica (Swing)
 ant rebuild   # Limpa e reconstrói tudo
 ```
+
+### Interface Gráfica (GUI)
+
+Além da CLI, o GuiaLar Digital possui uma **interface gráfica** (Java Swing, sem
+dependências externas). Ela exibe o sistema detectado, os navegadores, o plano de
+ações e um painel de log da execução em tempo real.
+
+```bash
+# Compila e abre a interface gráfica
+ant run-gui
+
+# Ou diretamente pelo JAR (com privilégios para alterar o DNS):
+sudo java -jar build/jar/guialar-digital.jar --gui
+```
+
+Seleção de modo ao executar o JAR:
+
+- `--gui` força a interface gráfica.
+- `--cli` força o modo linha de comando.
+- Sem flags: usa a GUI quando há ambiente gráfico disponível e cai para a CLI em
+  ambientes headless (servidores, CI, containers).
 
 ---
 

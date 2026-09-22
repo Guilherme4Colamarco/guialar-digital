@@ -8,7 +8,11 @@ import br.uniube.pi.guialar.aplicacao.dns.ConfiguradorDnsService;
 import br.uniube.pi.guialar.aplicacao.dns.ConfiguradorDnsWindowsService;
 import br.uniube.pi.guialar.aplicacao.extensao.InstaladorExtensaoService;
 import br.uniube.pi.guialar.aplicacao.autorizacao.AutorizadorService;
+import br.uniube.pi.guialar.gui.GuiaLarGui;
 import br.uniube.pi.guialar.dominio.sistema.TipoSistema;
+
+import java.awt.GraphicsEnvironment;
+import java.util.Arrays;
 
 /**
  * GuiaLar Digital - Assistente para configuração de DNS seguro e adblockers.
@@ -34,6 +38,35 @@ import br.uniube.pi.guialar.dominio.sistema.TipoSistema;
 public class GuiaLarApplication {
 
     public static void main(String[] args) {
+        if (deveUsarGui(args)) {
+            GuiaLarGui.iniciar();
+            return;
+        }
+
+        executarCli(args);
+    }
+
+    /**
+     * Decide entre interface gráfica e CLI.
+     *
+     * - "--gui" força a GUI; "--cli" força a CLI.
+     * - Sem flags: usa a GUI quando há ambiente gráfico disponível,
+     *   caindo para a CLI em ambientes headless (servidores, CI, containers).
+     */
+    private static boolean deveUsarGui(String[] args) {
+        boolean forcarCli = Arrays.asList(args).contains("--cli");
+        boolean forcarGui = Arrays.asList(args).contains("--gui");
+
+        if (forcarCli) {
+            return false;
+        }
+        if (forcarGui) {
+            return true;
+        }
+        return !GraphicsEnvironment.isHeadless();
+    }
+
+    private static void executarCli(String[] args) {
         DetectorSistemaService detectorSistema = new DetectorSistemaService();
         TipoSistema sistema = detectorSistema.detectar();
 

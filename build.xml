@@ -85,6 +85,19 @@
         <echo message="Execute com: sudo ant run"/>
         <echo message=""/>
         <java jar="${jar.dir}/${jar.name}" fork="true">
+            <arg value="--cli"/>
+            <classpath>
+                <path refid="classpath"/>
+            </classpath>
+        </java>
+    </target>
+
+    <!-- Target: run-gui - Executa a interface gráfica (Swing) -->
+    <target name="run-gui" depends="jar" description="Executa a interface gráfica">
+        <echo message="Iniciando a interface gráfica do GuiaLar Digital..."/>
+        <echo message="Para alterar o DNS do sistema, execute com privilégios: sudo ant run-gui"/>
+        <java jar="${jar.dir}/${jar.name}" fork="true">
+            <arg value="--gui"/>
             <classpath>
                 <path refid="classpath"/>
             </classpath>
@@ -109,7 +122,8 @@
         <echo message="  ant compile  - Compila o código-fonte"/>
         <echo message="  ant jar      - Cria o JAR executável (padrão)"/>
         <echo message="  ant dist     - Cria distribuição completa"/>
-        <echo message="  ant run      - Executa a aplicação (requer sudo)"/>
+        <echo message="  ant run      - Executa a aplicação em modo CLI (requer sudo)"/>
+        <echo message="  ant run-gui  - Executa a interface gráfica (Swing)"/>
         <echo message="  ant rebuild  - Limpa e reconstrói tudo"/>
         <echo message="  ant help     - Mostra esta ajuda"/>
         <echo message=""/>
