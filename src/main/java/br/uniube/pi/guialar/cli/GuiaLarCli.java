@@ -5,11 +5,13 @@ import br.uniube.pi.guialar.aplicacao.deteccao.DetectorNavegadorService;
 import br.uniube.pi.guialar.aplicacao.dns.ConfiguradorDnsService;
 import br.uniube.pi.guialar.aplicacao.extensao.InstaladorExtensaoService;
 import br.uniube.pi.guialar.aplicacao.autorizacao.AutorizadorService;
+import br.uniube.pi.guialar.aplicacao.verificacao.VerificacaoDnsService;
 import br.uniube.pi.guialar.dominio.distro.InfoDistro;
 import br.uniube.pi.guialar.dominio.dns.ConfiguracaoDns;
 import br.uniube.pi.guialar.dominio.dns.ServidorDns;
 import br.uniube.pi.guialar.dominio.navegador.Navegador;
 import br.uniube.pi.guialar.dominio.autorizacao.PlanoAcao;
+import br.uniube.pi.guialar.dominio.verificacao.ResultadoVerificacao;
 
 import java.util.List;
 
@@ -30,18 +32,21 @@ public class GuiaLarCli {
     private final ConfiguradorDnsService configuradorDns;
     private final InstaladorExtensaoService instaladorExtensao;
     private final AutorizadorService autorizador;
+    private final VerificacaoDnsService verificacaoDns;
 
     public GuiaLarCli(
             DetectorDistroService detectorDistro,
             DetectorNavegadorService detectorNavegador,
             ConfiguradorDnsService configuradorDns,
             InstaladorExtensaoService instaladorExtensao,
-            AutorizadorService autorizador) {
+            AutorizadorService autorizador,
+            VerificacaoDnsService verificacaoDns) {
         this.detectorDistro = detectorDistro;
         this.detectorNavegador = detectorNavegador;
         this.configuradorDns = configuradorDns;
         this.instaladorExtensao = instaladorExtensao;
         this.autorizador = autorizador;
+        this.verificacaoDns = verificacaoDns;
     }
 
     public void run(String... args) throws Exception {
@@ -64,6 +69,7 @@ public class GuiaLarCli {
         }
 
         configurarDns(distro);
+        verificarDns();
         configurarNavegadores(navegadores);
 
         imprimirRodape();
@@ -186,8 +192,17 @@ public class GuiaLarCli {
         System.out.println();
     }
 
+    private void verificarDns() {
+        System.out.println("\n🧪 ETAPA 4: Verificação DNS (Smoke Test)...");
+        System.out.println("─────────────────────────────────────────────────────────────────");
+        System.out.println();
+        
+        List<ResultadoVerificacao> resultados = verificacaoDns.verificar();
+        verificacaoDns.exibirResumo(resultados);
+    }
+
     private void configurarNavegadores(List<Navegador> navegadores) {
-        System.out.println("🌍 ETAPA 4: Configurando navegadores...");
+        System.out.println("🌍 ETAPA 5: Configurando navegadores...");
         System.out.println("─────────────────────────────────────────────────────────────────");
         
         if (navegadores.isEmpty()) {

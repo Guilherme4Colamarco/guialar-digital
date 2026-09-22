@@ -56,13 +56,16 @@ public class GuiaLarApplication {
         ConfiguradorDnsService configuradorDns = new ConfiguradorDnsService();
         InstaladorExtensaoService instaladorExtensao = new InstaladorExtensaoService();
         AutorizadorService autorizador = new AutorizadorService();
+        br.uniube.pi.guialar.aplicacao.verificacao.VerificacaoDnsService verificacaoDns = 
+            new br.uniube.pi.guialar.aplicacao.verificacao.VerificacaoDnsService();
 
         GuiaLarCli cli = new GuiaLarCli(
             detectorDistro,
             detectorNavegador,
             configuradorDns,
             instaladorExtensao,
-            autorizador
+            autorizador,
+            verificacaoDns
         );
 
         try {

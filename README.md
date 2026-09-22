@@ -157,34 +157,97 @@ resolvectl status
 dig @1.1.1.3 example.com
 ```
 
-#### 3. Testar Bloqueio (Smoke Test)
+#### 3. Verificação Automática (Smoke Test Integrado)
 
-**URLs de teste oficiais Cloudflare:**
+**O GuiaLar Digital executa verificação automática pós-DNS!**
 
+Após configurar o DNS, o programa automaticamente:
+- ✅ Testa `malware.testcategory.com` (IPv4 e IPv6)
+- ✅ Testa `nudity.testcategory.com` (IPv4 e IPv6)
+- ✅ Testa `example.com` (IPv4 e IPv6)
+- ✅ Exibe relatório de sucesso/falha
+
+**Resultado esperado no programa:**
+
+```
+🧪 ETAPA 4: Verificação DNS (Smoke Test)...
+─────────────────────────────────────────────────────────────────
+
+🔍 Verificando DNS Cloudflare Families...
+─────────────────────────────────────────────────────────────────
+
+  Testando malware.testcategory.com (IPv4)... ✅ Bloqueado (0.0.0.0)
+  Testando malware.testcategory.com (IPv6)... ✅ Bloqueado (::)
+  Testando nudity.testcategory.com (IPv4)... ✅ Bloqueado (0.0.0.0)
+  Testando nudity.testcategory.com (IPv6)... ✅ Bloqueado (::)
+  Testando example.com (IPv4)... ✅ Permitido (93.184.215.14)
+  Testando example.com (IPv6)... ✅ Permitido (2606:2800:21f:cb07:6820:80da:af6b:8b2c)
+
+─────────────────────────────────────────────────────────────────
+RESUMO DA VERIFICAÇÃO:
+─────────────────────────────────────────────────────────────────
+
+Total de testes: 6
+Sucesso: 6
+Falhas: 0
+
+✅ TODOS OS TESTES PASSARAM!
+   O DNS Cloudflare Families está funcionando corretamente.
+```
+
+#### Teste Manual (Linha de Comando)
+
+**IPv4:**
 ```bash
 # Teste 1: Bloqueio de malware (deve retornar 0.0.0.0)
-dig @1.1.1.3 malware.testcategory.com
+dig @1.1.1.3 malware.testcategory.com +short
 
 # Teste 2: Bloqueio de conteúdo adulto/nudez (deve retornar 0.0.0.0)
-dig @1.1.1.3 nudity.testcategory.com
+dig @1.1.1.3 nudity.testcategory.com +short
 
 # Teste 3: Site normal (deve funcionar)
-dig @1.1.1.3 example.com
+dig @1.1.1.3 example.com +short
+```
+
+**IPv6:**
+```bash
+# Teste 1: Bloqueio de malware (deve retornar ::)
+dig @2606:4700:4700::1113 malware.testcategory.com AAAA +short
+
+# Teste 2: Bloqueio de nudez (deve retornar ::)
+dig @2606:4700:4700::1113 nudity.testcategory.com AAAA +short
+
+# Teste 3: Site normal (deve funcionar)
+dig @2606:4700:4700::1113 example.com AAAA +short
+```
+
+**Alternativa com resolvectl (systemd-resolved):**
+```bash
+resolvectl query malware.testcategory.com
+resolvectl query nudity.testcategory.com
+resolvectl query example.com
 ```
 
 **Resultado esperado:**
 
 ```bash
-# Malware e nudez - BLOQUEADOS
+# IPv4 - Malware e nudez BLOQUEADOS
 $ dig @1.1.1.3 malware.testcategory.com +short
 0.0.0.0
 
 $ dig @1.1.1.3 nudity.testcategory.com +short
 0.0.0.0
 
-# Site normal - PERMITIDO
+# IPv6 - Malware e nudez BLOQUEADOS
+$ dig @2606:4700:4700::1113 malware.testcategory.com AAAA +short
+::
+
+# IPv4/IPv6 - Site normal PERMITIDO
 $ dig @1.1.1.3 example.com +short
 93.184.215.14
+
+$ dig @2606:4700:4700::1113 example.com AAAA +short
+2606:2800:21f:cb07:6820:80da:af6b:8b2c
 ```
 
 **Teste no navegador:**
@@ -198,10 +261,11 @@ curl -I http://nudity.testcategory.com
 curl -I http://example.com
 ```
 
-Se o DNS estiver funcionando corretamente:
-- ✅ `malware.testcategory.com` → bloqueado (0.0.0.0)
-- ✅ `nudity.testcategory.com` → bloqueado (0.0.0.0)
-- ✅ `example.com` → funciona normalmente
+**✅ Checklist de Verificação:**
+- ✅ `malware.testcategory.com` → 0.0.0.0 (IPv4) ou :: (IPv6)
+- ✅ `nudity.testcategory.com` → 0.0.0.0 (IPv4) ou :: (IPv6)
+- ✅ `example.com` → IP válido funcionando
+- ✅ Smoke test automático passou no programa
 
 #### 4. Instalar Navegadores para Teste (Opcional)
 
