@@ -32,6 +32,9 @@ jobs:
       
     - name: Criar JAR
       run: ant jar
+
+    - name: Testes Windows (mocks)
+      run: ant test-windows
       
     - name: Verificar estrutura
       run: |

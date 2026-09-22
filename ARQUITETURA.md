@@ -6,8 +6,8 @@ O GuiaLar Digital segue uma **arquitetura limpa** que separa:
 - **Core comum:** Interfaces e modelos independentes de OS
 - **Adaptadores:** Implementações específicas por sistema operacional
 
-**MVP:** Apenas Linux implementado  
-**Futuro:** Interfaces definidas, sem código funcional para outros OS
+**Implementado:** Linux (completo) + Windows (diagnóstico, DNS PowerShell, guias)  
+**Fora de escopo:** macOS, Android
 
 ---
 
@@ -49,13 +49,15 @@ dominio/
 ```
 aplicacao/
 ├── adaptadores/                    # ⭐ Implementações por OS
-│   └── linux/                     # ✅ MVP: ÚNICO OS IMPLEMENTADO
-│       ├── LinuxDnsChanger.java
-│       ├── LinuxBrowserDetector.java (futuro)
-│       └── LinuxExtensionInstaller.java (futuro)
-│   ├── macos/                      # 🔧 Futuro: vazio (apenas design)
-│   ├── windows/                    # 🔧 Futuro: vazio (apenas design)
-│   └── android/                    # 🔧 Futuro: vazio (apenas design)
+│   ├── linux/
+│   │   ├── LinuxDnsChanger.java
+│   │   └── LinuxBrowserDetector.java
+│   └── windows/
+│       ├── WindowsDnsChanger.java
+│       ├── WindowsBrowserDetector.java
+│       ├── WindowsDnsManifestStore.java
+│       ├── PowerShellExecutor.java
+│       └── WindowsUrlOpener.java
 ├── deteccao/
 │   ├── DetectorSistemaService.java # Detecta Linux/Windows/Mac
 │   ├── DetectorDistroService.java  # Detecta Debian/Fedora/Arch

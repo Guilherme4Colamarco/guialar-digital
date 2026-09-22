@@ -3,7 +3,7 @@
 [![Build and Test](https://github.com/Guilherme4Colamarco/guialar-digital/actions/workflows/build-and-test.yml/badge.svg)](https://github.com/Guilherme4Colamarco/guialar-digital/actions/workflows/build-and-test.yml)
 [![Quick Check](https://github.com/Guilherme4Colamarco/guialar-digital/actions/workflows/quick-check.yml/badge.svg)](https://github.com/Guilherme4Colamarco/guialar-digital/actions/workflows/quick-check.yml)
 
-**Assistente para configuração de DNS seguro e adblockers (Linux + esboço Windows)**
+**Assistente para configuração de DNS seguro e adblockers (Linux + Windows)**
 
 Projeto desenvolvido como parte da disciplina Projetos Integrados I  
 **Curso:** Inteligência Artificial e Ciência de Dados — Uniube  
@@ -13,18 +13,20 @@ Projeto desenvolvido como parte da disciplina Projetos Integrados I
 
 ## 📋 Sobre o Projeto
 
-O GuiaLar Digital é uma aplicação Java que automatiza a configuração de proteções básicas de privacidade e segurança, com foco em **Linux** (MVP completo) e esboço para **Windows**.
+O GuiaLar Digital é uma aplicação **desktop Java** (não web) que automatiza proteções básicas de privacidade e segurança em **Linux** e **Windows**.
 
 ### Escopo do Projeto:
 
-**MVP COMPLETO (Linux):**
-- ✅ Debian, Fedora e Arch Linux (a "trindade sagrada")
-- ✅ Configuração completa de DNS + navegadores + extensões
-- ✅ Testes e verificação
+**Linux (MVP completo):**
+- ✅ Debian, Fedora e Arch Linux
+- ✅ DNS via NetworkManager / systemd-resolved / Netplan + extensões
 
-**ESBOÇO INICIAL (Windows):**
-- 🔧 Interface básica para Windows (PowerShell/Set-DnsClientServerAddress)
-- 🔧 Estrutura preparada, implementação mínima
+**Windows (smoke test / laboratório):**
+- ✅ Detecção de SO, elevação UAC, DNS atual, navegadores (Edge/Chrome/Firefox/Brave)
+- ✅ Diagnóstico **sem admin**
+- ✅ Aplicação de DNS via PowerShell `Set-DnsClientServerAddress` (UAC só na escrita)
+- ✅ Manifesto em `%LOCALAPPDATA%\GuiaLar\` para Desfazer
+- ✅ Degradação graciosa: sem admin/GPO → status **não aplicado**, sem crash
 
 **FORA DO ESCOPO (por enquanto):**
 - ❌ macOS
@@ -59,8 +61,8 @@ O GuiaLar Digital é uma aplicação Java que automatiza a configuração de pro
 
 - **Java 17** ou superior
 - **Apache Ant 1.10+** (sistema de build)
-- **Sistema operacional:** Debian, Fedora ou Arch Linux (MVP completo)
-- **Privilégios:** sudo/root para alterar DNS do sistema
+- **Sistema operacional:** Linux (Debian/Fedora/Arch) ou Windows 10/11
+- **Privilégios:** só necessários para **aplicar** DNS (sudo/pkexec no Linux; UAC no Windows). Diagnóstico roda sem admin.
 
 ### Instalação e Compilação
 
@@ -95,15 +97,73 @@ O GuiaLar Digital é uma aplicação Java que automatiza a configuração de pro
 ### Comandos Ant Disponíveis
 
 ```bash
-ant help      # Mostra ajuda sobre os comandos
-ant clean     # Remove arquivos compilados
-ant compile   # Compila o código-fonte
-ant jar       # Cria o JAR executável (padrão)
-ant dist      # Cria distribuição completa
-ant run       # Executa a aplicação em modo CLI (requer sudo)
-ant run-gui   # Executa a interface gráfica (Swing)
-ant rebuild   # Limpa e reconstrói tudo
+ant help            # Mostra ajuda sobre os comandos
+ant clean           # Remove arquivos compilados
+ant compile         # Compila o código-fonte
+ant jar             # Cria o JAR executável (padrão)
+ant test-windows    # Testes do adapter Windows (PowerShell mockado; roda no Linux)
+ant dist            # Distribuição completa
+ant dist-windows    # Pacote para copiar ao PC Windows do laboratório
+ant run             # CLI (Linux: sudo para DNS)
+ant run-gui         # Interface gráfica (Swing)
+ant run-diagnostico # Diagnóstico somente leitura
+ant rebuild         # Limpa e reconstrói tudo
 ```
+
+### Windows — smoke test em PC de laboratório (sem admin)
+
+Objetivo: abrir o app numa máquina trancada da universidade, ver o diagnóstico e
+confirmar que falhas de DNS (UAC/GPO) aparecem como **não aplicado** sem travar.
+
+**1. No seu Linux (ou CI), gere o pacote:**
+
+```bash
+ant dist-windows
+# Artefatos em dist/windows/:
+#   guialar-digital.jar
+#   run-windows.bat
+#   smoke-diagnostico-windows.bat
+#   LEIA-ME-WINDOWS.txt
+```
+
+**2. Copie a pasta `dist/windows/` para o PC Windows** (pendrive / download).
+
+**3. No lab (conta de aluno, sem admin):**
+
+```bat
+REM Precisa de Java 17+ no PATH (JDK da universidade ou portátil)
+smoke-diagnostico-windows.bat
+
+REM ou:
+java -jar guialar-digital.jar --cli --diagnostico
+```
+
+O que esperar:
+
+| Ação | Conta limitada | Com admin + UAC OK |
+|------|----------------|--------------------|
+| Abrir GUI / diagnóstico | OK | OK |
+| Ver OS, arch, DNS atual*, navegadores | OK (DNS=best-effort) | OK |
+| Aplicar DNS | **não aplicado** + motivo, sistema intacto | aplicado + manifesto |
+| Guias uBlock / Shields / DoH | OK | OK |
+
+\*Se `Get-DnsClientServerAddress` estiver bloqueado por GPO, o app informa
+**leitura bloqueada** e segue com o restante.
+
+**Flags CLI úteis no Windows:**
+
+```bat
+java -jar guialar-digital.jar --cli --diagnostico
+java -jar guialar-digital.jar --cli --aplicar-dns
+java -jar guialar-digital.jar --cli --desfazer
+java -jar guialar-digital.jar --cli --abrir-guias
+java -jar guialar-digital.jar --gui
+```
+
+Manifesto / desfazer: `%LOCALAPPDATA%\GuiaLar\dns-manifest.properties`
+
+> Em rede de campus filtrada o app **ainda abre**. Só afirmamos filtro ativo se
+> o DNS GuiaLar estiver **aplicado** (nunca quando a escrita falhou).
 
 ### Interface Gráfica (GUI)
 
@@ -394,11 +454,13 @@ src/main/java/br/uniube/pi/guialar/
 - **Perfis:** `~/Library/Application Support/Firefox/`, `~/Library/Application Support/Google/Chrome/`
 - **Extensões:** Similar a Linux mas caminhos diferentes
 
-#### 🔧 Windows (Futuro - Interface apenas)
-- **DNS:** `netsh`, PowerShell `Set-DnsClientServerAddress` (**≠** nmcli!)
-- **Browsers:** `C:\Program Files\`, `C:\Program Files (x86)\`, Registry
-- **AppData:** `%LOCALAPPDATA%\`, `%APPDATA%\`
-- **Extensões:** Registry `HKLM\SOFTWARE\Policies\`
+#### ✅ Windows (smoke test implementado)
+- **DNS:** PowerShell `Set-DnsClientServerAddress` / `Get-DnsClientServerAddress` (**≠** nmcli!)
+- **Elevação:** UAC somente na escrita; leitura/diagnóstico sem admin
+- **Manifesto:** `%LOCALAPPDATA%\GuiaLar\dns-manifest.properties`
+- **Browsers:** `C:\Program Files\`, `Program Files (x86)`, `%LOCALAPPDATA%`, App Paths (registry)
+- **Abrir links:** `Start-Process` / `cmd start` (equivalente a `xdg-open`)
+- **Guias:** Edge/Chrome → uBlock Origin Lite + DoH; Firefox → uBlock Origin; Brave → Shields + DNS seguro
 
 #### 🔧 Android (Futuro - Interface apenas)
 - **DNS:** Private DNS over TLS (sem root, **≠** desktop)

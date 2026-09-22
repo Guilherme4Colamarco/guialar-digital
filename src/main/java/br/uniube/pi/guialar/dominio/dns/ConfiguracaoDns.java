@@ -52,4 +52,33 @@ public class ConfiguracaoDns {
             "Erro ao configurar DNS: " + mensagemErro
         );
     }
+
+    /**
+     * DNS não foi aplicado (sem privilégios, GPO, UAC negado).
+     * O sistema permanece inalterado — mensagem clara em português.
+     */
+    public static ConfiguracaoDns naoAplicado(String metodo, String motivo) {
+        return new ConfiguracaoDns(
+            null,
+            false,
+            metodo,
+            "DNS não aplicado: " + motivo
+        );
+    }
+
+    /**
+     * Sucesso com aviso adicional (ex.: manifesto não salvo).
+     */
+    public static ConfiguracaoDns sucessoComAviso(ServidorDns servidor, String metodo, String aviso) {
+        return new ConfiguracaoDns(
+            servidor,
+            true,
+            metodo,
+            String.format("DNS configurado: %s (%s / %s). Aviso: %s",
+                servidor.getNome(),
+                servidor.getPrimario(),
+                servidor.getSecundario(),
+                aviso)
+        );
+    }
 }
