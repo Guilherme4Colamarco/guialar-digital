@@ -285,27 +285,171 @@ Instala adblocker apropriado:
 
 ---
 
-## 📋 Compatibilidade
+## 📋 Compatibilidade e Matriz de Testes
 
-| Sistema Operacional | Status | Detecção | DNS | Navegadores | Extensões |
-|---------------------|--------|----------|-----|-------------|-----------|
-| **Linux (MVP)**     |        |          |     |             |           |
-| Debian 11+          | ✅ Completo | ✅ | ✅ | ✅ | ✅ |
-| Ubuntu 20.04+       | ✅ Completo | ✅ | ✅ | ✅ | ✅ |
-| Fedora 38+          | ✅ Completo | ✅ | ✅ | ✅ | ✅ |
-| Arch Linux          | ✅ Completo | ✅ | ✅ | ✅ | ✅ |
-| **Windows**         |        |          |     |             |           |
-| Windows 10/11       | 🔧 Esboço | 🔧 | 🔧 | 🔧 | 🔧 |
-| **Fora do Escopo**  |        |          |     |             |           |
-| macOS               | ❌ | ❌ | ❌ | ❌ | ❌ |
-| Android/iOS         | ❌ | ❌ | ❌ | ❌ | ❌ |
+### Distribuições Linux Suportadas
+
+| Distribuição | Família | Status | Detecção | DNS | Navegadores | Extensões | Testado |
+|--------------|---------|--------|----------|-----|-------------|-----------|---------|
+| **Debian 11+** | Debian | ✅ Completo | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **Ubuntu 20.04+** | Debian | ✅ Completo | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **Big Linux** | Debian (baseado Ubuntu) | ✅ Completo | ✅ | ✅ | ✅ | ✅ | 🔧 A testar |
+| **Kali Linux** | Debian | ✅ Completo | ✅ | ✅ | ✅ | ✅ | 🔧 A testar |
+| **Fedora 38+** | Fedora | ✅ Completo | ✅ | ✅ | ✅ | ✅ | 🔧 A testar |
+| **Arch Linux** | Arch | ✅ Completo | ✅ | ✅ | ✅ | ✅ | 🔧 A testar |
+| **EndeavourOS** | Arch | ✅ Completo | ✅ | ✅ | ✅ | ✅ | 🔧 A testar |
+| **CachyOS** | Arch | ✅ Completo | ✅ | ✅ | ✅ | ✅ | 🔧 A testar |
+
+**Nota sobre distribuições:**
+- **Big Linux:** Baseado em Ubuntu, distribuição nacional brasileira - alvo prioritário público geral
+- **Kali Linux:** Baseado em Debian, caso extremo de segurança - não é proxy do Arch
+- **EndeavourOS/CachyOS:** Família Arch, alternativas populares ao Arch vanilla
+
+### Outras Plataformas
+
+| Sistema Operacional | Status | Notas |
+|---------------------|--------|-------|
+| **Windows 10/11**   | 🔧 Esboço | Instruções PowerShell manuais |
+| **macOS**           | ❌ Fora do escopo | Não planejado |
+| **Android/iOS**     | ❌ Fora do escopo | Não planejado |
 
 ### Gerenciadores de Rede Suportados (Linux)
 
-- ✅ NetworkManager (nmcli)
-- ✅ systemd-resolved (resolvectl)
-- ✅ Netplan (Ubuntu moderno)
-- ✅ /etc/resolv.conf (fallback manual)
+- ✅ **NetworkManager** (nmcli) - Padrão Fedora, Ubuntu Desktop, Arch (instalável)
+- ✅ **systemd-resolved** (resolvectl) - Padrão Ubuntu moderno, Arch
+- ✅ **Netplan** - Ubuntu Server/Cloud moderno
+- ✅ **/etc/resolv.conf** (fallback manual) - Qualquer distro
+
+---
+
+## 🧪 Matriz de Testes
+
+### Ambientes de Teste Recomendados
+
+O GuiaLar Digital foi projetado para ser testado em diferentes ambientes, cada um com suas vantagens:
+
+#### 1. Docker (Smoke Tests Rápidos)
+
+**Bom para:**
+- ✅ Smoke test do JAR Java
+- ✅ Detecção de pacotes instalados
+- ✅ Detecção de navegadores
+- ✅ Verificação de compilação
+
+**Limitações:**
+- ⚠️ Sem systemd completo por padrão
+- ⚠️ NetworkManager/systemd-resolved não funcionam completamente
+- ⚠️ Configuração DNS limitada
+
+**Exemplo Dockerfile:**
+```dockerfile
+FROM debian:12
+RUN apt-get update && apt-get install -y \
+    openjdk-17-jdk \
+    ant \
+    dnsutils \
+    firefox-esr \
+    chromium
+COPY . /app
+WORKDIR /app
+RUN ant jar
+CMD ["java", "-jar", "build/jar/guialar-digital.jar"]
+```
+
+#### 2. VM com systemd (QEMU/libvirt/VirtualBox)
+
+**Bom para:**
+- ✅ Testes completos de troca de DNS
+- ✅ NetworkManager funcional
+- ✅ systemd-resolved funcional
+- ✅ Ambiente mais fiel ao uso real
+- ✅ Testes de navegadores com interface gráfica
+
+**Recomendado para:**
+- Testes finais antes de release
+- Validação em distribuições específicas (Big Linux, EndeavourOS, etc.)
+- Testes de integração completa
+
+**Distribuições para teste prioritário:**
+1. **Ubuntu 24.04 LTS** (base comum)
+2. **Big Linux** (público brasileiro, baseado Ubuntu)
+3. **Fedora 40** (família RHEL)
+4. **EndeavourOS** ou **CachyOS** (família Arch user-friendly)
+5. **Kali Linux** (caso extremo de segurança)
+
+#### 3. Container com systemd
+
+**Exemplo docker-compose.yml:**
+```yaml
+version: '3'
+services:
+  debian-systemd:
+    image: debian:12
+    privileged: true
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:ro
+      - .:/app
+    command: /lib/systemd/systemd
+```
+
+**Bom para:**
+- ✅ systemd-resolved testável
+- ✅ Mais leve que VM
+- ✅ Automação de testes
+
+**Limitações:**
+- ⚠️ Requer modo privilegiado
+- ⚠️ NetworkManager pode ter limitações
+
+### Estratégia de Testes Sugerida
+
+```
+Fase 1: Desenvolvimento (Docker)
+├─ Smoke test Java/JAR
+├─ Detecção de distro
+└─ Detecção de navegadores
+
+Fase 2: Integração (VM ou container systemd)
+├─ Troca de DNS completa
+├─ NetworkManager
+├─ systemd-resolved
+└─ Netplan (Ubuntu)
+
+Fase 3: Validação (VM com GUI)
+├─ Big Linux (público brasileiro)
+├─ EndeavourOS/CachyOS (Arch-family)
+├─ Fedora (RHEL-family)
+└─ Kali (caso extremo)
+
+Fase 4: Testes de Campo
+└─ Usuários reais nas distros-alvo
+```
+
+### Comandos de Teste Rápido
+
+```bash
+# Fase 1: Docker smoke test
+docker build -t guialar-test .
+docker run guialar-test
+
+# Fase 2: VM ou container systemd
+# (criar VM com distro-alvo via virt-manager/VirtualBox)
+sudo java -jar build/jar/guialar-digital.jar
+
+# Fase 3: Validação
+dig @1.1.1.3 malware.testcategory.com  # deve retornar 0.0.0.0
+dig @1.1.1.3 nudity.testcategory.com   # deve retornar 0.0.0.0
+```
+
+---
+
+## 📝 Nota sobre Branding Futuro
+
+O projeto está atualmente nomeado **GuiaLar Digital**. Existe uma consideração futura de alinhamento ao ecossistema **Big Linux** (distribuição brasileira baseada em Ubuntu) com possíveis nomes como "Big Family" ou "Big Parental". 
+
+**Status:** Apenas em consideração - nenhuma mudança de nome está planejada no momento.
+
+---
 
 ---
 

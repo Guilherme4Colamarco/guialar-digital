@@ -17,8 +17,12 @@ Thumbs.db
 
 # Logs
 *.log
+/tmp/guialar-*.log
 
 # Temporary files
 *.tmp
 *.bak
 *~
+
+# Docker volumes
+.docker/

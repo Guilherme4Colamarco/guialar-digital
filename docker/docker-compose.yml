@@ -1,0 +1,53 @@
+version: '3.8'
+
+services:
+  # Smoke test: Debian 12
+  debian:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.debian
+    container_name: guialar-test-debian
+    volumes:
+      - ..:/app
+
+  # Smoke test: Ubuntu 24.04
+  ubuntu:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.ubuntu
+    container_name: guialar-test-ubuntu
+    volumes:
+      - ..:/app
+
+  # Smoke test: Fedora 40
+  fedora:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.fedora
+    container_name: guialar-test-fedora
+    volumes:
+      - ..:/app
+
+  # Smoke test: Arch Linux
+  arch:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.arch
+    container_name: guialar-test-arch
+    volumes:
+      - ..:/app
+
+  # Debian com systemd (para testes DNS)
+  debian-systemd:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.debian-systemd
+    container_name: guialar-test-debian-systemd
+    privileged: true
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:ro
+      - ..:/app
+    tmpfs:
+      - /run
+      - /tmp
+    command: /lib/systemd/systemd
