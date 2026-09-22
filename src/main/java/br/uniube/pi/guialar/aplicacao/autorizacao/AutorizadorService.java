@@ -53,10 +53,18 @@ public class AutorizadorService {
     private boolean confirmarUsuario() {
         System.out.print("Deseja continuar? (s/N): ");
         
-        Scanner scanner = new Scanner(System.in);
-        String resposta = scanner.nextLine().trim().toLowerCase();
-        
-        return resposta.equals("s") || resposta.equals("sim");
+        try {
+            Scanner scanner = new Scanner(System.in);
+            if (!scanner.hasNextLine()) {
+                System.out.println("\n(sem entrada interativa — operação cancelada)");
+                return false;
+            }
+            String resposta = scanner.nextLine().trim().toLowerCase();
+            return resposta.equals("s") || resposta.equals("sim");
+        } catch (Exception e) {
+            System.out.println("\n(entrada indisponível — operação cancelada)");
+            return false;
+        }
     }
 
     /**

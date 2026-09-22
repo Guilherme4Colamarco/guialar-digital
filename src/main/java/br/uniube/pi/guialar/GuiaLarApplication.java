@@ -1,39 +1,28 @@
 package br.uniube.pi.guialar;
 
 import br.uniube.pi.guialar.cli.GuiaLarCli;
+import br.uniube.pi.guialar.cli.GuiaLarWindowsCli;
 import br.uniube.pi.guialar.aplicacao.deteccao.DetectorSistemaService;
 import br.uniube.pi.guialar.aplicacao.deteccao.DetectorDistroService;
 import br.uniube.pi.guialar.aplicacao.deteccao.DetectorNavegadorService;
 import br.uniube.pi.guialar.aplicacao.dns.ConfiguradorDnsService;
-import br.uniube.pi.guialar.aplicacao.dns.ConfiguradorDnsWindowsService;
 import br.uniube.pi.guialar.aplicacao.extensao.InstaladorExtensaoService;
 import br.uniube.pi.guialar.aplicacao.autorizacao.AutorizadorService;
+import br.uniube.pi.guialar.aplicacao.verificacao.VerificacaoDnsService;
 import br.uniube.pi.guialar.gui.GuiaLarGui;
 import br.uniube.pi.guialar.dominio.sistema.TipoSistema;
 
 import java.awt.GraphicsEnvironment;
 import java.util.Arrays;
+import java.util.List;
 
 /**
  * GuiaLar Digital - Assistente para configuração de DNS seguro e adblockers.
- * 
- * MVP Linux: Debian, Fedora e Arch Linux
- * 
- * Funcionalidades:
- * 1. Mudar DNS do sistema para Cloudflare 1.1.1.1 for Families
- *    - IPv4: 1.1.1.3 / 1.0.0.3
- *    - IPv6: 2606:4700:4700::1113 / 2606:4700:4700::1003
- * 2. Detectar navegadores instalados (Firefox vs Chromium)
- * 3. Instalar adblocker (uBlock Origin / uBlock Origin Lite)
- * 
- * Segurança:
- * - Sempre exibe plano de ações antes de executar
- * - Solicita autorização via polkit/pkexec
- * - Faz backup antes de modificar configurações
- * - Sem coleta de histórico de navegação
- * 
+ *
+ * Plataformas: Linux (completo) + Windows (diagnóstico + DNS via PowerShell).
+ *
  * @author Guilherme Amaral Colamarco Resende de Melo
- * @version 0.1.0
+ * @version 0.2.0
  */
 public class GuiaLarApplication {
 
@@ -63,6 +52,15 @@ public class GuiaLarApplication {
         if (forcarGui) {
             return true;
         }
+        // Flags de operação CLI no Windows não devem abrir GUI
+        if (Arrays.asList(args).contains("--diagnostico")
+                || Arrays.asList(args).contains("--diagnose")
+                || Arrays.asList(args).contains("--desfazer")
+                || Arrays.asList(args).contains("--undo")
+                || Arrays.asList(args).contains("--aplicar-dns")
+                || Arrays.asList(args).contains("--apply-dns")) {
+            return false;
+        }
         return !GraphicsEnvironment.isHeadless();
     }
 
@@ -76,12 +74,34 @@ public class GuiaLarApplication {
             System.exit(1);
         }
 
+        List<String> argList = Arrays.asList(args);
+        boolean soDiagnostico = argList.contains("--diagnostico") || argList.contains("--diagnose");
+
+        if (soDiagnostico) {
+            try {
+                var diag = new br.uniube.pi.guialar.aplicacao.diagnostico.DiagnosticoAmbienteService()
+                    .diagnosticar();
+                System.out.println(diag.formatarRelatorio());
+                if (diag.getStatusDns() != br.uniube.pi.guialar.dominio.diagnostico.StatusDns.APLICADO) {
+                    System.out.println("Filtro de sistema: não afirmado como ativo (status: "
+                        + diag.getStatusDns().getRotuloPt() + ").");
+                }
+            } catch (Exception e) {
+                System.err.println("Falha no diagnóstico (sistema inalterado): " + e.getMessage());
+                System.exit(1);
+            }
+            return;
+        }
+
         if (sistema.isWindows()) {
-            System.out.println("⚠️  Windows detectado - Esboço básico disponível");
-            System.out.println();
-            ConfiguradorDnsWindowsService windowsService = new ConfiguradorDnsWindowsService();
-            windowsService.configurar();
-            System.exit(0);
+            try {
+                new GuiaLarWindowsCli().run(args);
+            } catch (Exception e) {
+                System.err.println("\n❌ Erro no fluxo Windows (sem alterar o sistema): " + e.getMessage());
+                e.printStackTrace();
+                System.exit(1);
+            }
+            return;
         }
 
         DetectorDistroService detectorDistro = new DetectorDistroService();
@@ -89,8 +109,7 @@ public class GuiaLarApplication {
         ConfiguradorDnsService configuradorDns = new ConfiguradorDnsService();
         InstaladorExtensaoService instaladorExtensao = new InstaladorExtensaoService();
         AutorizadorService autorizador = new AutorizadorService();
-        br.uniube.pi.guialar.aplicacao.verificacao.VerificacaoDnsService verificacaoDns = 
-            new br.uniube.pi.guialar.aplicacao.verificacao.VerificacaoDnsService();
+        VerificacaoDnsService verificacaoDns = new VerificacaoDnsService();
 
         GuiaLarCli cli = new GuiaLarCli(
             detectorDistro,

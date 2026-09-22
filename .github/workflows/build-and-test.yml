@@ -34,16 +34,26 @@ jobs:
     - name: Compilar com Ant
       run: ant clean jar
       
+    - name: Testes Windows (mocks PowerShell)
+      run: ant test-windows
+
+    - name: Pacote Windows lab
+      run: ant dist-windows
+      
     - name: Verificar JAR criado
       run: |
         ls -lh build/jar/guialar-digital.jar
         test -f build/jar/guialar-digital.jar
+        test -f dist/windows/guialar-digital.jar
+        test -f dist/windows/smoke-diagnostico-windows.bat
         
     - name: Upload do JAR
       uses: actions/upload-artifact@v4
       with:
         name: guialar-digital-jar
-        path: build/jar/guialar-digital.jar
+        path: |
+          build/jar/guialar-digital.jar
+          dist/windows/
         retention-days: 7
 
   smoke-test-debian:

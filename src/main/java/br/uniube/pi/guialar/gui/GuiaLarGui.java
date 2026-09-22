@@ -1,15 +1,22 @@
 package br.uniube.pi.guialar.gui;
 
+import br.uniube.pi.guialar.aplicacao.adaptadores.windows.WindowsUrlOpener;
 import br.uniube.pi.guialar.aplicacao.deteccao.DetectorDistroService;
 import br.uniube.pi.guialar.aplicacao.deteccao.DetectorNavegadorService;
+import br.uniube.pi.guialar.aplicacao.deteccao.DetectorSistemaService;
+import br.uniube.pi.guialar.aplicacao.diagnostico.DiagnosticoAmbienteService;
 import br.uniube.pi.guialar.aplicacao.dns.ConfiguradorDnsService;
+import br.uniube.pi.guialar.aplicacao.dns.ConfiguradorDnsWindowsService;
 import br.uniube.pi.guialar.aplicacao.extensao.InstaladorExtensaoService;
 import br.uniube.pi.guialar.aplicacao.verificacao.VerificacaoDnsService;
+import br.uniube.pi.guialar.dominio.diagnostico.DiagnosticoAmbiente;
+import br.uniube.pi.guialar.dominio.diagnostico.StatusDns;
 import br.uniube.pi.guialar.dominio.distro.InfoDistro;
 import br.uniube.pi.guialar.dominio.dns.ConfiguracaoDns;
 import br.uniube.pi.guialar.dominio.dns.ServidorDns;
 import br.uniube.pi.guialar.dominio.navegador.Navegador;
 import br.uniube.pi.guialar.dominio.navegador.TipoNavegador;
+import br.uniube.pi.guialar.dominio.sistema.TipoSistema;
 import br.uniube.pi.guialar.dominio.verificacao.ResultadoVerificacao;
 
 import javax.swing.BorderFactory;
@@ -42,16 +49,9 @@ import java.util.Scanner;
 /**
  * Interface gráfica (Swing) do GuiaLar Digital.
  *
- * Reutiliza os mesmos serviços de domínio/aplicação da CLI, expondo o fluxo
- * completo de forma visual:
- * 1. Detecta a distribuição Linux e os navegadores instalados.
- * 2. Exibe o plano de ações transparente antes de qualquer alteração.
- * 3. Solicita autorização explícita do usuário (botão) e verifica privilégios.
- * 4. Executa a configuração de DNS, o smoke test e a instalação de adblockers,
- *    transmitindo toda a saída para um painel de log em tempo real.
- *
- * Implementada com Swing (parte do JDK) para não introduzir dependências novas
- * ao build Ant do projeto.
+ * Linux: fluxo completo (DNS + smoke test + extensões).
+ * Windows: diagnóstico sem admin + tentativa de DNS com UAC + guias de navegador.
+ * Falhas de DNS em laboratório mostram "não aplicado" sem crash.
  */
 public class GuiaLarGui {
 
@@ -60,46 +60,73 @@ public class GuiaLarGui {
     private static final Color COR_PRIMARIA = new Color(0x0E, 0x7A, 0x80);
     private static final Color COR_TEXTO_CLARO = Color.WHITE;
 
+    private final DetectorSistemaService detectorSistema;
     private final DetectorDistroService detectorDistro;
     private final DetectorNavegadorService detectorNavegador;
     private final ConfiguradorDnsService configuradorDns;
+    private final ConfiguradorDnsWindowsService configuradorDnsWindows;
     private final InstaladorExtensaoService instaladorExtensao;
     private final VerificacaoDnsService verificacaoDns;
+    private final DiagnosticoAmbienteService diagnosticoService;
+    private final WindowsUrlOpener urlOpener;
 
     private JFrame frame;
     private JTextArea areaLog;
     private JButton botaoExecutar;
+    private JButton botaoDiagnostico;
+    private JButton botaoGuias;
+    private JButton botaoDesfazer;
     private JButton botaoSair;
 
+    private TipoSistema tipoSistema;
     private InfoDistro distro;
+    private DiagnosticoAmbiente diagnostico;
     private List<Navegador> navegadores = new ArrayList<>();
 
     public GuiaLarGui() {
+        this.detectorSistema = new DetectorSistemaService();
         this.detectorDistro = new DetectorDistroService();
         this.detectorNavegador = new DetectorNavegadorService();
         this.configuradorDns = new ConfiguradorDnsService();
+        this.configuradorDnsWindows = new ConfiguradorDnsWindowsService();
         this.instaladorExtensao = new InstaladorExtensaoService();
         this.verificacaoDns = new VerificacaoDnsService();
+        this.diagnosticoService = new DiagnosticoAmbienteService();
+        this.urlOpener = new WindowsUrlOpener();
     }
 
-    /** Ponto de entrada da GUI. */
     public static void iniciar() {
-        SwingUtilities.invokeLater(() -> new GuiaLarGui().construir());
+        SwingUtilities.invokeLater(() -> {
+            try {
+                new GuiaLarGui().construir();
+            } catch (Exception ex) {
+                ex.printStackTrace();
+                JOptionPane.showMessageDialog(null,
+                    "Falha ao abrir a interface (o sistema não foi alterado):\n" + ex.getMessage(),
+                    "GuiaLar Digital", JOptionPane.ERROR_MESSAGE);
+            }
+        });
     }
 
     private void construir() {
         aplicarLookAndFeel();
 
-        distro = detectorDistro.detectar();
-        navegadores = deduplicar(detectorNavegador.detectar());
+        tipoSistema = detectorSistema.detectar();
+        if (tipoSistema.isWindows()) {
+            diagnostico = diagnosticoService.diagnosticar();
+            navegadores = deduplicar(diagnostico.getNavegadores());
+        } else {
+            distro = detectorDistro.detectar();
+            navegadores = deduplicar(detectorNavegador.detectar());
+            diagnostico = diagnosticoService.diagnosticar();
+        }
 
         frame = new JFrame("GuiaLar Digital - DNS seguro e adblockers");
         frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
-        frame.setMinimumSize(new Dimension(860, 720));
+        frame.setMinimumSize(new Dimension(900, 740));
 
         JPanel raiz = new JPanel(new BorderLayout());
         raiz.setBackground(COR_FUNDO);
-
         raiz.add(criarCabecalho(), BorderLayout.NORTH);
         raiz.add(criarCorpo(), BorderLayout.CENTER);
         raiz.add(criarRodape(), BorderLayout.SOUTH);
@@ -109,14 +136,19 @@ public class GuiaLarGui {
         frame.setLocationRelativeTo(null);
         frame.setVisible(true);
 
-        log("GuiaLar Digital iniciado. Revise o plano de ações e clique em \"Autorizar e executar\".");
+        log("GuiaLar Digital iniciado (" + tipoSistema.getNome() + ").");
+        if (tipoSistema.isWindows()) {
+            log("Modo Windows: diagnóstico não exige admin. DNS só sob UAC.");
+            log("Status DNS: " + diagnostico.getStatusDns().getRotuloPt());
+        } else {
+            log("Revise o plano de ações e clique em \"Autorizar e executar\".");
+        }
     }
 
     private void aplicarLookAndFeel() {
         try {
             UIManager.setLookAndFeel(UIManager.getSystemLookAndFeelClassName());
         } catch (Exception ignored) {
-            // Usa o look and feel padrão caso o do sistema não esteja disponível.
         }
     }
 
@@ -132,7 +164,8 @@ public class GuiaLarGui {
         titulo.setAlignmentX(Component.LEFT_ALIGNMENT);
 
         JLabel subtitulo = new JLabel(
-            "Assistente para configuração de DNS seguro (Cloudflare Families) e adblockers");
+            "Assistente para DNS seguro (Cloudflare Families) e adblockers — "
+                + tipoSistema.getNome());
         subtitulo.setForeground(new Color(0xD6, 0xEE, 0xEF));
         subtitulo.setFont(subtitulo.getFont().deriveFont(Font.PLAIN, 14f));
         subtitulo.setAlignmentX(Component.LEFT_ALIGNMENT);
@@ -159,10 +192,8 @@ public class GuiaLarGui {
 
         corpo.add(Box.createVerticalStrut(14));
         corpo.add(criarCartaoPlano());
-
         corpo.add(Box.createVerticalStrut(14));
         corpo.add(criarCartaoLog());
-
         return corpo;
     }
 
@@ -193,17 +224,31 @@ public class GuiaLarGui {
 
     private JPanel criarCartaoSistema() {
         JPanel cartao = criarCartao("Sistema detectado");
-        boolean suportada = distro.isSuportada();
-        cartao.add(linha("Distribuição: " + distro.getNome()));
-        cartao.add(linha("Versão: " + (distro.getVersao() == null || distro.getVersao().isEmpty()
-            ? "N/A" : distro.getVersao())));
-        cartao.add(linha("Família: " + distro.getTipo().getNomeExibicao()));
-        cartao.add(linha("Gerenciador de rede: " + distro.getGerenciadorRede()));
-        cartao.add(Box.createVerticalStrut(6));
-        JLabel status = linha(suportada ? "Status: suportada (MVP Linux)" : "Status: NÃO suportada");
-        status.setForeground(suportada ? new Color(0x1B, 0x7A, 0x2E) : new Color(0xB3, 0x26, 0x1A));
-        status.setFont(status.getFont().deriveFont(Font.BOLD, 12.5f));
-        cartao.add(status);
+        if (tipoSistema.isWindows() && diagnostico != null) {
+            cartao.add(linha("SO: " + diagnostico.getNomeSistema()));
+            cartao.add(linha("Versão: " + diagnostico.getVersaoSistema()));
+            cartao.add(linha("Arquitetura: " + diagnostico.getArquitetura()));
+            cartao.add(linha("Elevado (admin): " + (diagnostico.isProcessoElevado() ? "sim" : "não")));
+            cartao.add(linha("Pode pedir UAC: " + (diagnostico.isPodeElevar() ? "sim" : "não")));
+            cartao.add(Box.createVerticalStrut(6));
+            JLabel status = linha("Status: Windows suportado (smoke test)");
+            status.setForeground(new Color(0x1B, 0x7A, 0x2E));
+            status.setFont(status.getFont().deriveFont(Font.BOLD, 12.5f));
+            cartao.add(status);
+        } else {
+            boolean suportada = distro != null && distro.isSuportada();
+            cartao.add(linha("Distribuição: " + (distro == null ? "?" : distro.getNome())));
+            cartao.add(linha("Versão: " + (distro == null || distro.getVersao() == null
+                || distro.getVersao().isEmpty() ? "N/A" : distro.getVersao())));
+            cartao.add(linha("Família: " + (distro == null ? "?" : distro.getTipo().getNomeExibicao())));
+            cartao.add(linha("Gerenciador de rede: "
+                + (distro == null ? "?" : distro.getGerenciadorRede())));
+            cartao.add(Box.createVerticalStrut(6));
+            JLabel status = linha(suportada ? "Status: suportada (MVP Linux)" : "Status: NÃO suportada");
+            status.setForeground(suportada ? new Color(0x1B, 0x7A, 0x2E) : new Color(0xB3, 0x26, 0x1A));
+            status.setFont(status.getFont().deriveFont(Font.BOLD, 12.5f));
+            cartao.add(status);
+        }
         return cartao;
     }
 
@@ -215,8 +260,15 @@ public class GuiaLarGui {
         cartao.add(linha("        " + s.getSecundarioIpv6()));
         cartao.add(Box.createVerticalStrut(6));
         cartao.add(linha("Proteção: malware + adulto (18+)"));
-        cartao.add(Box.createVerticalStrut(6));
-        cartao.add(linha("DoH: family.cloudflare-dns.com"));
+        if (diagnostico != null) {
+            cartao.add(Box.createVerticalStrut(6));
+            JLabel st = linha("Estado GuiaLar: " + diagnostico.getStatusDns().getRotuloPt());
+            Color cor = diagnostico.getStatusDns() == StatusDns.APLICADO
+                ? new Color(0x1B, 0x7A, 0x2E) : new Color(0x8A, 0x5A, 0x00);
+            st.setForeground(cor);
+            st.setFont(st.getFont().deriveFont(Font.BOLD, 12.5f));
+            cartao.add(st);
+        }
         return cartao;
     }
 
@@ -226,17 +278,19 @@ public class GuiaLarGui {
             cartao.add(linha("Nenhum navegador detectado."));
         } else {
             for (Navegador nav : navegadores) {
-                String extensao = nav.getTipo() == TipoNavegador.FIREFOX
-                    ? "uBlock Origin" : "uBlock Origin Lite";
-                cartao.add(linha("• " + nav.getNome() + " (" + nav.getTipo().getNomeExibicao() + ")"));
-                cartao.add(linha("    → " + extensao));
+                String dica = nav.getNome().toLowerCase().contains("brave")
+                    ? "Shields + DNS seguro"
+                    : (nav.getTipo() == TipoNavegador.FIREFOX
+                        ? "uBlock Origin" : "uBlock Origin Lite");
+                cartao.add(linha("• " + nav.getNome()));
+                cartao.add(linha("    → " + dica));
             }
         }
         return cartao;
     }
 
     private JPanel criarCartaoPlano() {
-        JPanel cartao = criarCartao("Plano de ações (nada é executado sem sua autorização)");
+        JPanel cartao = criarCartao("Plano / diagnóstico (nada muda sem autorização)");
         JTextArea plano = new JTextArea(montarTextoPlano());
         plano.setEditable(false);
         plano.setLineWrap(true);
@@ -246,8 +300,8 @@ public class GuiaLarGui {
         plano.setBorder(new EmptyBorder(6, 6, 6, 6));
         JScrollPane sp = new JScrollPane(plano);
         sp.setAlignmentX(Component.LEFT_ALIGNMENT);
-        sp.setPreferredSize(new Dimension(10, 150));
-        sp.setMaximumSize(new Dimension(Integer.MAX_VALUE, 160));
+        sp.setPreferredSize(new Dimension(10, 160));
+        sp.setMaximumSize(new Dimension(Integer.MAX_VALUE, 180));
         cartao.add(sp);
         return cartao;
     }
@@ -272,8 +326,10 @@ public class GuiaLarGui {
         rodape.setBackground(COR_FUNDO);
         rodape.setBorder(new EmptyBorder(6, 20, 16, 20));
 
-        JLabel aviso = new JLabel(
-            "A configuração de DNS exige privilégios de administrador (sudo/root).");
+        String avisoTxt = tipoSistema.isWindows()
+            ? "Diagnóstico não precisa de admin. Aplicar DNS pode pedir UAC (ou falhar em laboratório)."
+            : "A configuração de DNS exige privilégios de administrador (sudo/root).";
+        JLabel aviso = new JLabel(avisoTxt);
         aviso.setFont(aviso.getFont().deriveFont(Font.PLAIN, 11.5f));
         aviso.setForeground(new Color(0x5A, 0x63, 0x6B));
 
@@ -283,7 +339,18 @@ public class GuiaLarGui {
         botaoSair = new JButton("Sair");
         botaoSair.addActionListener(e -> frame.dispose());
 
-        botaoExecutar = new JButton("Autorizar e executar");
+        botaoDiagnostico = new JButton("Atualizar diagnóstico");
+        botaoDiagnostico.addActionListener(e -> onDiagnostico());
+
+        botaoGuias = new JButton("Abrir guias");
+        botaoGuias.addActionListener(e -> onAbrirGuias());
+
+        botaoDesfazer = new JButton("Desfazer DNS");
+        botaoDesfazer.setVisible(tipoSistema.isWindows());
+        botaoDesfazer.addActionListener(e -> onDesfazer());
+
+        botaoExecutar = new JButton(tipoSistema.isWindows()
+            ? "Tentar aplicar DNS" : "Autorizar e executar");
         botaoExecutar.setBackground(COR_PRIMARIA);
         botaoExecutar.setForeground(COR_TEXTO_CLARO);
         botaoExecutar.setFont(botaoExecutar.getFont().deriveFont(Font.BOLD, 13f));
@@ -293,6 +360,11 @@ public class GuiaLarGui {
         botaoExecutar.addActionListener(e -> onExecutar());
 
         botoes.add(botaoSair);
+        botoes.add(botaoDiagnostico);
+        botoes.add(botaoGuias);
+        if (tipoSistema.isWindows()) {
+            botoes.add(botaoDesfazer);
+        }
         botoes.add(botaoExecutar);
 
         rodape.add(aviso, BorderLayout.WEST);
@@ -301,6 +373,15 @@ public class GuiaLarGui {
     }
 
     private String montarTextoPlano() {
+        if (tipoSistema.isWindows() && diagnostico != null) {
+            StringBuilder sb = new StringBuilder();
+            sb.append(diagnostico.formatarRelatorio()).append('\n');
+            sb.append("Ações opcionais:\n");
+            sb.append("1. Tentar aplicar DNS (UAC) — pode resultar em \"não aplicado\"\n");
+            sb.append("2. Abrir guias de uBlock / Shields / DoH no navegador\n");
+            sb.append("3. Desfazer DNS usando o manifesto em %LOCALAPPDATA%\\GuiaLar\\\n");
+            return sb.toString();
+        }
         StringBuilder sb = new StringBuilder();
         ServidorDns s = ServidorDns.getPadrao();
         int i = 1;
@@ -315,15 +396,153 @@ public class GuiaLarGui {
             sb.append(i++).append(". Configurar ").append(extensao)
               .append(" no ").append(nav.getNome()).append("\n");
         }
-        sb.append(i++).append(". Verificar o DNS com smoke test (malware/nudity bloqueados, example.com permitido)\n");
-        sb.append(i++).append(". Pós-instalação: configurar DoH dos navegadores para ")
-          .append(ServidorDns.DOH_ENDPOINT).append("\n");
+        sb.append(i++).append(". Verificar o DNS com smoke test\n");
+        sb.append(i++).append(". Pós-instalação: DoH → ").append(ServidorDns.DOH_ENDPOINT).append("\n");
         sb.append(i).append(". Privacidade: nenhum histórico de navegação é coletado.");
         return sb.toString();
     }
 
+    private void onDiagnostico() {
+        botaoDiagnostico.setEnabled(false);
+        new SwingWorker<DiagnosticoAmbiente, Void>() {
+            @Override
+            protected DiagnosticoAmbiente doInBackground() {
+                return diagnosticoService.diagnosticar();
+            }
+
+            @Override
+            protected void done() {
+                try {
+                    diagnostico = get();
+                    navegadores = deduplicar(diagnostico.getNavegadores());
+                    log("\n--- Diagnóstico atualizado ---\n" + diagnostico.formatarRelatorio());
+                    if (diagnostico.getStatusDns() != StatusDns.APLICADO) {
+                        log("Filtro de sistema: NÃO afirmado como ativo (status: "
+                            + diagnostico.getStatusDns().getRotuloPt() + ").");
+                    }
+                } catch (Exception ex) {
+                    log("Falha no diagnóstico (sistema inalterado): " + ex.getMessage());
+                } finally {
+                    botaoDiagnostico.setEnabled(true);
+                }
+            }
+        }.execute();
+    }
+
+    private void onAbrirGuias() {
+        if (navegadores.isEmpty()) {
+            JOptionPane.showMessageDialog(frame,
+                "Nenhum navegador detectado para abrir guias.",
+                "Guias", JOptionPane.INFORMATION_MESSAGE);
+            return;
+        }
+        for (Navegador nav : navegadores) {
+            log("Guia " + nav.getNome() + ":");
+            for (String linha : WindowsUrlOpener.guiasPara(nav.getNome())) {
+                log("  " + linha);
+            }
+            String url = WindowsUrlOpener.urlLojaPadrao(nav.getNome());
+            boolean ok = urlOpener.abrir(url);
+            log("  Abrir: " + (ok ? "ok" : "falhou") + " → " + url);
+        }
+    }
+
+    private void onDesfazer() {
+        int opcao = JOptionPane.showConfirmDialog(frame,
+            "Desfazer alterações de DNS feitas pelo GuiaLar?\n"
+                + "Pode solicitar UAC. Sem manifesto, nada será alterado.",
+            "Desfazer DNS", JOptionPane.YES_NO_OPTION);
+        if (opcao != JOptionPane.YES_OPTION) {
+            return;
+        }
+        botaoDesfazer.setEnabled(false);
+        new SwingWorker<ConfiguracaoDns, Void>() {
+            @Override
+            protected ConfiguracaoDns doInBackground() {
+                return configuradorDnsWindows.desfazer();
+            }
+
+            @Override
+            protected void done() {
+                try {
+                    ConfiguracaoDns r = get();
+                    log(r.isAplicado() ? "✓ " + r.getMensagem() : "○ " + r.getMensagem());
+                } catch (Exception ex) {
+                    log("Erro ao desfazer (sistema pode estar inalterado): " + ex.getMessage());
+                } finally {
+                    botaoDesfazer.setEnabled(true);
+                    onDiagnostico();
+                }
+            }
+        }.execute();
+    }
+
     private void onExecutar() {
-        if (!distro.isSuportada()) {
+        if (tipoSistema.isWindows()) {
+            onExecutarWindows();
+            return;
+        }
+        onExecutarLinux();
+    }
+
+    private void onExecutarWindows() {
+        StringBuilder msg = new StringBuilder();
+        msg.append("Será solicitada elevação UAC apenas para alterar o DNS.\n\n");
+        msg.append("Alvo: Cloudflare Families (1.1.1.3 / 1.0.0.3).\n");
+        msg.append("Um manifesto será salvo em %LOCALAPPDATA%\\GuiaLar\\ para Desfazer.\n\n");
+        msg.append("Em PC de laboratório sem admin, o resultado esperado é\n");
+        msg.append("\"DNS não aplicado\" — sem alterar o sistema.\n\n");
+        msg.append("Continuar?");
+
+        int opcao = JOptionPane.showConfirmDialog(frame, msg.toString(),
+            "Aplicar DNS (Windows)", JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
+        if (opcao != JOptionPane.YES_OPTION) {
+            log("Operação cancelada pelo usuário.");
+            return;
+        }
+
+        botaoExecutar.setEnabled(false);
+        botaoExecutar.setText("Aplicando...");
+        new SwingWorker<ConfiguracaoDns, Void>() {
+            @Override
+            protected ConfiguracaoDns doInBackground() {
+                return configuradorDnsWindows.configurar();
+            }
+
+            @Override
+            protected void done() {
+                try {
+                    ConfiguracaoDns r = get();
+                    if (r.isAplicado()) {
+                        log("✓ " + r.getMensagem());
+                        log("Ainda configure DoH nos navegadores: " + ServidorDns.DOH_ENDPOINT);
+                    } else {
+                        log("○ " + r.getMensagem());
+                        log("Status: " + StatusDns.NAO_APLICADO.getRotuloPt()
+                            + " — filtro de sistema NÃO está ativo via GuiaLar.");
+                        log("O que ainda funciona: diagnóstico + guias de navegador.");
+                        JOptionPane.showMessageDialog(frame,
+                            "DNS não aplicado.\n\n" + r.getMensagem()
+                                + "\n\nO sistema não foi alterado.\n"
+                                + "Você ainda pode usar o diagnóstico e os guias.",
+                            "DNS não aplicado", JOptionPane.WARNING_MESSAGE);
+                    }
+                } catch (Exception ex) {
+                    log("Falha ao aplicar DNS (sistema inalterado): " + ex.getMessage());
+                    JOptionPane.showMessageDialog(frame,
+                        "Falha ao aplicar DNS. O sistema não foi alterado.\n" + ex.getMessage(),
+                        "Erro", JOptionPane.ERROR_MESSAGE);
+                } finally {
+                    botaoExecutar.setText("Tentar aplicar DNS");
+                    botaoExecutar.setEnabled(true);
+                    onDiagnostico();
+                }
+            }
+        }.execute();
+    }
+
+    private void onExecutarLinux() {
+        if (distro == null || !distro.isSuportada()) {
             JOptionPane.showMessageDialog(frame,
                 "Distribuição não suportada.\nO GuiaLar Digital suporta Debian, Fedora e Arch Linux.",
                 "Não suportado", JOptionPane.ERROR_MESSAGE);
@@ -349,10 +568,10 @@ public class GuiaLarGui {
             return;
         }
 
-        executarPlano();
+        executarPlanoLinux();
     }
 
-    private void executarPlano() {
+    private void executarPlanoLinux() {
         botaoExecutar.setEnabled(false);
         botaoExecutar.setText("Executando...");
         log("\n✓ Autorização concedida. Executando ações...\n");
@@ -392,7 +611,6 @@ public class GuiaLarGui {
                     System.out.println("\n──────────────────────────────────────────────");
                     System.out.println("AÇÃO CRÍTICA: configure o DoH dos navegadores para:");
                     System.out.println("  " + ServidorDns.DOH_ENDPOINT);
-                    System.out.println("Caso contrário, o navegador ignora o DNS do sistema.");
                 } catch (Exception ex) {
                     System.out.println("Erro durante a execução: " + ex.getMessage());
                 } finally {
@@ -423,7 +641,6 @@ public class GuiaLarGui {
                 }
             }
         } catch (Exception ignored) {
-            // Sem privilégios administrativos.
         }
         return false;
     }
@@ -446,7 +663,6 @@ public class GuiaLarGui {
         });
     }
 
-    /** Redireciona a saída padrão dos serviços para o painel de log da GUI. */
     private class AreaLogOutputStream extends java.io.OutputStream {
         private final StringBuilder buffer = new StringBuilder();
 
