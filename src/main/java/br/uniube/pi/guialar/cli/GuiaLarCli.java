@@ -141,7 +141,19 @@ public class GuiaLarCli {
         }
 
         plano.adicionarAcao(
-            "LIMITAÇÕES: VPN, Docker e DNS-over-HTTPS no navegador podem ignorar o DNS do sistema"
+            "⚠️ AÇÃO OBRIGATÓRIA PÓS-INSTALAÇÃO: Configurar DoH dos navegadores"
+        );
+        
+        plano.adicionarAcao(
+            "   Firefox/Chrome devem usar DoH: https://family.cloudflare-dns.com/dns-query"
+        );
+        
+        plano.adicionarAcao(
+            "   Caso contrário, o navegador IGNORA o DNS do sistema e o filtro NÃO funciona!"
+        );
+
+        plano.adicionarAcao(
+            "LIMITAÇÕES: VPN e Docker podem ignorar o DNS do sistema"
         );
 
         plano.adicionarAcao("PRIVACIDADE: Nenhum histórico de navegação será coletado");
@@ -203,16 +215,48 @@ public class GuiaLarCli {
         System.out.println("╚════════════════════════════════════════════════════════════════╝");
         System.out.println();
         System.out.println("✓ DNS configurado para Cloudflare 1.1.1.1 for Families");
+        System.out.println("  • IPv4: 1.1.1.3 / 1.0.0.3");
+        System.out.println("  • IPv6: 2606:4700:4700::1113 / 2606:4700:4700::1003");
         System.out.println("  • Proteção contra malware");
         System.out.println("  • Bloqueio de conteúdo adulto (18+)");
         System.out.println();
-        System.out.println("📋 PRÓXIMOS PASSOS:");
-        System.out.println("   1. Reinicie seus navegadores para aplicar as configurações");
-        System.out.println("   2. Verifique se o DNS está funcionando:");
-        System.out.println("      • Debian/Ubuntu: systemd-resolve --status | grep 'DNS Servers'");
-        System.out.println("      • Fedora: nmcli device show | grep DNS");
-        System.out.println("      • Arch: resolvectl status");
-        System.out.println("   3. Teste bloqueio de malware: http://malware.testcategory.com");
+        System.out.println("⚠️  AÇÃO CRÍTICA NECESSÁRIA - DNS-over-HTTPS (DoH)");
+        System.out.println("─────────────────────────────────────────────────────────────────");
+        System.out.println();
+        System.out.println("Se seus navegadores usam DNS Seguro/DoH, eles IGNORAM o DNS do");
+        System.out.println("sistema e o filtro NÃO FUNCIONA!");
+        System.out.println();
+        System.out.println("Configure DoH dos navegadores para Cloudflare FAMILIES:");
+        System.out.println();
+        System.out.println("Firefox:");
+        System.out.println("  1. about:preferences#general → Configurações de Rede");
+        System.out.println("  2. DNS sobre HTTPS → Personalizado");
+        System.out.println("  3. URL: https://family.cloudflare-dns.com/dns-query");
+        System.out.println();
+        System.out.println("Chrome/Edge/Brave:");
+        System.out.println("  1. Configurações → Privacidade → Segurança");
+        System.out.println("  2. Usar DNS seguro → Personalizado");
+        System.out.println("  3. URL: https://family.cloudflare-dns.com/dns-query");
+        System.out.println();
+        System.out.println("⚠️  NÃO use o DoH genérico (dns.cloudflare.com) - não bloqueia!");
+        System.out.println();
+        System.out.println("─────────────────────────────────────────────────────────────────");
+        System.out.println();
+        System.out.println("📋 VERIFICAÇÃO E TESTES:");
+        System.out.println();
+        System.out.println("1. Verificar DNS do sistema:");
+        System.out.println("   • Debian/Ubuntu: resolvectl status");
+        System.out.println("   • Fedora: nmcli device show | grep DNS");
+        System.out.println("   • Arch: resolvectl status");
+        System.out.println();
+        System.out.println("2. Testar bloqueio (deve retornar 0.0.0.0):");
+        System.out.println("   dig @1.1.1.3 malware.testcategory.com");
+        System.out.println("   dig @1.1.1.3 nudity.testcategory.com");
+        System.out.println();
+        System.out.println("3. Testar site normal (deve funcionar):");
+        System.out.println("   dig @1.1.1.3 example.com");
+        System.out.println();
+        System.out.println("4. Reinicie seus navegadores para aplicar as configurações");
         System.out.println();
         System.out.println("ℹ️  Nenhum dado foi coletado durante a configuração.");
         System.out.println();

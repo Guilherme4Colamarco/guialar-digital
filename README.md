@@ -159,22 +159,49 @@ dig @1.1.1.3 example.com
 
 #### 3. Testar Bloqueio (Smoke Test)
 
+**URLs de teste oficiais Cloudflare:**
+
 ```bash
-# Teste de bloqueio de malware (deve falhar/bloquear)
+# Teste 1: Bloqueio de malware (deve retornar 0.0.0.0)
 dig @1.1.1.3 malware.testcategory.com
-curl -I http://malware.testcategory.com
 
-# Teste de bloqueio de conteúdo adulto (deve falhar/bloquear)
-dig @1.1.1.3 adult.testcategory.com
+# Teste 2: Bloqueio de conteúdo adulto/nudez (deve retornar 0.0.0.0)
+dig @1.1.1.3 nudity.testcategory.com
 
-# Site normal (deve funcionar)
+# Teste 3: Site normal (deve funcionar)
 dig @1.1.1.3 example.com
+```
+
+**Resultado esperado:**
+
+```bash
+# Malware e nudez - BLOQUEADOS
+$ dig @1.1.1.3 malware.testcategory.com +short
+0.0.0.0
+
+$ dig @1.1.1.3 nudity.testcategory.com +short
+0.0.0.0
+
+# Site normal - PERMITIDO
+$ dig @1.1.1.3 example.com +short
+93.184.215.14
+```
+
+**Teste no navegador:**
+
+```bash
+# Deve mostrar página de bloqueio ou erro de conexão
+curl -I http://malware.testcategory.com
+curl -I http://nudity.testcategory.com
+
+# Deve funcionar normalmente
 curl -I http://example.com
 ```
 
 Se o DNS estiver funcionando corretamente:
-- ✅ Sites maliciosos retornam `0.0.0.0` ou falham
-- ✅ Sites normais funcionam normalmente
+- ✅ `malware.testcategory.com` → bloqueado (0.0.0.0)
+- ✅ `nudity.testcategory.com` → bloqueado (0.0.0.0)
+- ✅ `example.com` → funciona normalmente
 
 #### 4. Instalar Navegadores para Teste (Opcional)
 
@@ -282,6 +309,44 @@ Instala adblocker apropriado:
 
 ---
 
+## ⚠️ ATENÇÃO: DNS-over-HTTPS (DoH) nos Navegadores
+
+### Problema Crítico
+
+**Se o navegador tem DNS Seguro/DoH habilitado, ele IGNORA completamente o DNS do sistema!**
+
+Isso significa que mesmo com o DNS do sistema configurado para Cloudflare Families, o navegador pode usar seu próprio DNS (geralmente o genérico do Cloudflare 1.1.1.1) que **NÃO bloqueia malware nem conteúdo adulto**.
+
+### Solução: Configure DoH para Cloudflare Families
+
+**Endpoint correto:** `https://family.cloudflare-dns.com/dns-query`
+
+**❌ NÃO USE:**
+- `https://dns.cloudflare.com/dns-query` (genérico, não bloqueia)
+- `https://cloudflare-dns.com/dns-query` (genérico, não bloqueia)
+
+**✅ USE:**
+- `https://family.cloudflare-dns.com/dns-query` (bloqueia malware + adulto)
+
+### Como Configurar
+
+#### Firefox
+1. Digite `about:preferences#general` na barra de endereços
+2. Role até "Configurações de Rede" e clique em "Configurações"
+3. Habilite "DNS sobre HTTPS"
+4. Selecione "Personalizado"
+5. Cole: `https://family.cloudflare-dns.com/dns-query`
+6. Clique em OK
+
+#### Chrome / Chromium / Edge / Brave
+1. Vá em Configurações → Privacidade e segurança → Segurança
+2. Role até "Usar DNS seguro"
+3. Habilite e selecione "Personalizado"
+4. Cole: `https://family.cloudflare-dns.com/dns-query`
+5. Salve as configurações
+
+---
+
 ## 🔒 Segurança e Privacidade
 
 ### Fluxo de Autorização Obrigatório
@@ -306,17 +371,46 @@ O GuiaLar Digital **NUNCA** executa mudanças silenciosamente:
   - Proteção contra rastreadores
   - Bloqueio de anúncios invasivos
 
-### Limitações Conhecidas
+### Limitações Conhecidas e Contornos
 
-⚠️ **Atenção:** O DNS do sistema pode ser ignorado por:
+⚠️ **IMPORTANTE:** O DNS do sistema pode ser ignorado por:
 
-- **VPN ativa:** Conexões VPN podem usar DNS próprio
-- **Docker:** Containers podem ter configuração DNS separada
-- **DNS-over-HTTPS (DoH):** Navegadores com DoH habilitado ignoram DNS do sistema
-  - Firefox: `about:config` → `network.trr.mode`
-  - Chrome/Edge: Configurações → Privacidade → Usar DNS seguro
+#### 1. VPN Ativa
+Conexões VPN podem usar DNS próprio e sobrescrever as configurações do sistema.
 
-**Recomendação:** Para proteção completa, desabilite DoH nos navegadores ou configure para usar o mesmo DNS (Cloudflare Families).
+#### 2. Docker
+Containers podem ter configuração DNS separada.
+
+#### 3. DNS-over-HTTPS (DoH) nos Navegadores ⚠️ **CRÍTICO**
+
+**Problema:** Se o navegador usa DNS seguro/DoH, ele **ignora completamente** o DNS do sistema, furando o filtro.
+
+**Solução:** Configure DoH do navegador para usar **Cloudflare Families via DoH:**
+
+**Firefox:**
+1. Vá em `about:preferences#general`
+2. Role até "Configurações de Rede" → Configurações
+3. Habilite "DNS sobre HTTPS"
+4. Escolha "Personalizado" e insira:
+   ```
+   https://family.cloudflare-dns.com/dns-query
+   ```
+   ⚠️ **NÃO use** `https://cloudflare-dns.com/dns-query` (genérico 1.1.1.1)
+
+**Chrome/Chromium/Edge/Brave:**
+1. Vá em Configurações → Privacidade e segurança → Segurança
+2. Habilite "Usar DNS seguro"
+3. Escolha "Personalizado" e insira:
+   ```
+   https://family.cloudflare-dns.com/dns-query
+   ```
+   ⚠️ **NÃO use** `https://dns.cloudflare.com/dns-query` (genérico 1.1.1.1)
+
+**Por que isso é importante:**
+- DoH genérico do Cloudflare (1.1.1.1) **NÃO bloqueia** malware nem conteúdo adulto
+- Families DoH (`family.cloudflare-dns.com`) mantém a proteção mesmo com DoH ativo
+
+**Recomendação:** Sempre configure DoH do navegador para `family.cloudflare-dns.com/dns-query` para proteção completa.
 
 ---
 

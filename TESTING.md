@@ -69,20 +69,33 @@ resolvectl status
 
 Você deve ver `1.1.1.3` e `1.0.0.3` listados.
 
-#### Smoke Tests com dig
+#### Smoke Tests com dig (URLs Oficiais Cloudflare)
 
 ```bash
 # Teste 1: Site normal (deve funcionar)
 dig @1.1.1.3 example.com
-# Esperado: resposta normal com IP válido
+# Esperado: resposta normal com IP válido (ex: 93.184.215.14)
 
 # Teste 2: Malware (deve bloquear)
 dig @1.1.1.3 malware.testcategory.com
 # Esperado: retorna 0.0.0.0 (bloqueado)
 
-# Teste 3: Conteúdo adulto (deve bloquear)
-dig @1.1.1.3 adult.testcategory.com
+# Teste 3: Conteúdo adulto/nudez (deve bloquear)
+dig @1.1.1.3 nudity.testcategory.com
 # Esperado: retorna 0.0.0.0 (bloqueado)
+```
+
+**Resultado esperado completo:**
+
+```bash
+$ dig @1.1.1.3 malware.testcategory.com +short
+0.0.0.0
+
+$ dig @1.1.1.3 nudity.testcategory.com +short
+0.0.0.0
+
+$ dig @1.1.1.3 example.com +short
+93.184.215.14
 ```
 
 #### Teste com curl
@@ -92,9 +105,13 @@ dig @1.1.1.3 adult.testcategory.com
 curl -I http://example.com
 # Esperado: HTTP 200 OK
 
-# Malware (deve falhar)
+# Malware (deve falhar/bloquear)
 curl -I http://malware.testcategory.com
-# Esperado: falha de conexão ou redirect para página de bloqueio
+# Esperado: falha de conexão (0.0.0.0 não responde)
+
+# Conteúdo adulto/nudez (deve falhar/bloquear)
+curl -I http://nudity.testcategory.com
+# Esperado: falha de conexão (0.0.0.0 não responde)
 ```
 
 ### 4. Verificar Extensões dos Navegadores
@@ -147,12 +164,29 @@ ip route | grep tun
 # Se retornar algo, VPN pode estar sobrescrevendo DNS
 ```
 
-**Verificar se navegador usa DoH:**
-- Firefox: `about:config` → buscar `network.trr.mode`
-  - 0 = desabilitado
-  - 2 = DoH com fallback
-  - 3 = apenas DoH
-- Chrome: `chrome://settings/security` → Usar DNS seguro
+**Verificar se navegador usa DoH (CRÍTICO):**
+
+⚠️ **IMPORTANTE:** Se o navegador tem DNS-over-HTTPS habilitado, ele **ignora completamente** o DNS do sistema!
+
+**Firefox:**
+1. Vá em `about:config`
+2. Buscar `network.trr.mode`:
+   - `0` = DoH desabilitado (usa DNS do sistema)
+   - `2` = DoH com fallback (prefere DoH)
+   - `3` = apenas DoH (ignora DNS do sistema)
+3. **Solução:** Configure DoH para usar Cloudflare Families:
+   - `about:preferences#general` → Configurações de Rede
+   - DNS sobre HTTPS → Personalizado
+   - URL: `https://family.cloudflare-dns.com/dns-query`
+
+**Chrome/Chromium/Edge/Brave:**
+1. Vá em `chrome://settings/security`
+2. Verificar "Usar DNS seguro"
+3. **Solução:** Se habilitado, configure para Cloudflare Families:
+   - Escolher "Personalizado"
+   - URL: `https://family.cloudflare-dns.com/dns-query`
+
+⚠️ **NÃO use o DoH genérico do Cloudflare** (`dns.cloudflare.com`) - ele não bloqueia malware nem conteúdo adulto!
 
 **Verificar se systemd-resolved está rodando:**
 ```bash

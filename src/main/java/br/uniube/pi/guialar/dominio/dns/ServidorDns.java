@@ -15,12 +15,21 @@ package br.uniube.pi.guialar.dominio.dns;
  * - Primário: 2606:4700:4700::1113
  * - Secundário: 2606:4700:4700::1003
  * 
+ * DNS-over-HTTPS (DoH) endpoint para navegadores:
+ * - URL: https://family.cloudflare-dns.com/dns-query
+ * - IMPORTANTE: NÃO use o DoH genérico (dns.cloudflare.com) - não bloqueia!
+ * 
+ * URLs de teste:
+ * - malware.testcategory.com (deve retornar 0.0.0.0 se bloqueado)
+ * - nudity.testcategory.com (deve retornar 0.0.0.0 se bloqueado)
+ * 
  * Documentação: https://developers.cloudflare.com/1.1.1.1/setup/
  * 
  * LIMITAÇÕES CONHECIDAS:
  * - VPN: Conexões VPN podem sobrescrever o DNS do sistema
  * - Docker: Containers podem usar DNS próprio
- * - DoH no navegador: DNS-over-HTTPS configurado no navegador ignora DNS do sistema
+ * - DoH no navegador: DNS-over-HTTPS configurado no navegador IGNORA COMPLETAMENTE
+ *   o DNS do sistema. Configure o navegador para usar family.cloudflare-dns.com
  */
 public enum ServidorDns {
     /**
@@ -47,6 +56,11 @@ public enum ServidorDns {
     private final String primarioIpv6;
     private final String secundarioIpv6;
     private final String descricao;
+    
+    // Constantes de teste e configuração
+    public static final String DOH_ENDPOINT = "https://family.cloudflare-dns.com/dns-query";
+    public static final String URL_TESTE_MALWARE = "malware.testcategory.com";
+    public static final String URL_TESTE_NUDITY = "nudity.testcategory.com";
 
     ServidorDns(String nome, String primario, String secundario, 
                 String primarioIpv6, String secundarioIpv6, String descricao) {
