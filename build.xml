@@ -1,0 +1,197 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project name="GuiaLarDigital" default="jar" basedir=".">
+    <description>
+        GuiaLar Digital - Assistente para configuração de DNS seguro e adblockers (Linux + Windows)
+        Projeto Integrados I - Uniube
+    </description>
+
+    <!-- Propriedades do projeto -->
+    <property name="src.dir" location="src/main/java"/>
+    <property name="build.dir" location="build"/>
+    <property name="classes.dir" location="${build.dir}/classes"/>
+    <property name="jar.dir" location="${build.dir}/jar"/>
+    <property name="lib.dir" location="lib"/>
+    <property name="dist.dir" location="dist"/>
+    <property name="dist.windows.dir" location="${dist.dir}/windows"/>
+    
+    <property name="main.class" value="br.uniube.pi.guialar.GuiaLarApplication"/>
+    <property name="test.windows.class" value="br.uniube.pi.guialar.test.WindowsAdapterSmokeTest"/>
+    <property name="jar.name" value="guialar-digital.jar"/>
+    <property name="version" value="0.2.0"/>
+
+    <!-- Classpath -->
+    <path id="classpath">
+        <fileset dir="${lib.dir}" includes="**/*.jar" erroronmissingdir="false"/>
+    </path>
+    <path id="run.classpath">
+        <pathelement location="${classes.dir}"/>
+        <path refid="classpath"/>
+    </path>
+
+    <!-- Target: init - Cria diretórios necessários -->
+    <target name="init">
+        <echo message="Inicializando build do GuiaLar Digital ${version}..."/>
+        <mkdir dir="${build.dir}"/>
+        <mkdir dir="${classes.dir}"/>
+        <mkdir dir="${jar.dir}"/>
+        <mkdir dir="${lib.dir}"/>
+        <mkdir dir="${dist.dir}"/>
+    </target>
+
+    <!-- Target: clean - Remove arquivos compilados -->
+    <target name="clean" description="Remove arquivos de build">
+        <echo message="Limpando diretórios de build..."/>
+        <delete dir="${build.dir}"/>
+        <delete dir="${dist.dir}"/>
+    </target>
+
+    <!-- Target: compile - Compila o código Java -->
+    <target name="compile" depends="init" description="Compila o código-fonte Java">
+        <echo message="Compilando código-fonte..."/>
+        <javac srcdir="${src.dir}" 
+               destdir="${classes.dir}"
+               includeantruntime="false"
+               encoding="UTF-8"
+               source="17"
+               target="17"
+               debug="true">
+            <classpath refid="classpath"/>
+        </javac>
+        <echo message="Compilação concluída com sucesso!"/>
+    </target>
+
+    <!-- Target: jar - Cria o JAR executável (uber: sem deps externas) -->
+    <target name="jar" depends="compile" description="Cria o arquivo JAR executável">
+        <echo message="Criando arquivo JAR..."/>
+        <jar destfile="${jar.dir}/${jar.name}" basedir="${classes.dir}">
+            <manifest>
+                <attribute name="Main-Class" value="${main.class}"/>
+                <attribute name="Implementation-Title" value="GuiaLar Digital"/>
+                <attribute name="Implementation-Version" value="${version}"/>
+                <attribute name="Implementation-Vendor" value="Guilherme Amaral - Uniube"/>
+            </manifest>
+        </jar>
+        <echo message="JAR criado: ${jar.dir}/${jar.name}"/>
+        <echo message="Windows lab: java -jar ${jar.dir}/${jar.name} --diagnostico"/>
+    </target>
+
+    <!-- Target: test-windows - testes com PowerShell mockado (roda no Linux CI) -->
+    <target name="test-windows" depends="compile" description="Smoke tests do adapter Windows (mocks)">
+        <echo message="Executando WindowsAdapterSmokeTest..."/>
+        <java classname="${test.windows.class}" fork="true" failonerror="true">
+            <classpath refid="run.classpath"/>
+        </java>
+    </target>
+
+    <!-- Target: test - alias para a suíte atual -->
+    <target name="test" depends="test-windows" description="Executa testes automatizados"/>
+
+    <!-- Target: dist - Cria distribuição completa -->
+    <target name="dist" depends="jar" description="Cria distribuição completa">
+        <echo message="Criando distribuição..."/>
+        <copy file="${jar.dir}/${jar.name}" todir="${dist.dir}"/>
+        <copy todir="${dist.dir}/lib">
+            <fileset dir="${lib.dir}" includes="**/*.jar" erroronmissingdir="false"/>
+        </copy>
+        <copy file="README.md" todir="${dist.dir}"/>
+        <echo message="Distribuição criada em: ${dist.dir}"/>
+    </target>
+
+    <!-- Target: dist-windows - pacote fácil de copiar para PC de laboratório -->
+    <target name="dist-windows" depends="jar,test-windows" description="Pacote para smoke test em Windows">
+        <echo message="Criando pacote Windows (lab)..."/>
+        <mkdir dir="${dist.windows.dir}"/>
+        <copy file="${jar.dir}/${jar.name}" todir="${dist.windows.dir}"/>
+        <copy file="scripts/run-windows.bat" todir="${dist.windows.dir}"/>
+        <copy file="scripts/smoke-diagnostico-windows.bat" todir="${dist.windows.dir}"/>
+        <echo file="${dist.windows.dir}/LEIA-ME-WINDOWS.txt" append="false"><![CDATA[
+GuiaLar Digital ${version} — pacote Windows (laboratório)
+
+Pré-requisito: Java 17+ no PATH (JDK ou JRE). Não precisa de Ant no PC do lab.
+
+1) Somente diagnóstico (SEM admin — smoke test da universidade):
+   smoke-diagnostico-windows.bat
+   ou:  java -jar guialar-digital.jar --cli --diagnostico
+
+2) Interface gráfica:
+   run-windows.bat
+   ou:  java -jar guialar-digital.jar --gui
+
+3) Tentar aplicar DNS (pede UAC; em conta limitada deve falhar com "não aplicado"):
+   java -jar guialar-digital.jar --cli --aplicar-dns
+
+4) Desfazer DNS (se manifesto existir em %LOCALAPPDATA%\GuiaLar\):
+   java -jar guialar-digital.jar --cli --desfazer
+
+Expectativa em PC trancado:
+- App abre e mostra SO, elevação, DNS atual (se legível), navegadores.
+- Sem admin: DNS permanece "não aplicado"; sistema inalterado.
+- Guias de Edge/Chrome/Firefox/Brave continuam disponíveis.
+]]></echo>
+        <echo message="Pacote Windows em: ${dist.windows.dir}"/>
+    </target>
+
+    <!-- Target: run - Executa a aplicação (requer sudo no Linux) -->
+    <target name="run" depends="jar" description="Executa a aplicação">
+        <echo message="ATENÇÃO: No Linux, alterar DNS requer privilégios administrativos!"/>
+        <echo message="Execute com: sudo ant run"/>
+        <echo message=""/>
+        <java jar="${jar.dir}/${jar.name}" fork="true">
+            <arg value="--cli"/>
+            <classpath>
+                <path refid="classpath"/>
+            </classpath>
+        </java>
+    </target>
+
+    <!-- Target: run-gui - Executa a interface gráfica (Swing) -->
+    <target name="run-gui" depends="jar" description="Executa a interface gráfica">
+        <echo message="Iniciando a interface gráfica do GuiaLar Digital..."/>
+        <java jar="${jar.dir}/${jar.name}" fork="true">
+            <arg value="--gui"/>
+            <classpath>
+                <path refid="classpath"/>
+            </classpath>
+        </java>
+    </target>
+
+    <!-- Target: run-diagnostico - diagnóstico sem privilégios -->
+    <target name="run-diagnostico" depends="jar" description="Diagnóstico somente leitura">
+        <java jar="${jar.dir}/${jar.name}" fork="true">
+            <arg value="--cli"/>
+            <arg value="--diagnostico"/>
+        </java>
+    </target>
+
+    <!-- Target: rebuild - Limpa e reconstrói tudo -->
+    <target name="rebuild" depends="clean,jar" description="Limpa e reconstrói o projeto">
+        <echo message="Rebuild concluído!"/>
+    </target>
+
+    <!-- Target: help - Mostra ajuda -->
+    <target name="help" description="Mostra ajuda sobre os targets disponíveis">
+        <echo message=""/>
+        <echo message="╔════════════════════════════════════════════════════════════════╗"/>
+        <echo message="║         GuiaLar Digital ${version} - Build com Apache Ant        ║"/>
+        <echo message="╚════════════════════════════════════════════════════════════════╝"/>
+        <echo message=""/>
+        <echo message="Targets disponíveis:"/>
+        <echo message=""/>
+        <echo message="  ant clean          - Remove arquivos de build"/>
+        <echo message="  ant compile        - Compila o código-fonte"/>
+        <echo message="  ant jar            - Cria o JAR executável (padrão)"/>
+        <echo message="  ant test / test-windows - Testes do adapter Windows (mocks)"/>
+        <echo message="  ant dist           - Distribuição completa"/>
+        <echo message="  ant dist-windows   - Pacote para copiar ao PC Windows do lab"/>
+        <echo message="  ant run            - CLI (Linux: sudo para DNS)"/>
+        <echo message="  ant run-gui        - Interface gráfica"/>
+        <echo message="  ant run-diagnostico - Diagnóstico sem privilégios"/>
+        <echo message="  ant rebuild        - Limpa e reconstrói tudo"/>
+        <echo message="  ant help           - Mostra esta ajuda"/>
+        <echo message=""/>
+        <echo message="Windows lab (após ant dist-windows):"/>
+        <echo message="  copie dist/windows/ para o pendrive e rode smoke-diagnostico-windows.bat"/>
+        <echo message=""/>
+    </target>
+
+</project>

@@ -1,0 +1,28 @@
+# Build outputs
+build/
+dist/
+lib/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+.project
+.classpath
+.settings/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+/tmp/guialar-*.log
+
+# Temporary files
+*.tmp
+*.bak
+*~
+
+# Docker volumes
+.docker/
