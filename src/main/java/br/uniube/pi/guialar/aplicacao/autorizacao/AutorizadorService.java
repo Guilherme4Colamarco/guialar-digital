@@ -17,11 +17,14 @@ public class AutorizadorService {
 
     /**
      * Solicita autorização do usuário para executar o plano de ações.
-     * 
+     *
      * @param plano Plano de ações a ser autorizado
+     * @param possuiPrivilegios se o processo já roda com permissão de administrador
+     *                          (verificada por {@code PlataformaService.isAdministrador()},
+     *                          de forma multiplataforma)
      * @return true se autorizado, false caso contrário
      */
-    public boolean autorizar(PlanoAcao plano) {
+    public boolean autorizar(PlanoAcao plano, boolean possuiPrivilegios) {
         if (!plano.temAcoes()) {
             return false;
         }
@@ -33,13 +36,11 @@ public class AutorizadorService {
             return false;
         }
 
-        if (plano.isRequerPrivilegios()) {
-            if (!verificarPrivilegios()) {
-                System.err.println("\n❌ Este programa precisa ser executado com privilégios administrativos.");
-                System.err.println("   Execute novamente com: sudo java -jar guialar-digital.jar");
-                System.err.println("   Ou: sudo ./mvnw spring-boot:run");
-                return false;
-            }
+        if (plano.isRequerPrivilegios() && !possuiPrivilegios) {
+            System.err.println("\n❌ Este programa precisa ser executado com privilégios administrativos.");
+            System.err.println("   Linux:   sudo java -jar guialar-digital.jar --cli");
+            System.err.println("   Windows: execute o terminal como Administrador e rode novamente.");
+            return false;
         }
 
         plano.setAutorizado(true);
@@ -57,32 +58,5 @@ public class AutorizadorService {
         String resposta = scanner.nextLine().trim().toLowerCase();
         
         return resposta.equals("s") || resposta.equals("sim");
-    }
-
-    /**
-     * Verifica se o programa está sendo executado com privilégios administrativos.
-     */
-    private boolean verificarPrivilegios() {
-        String usuario = System.getProperty("user.name");
-        
-        if ("root".equals(usuario)) {
-            return true;
-        }
-
-        try {
-            Process process = new ProcessBuilder("id", "-u")
-                .redirectErrorStream(true)
-                .start();
-
-            Scanner scanner = new Scanner(process.getInputStream());
-            if (scanner.hasNextInt()) {
-                int uid = scanner.nextInt();
-                return uid == 0;
-            }
-        } catch (Exception e) {
-            // Ignora erro
-        }
-
-        return false;
     }
 }

@@ -3,7 +3,7 @@
 [![Build and Test](https://github.com/Guilherme4Colamarco/guialar-digital/actions/workflows/build-and-test.yml/badge.svg)](https://github.com/Guilherme4Colamarco/guialar-digital/actions/workflows/build-and-test.yml)
 [![Quick Check](https://github.com/Guilherme4Colamarco/guialar-digital/actions/workflows/quick-check.yml/badge.svg)](https://github.com/Guilherme4Colamarco/guialar-digital/actions/workflows/quick-check.yml)
 
-**Assistente para configuração de DNS seguro e adblockers (Linux + esboço Windows)**
+**Assistente para configuração de DNS seguro e adblockers (Linux + Windows)**
 
 Projeto desenvolvido como parte da disciplina Projetos Integrados I  
 **Curso:** Inteligência Artificial e Ciência de Dados — Uniube  
@@ -22,9 +22,11 @@ O GuiaLar Digital é uma aplicação Java que automatiza a configuração de pro
 - ✅ Configuração completa de DNS + navegadores + extensões
 - ✅ Testes e verificação
 
-**ESBOÇO INICIAL (Windows):**
-- 🔧 Interface básica para Windows (PowerShell/Set-DnsClientServerAddress)
-- 🔧 Estrutura preparada, implementação mínima
+**WINDOWS (10/11):**
+- ✅ Detecção de Windows e navegadores (Chrome, Edge, Brave, Firefox, Opera, Vivaldi)
+- ✅ Troca de DNS automática via PowerShell (`Set-DnsClientServerAddress`, IPv4 + IPv6)
+- ✅ Verificação (smoke test) via `Resolve-DnsName`
+- 🔧 Bloqueador de anúncios: automático no Firefox; guiado (loja) no Chrome/Edge
 
 **FORA DO ESCOPO (por enquanto):**
 - ❌ macOS
@@ -125,6 +127,35 @@ Seleção de modo ao executar o JAR:
 - `--cli` força o modo linha de comando.
 - Sem flags: usa a GUI quando há ambiente gráfico disponível e cai para a CLI em
   ambientes headless (servidores, CI, containers).
+
+### Windows (10/11)
+
+O GuiaLar Digital também roda no Windows. A mesma interface gráfica amigável e a
+CLI funcionam, usando PowerShell por baixo (nenhuma dependência extra além do JDK).
+
+Pré-requisitos: **Java 17+** instalado (`java -version`).
+
+```powershell
+# Compilar (se tiver o Apache Ant instalado, ex.: choco install ant)
+ant clean jar
+
+# Abrir a interface gráfica
+java -jar build\jar\guialar-digital.jar --gui
+```
+
+Para **trocar o DNS**, execute como Administrador (clique com o botão direito no
+PowerShell/terminal e escolha "Executar como administrador"). Por baixo, o
+programa usa:
+
+```powershell
+Set-DnsClientServerAddress -InterfaceIndex <i> -ServerAddresses '1.1.1.3','1.0.0.3','2606:4700:4700::1113','2606:4700:4700::1003'
+```
+
+Para reverter:
+
+```powershell
+Get-NetAdapter | ? {$_.Status -eq 'Up'} | % { Set-DnsClientServerAddress -InterfaceIndex $_.ifIndex -ResetServerAddresses }
+```
 
 ---
 
@@ -467,7 +498,7 @@ Instala adblocker apropriado:
 
 | Sistema Operacional | Status | Notas |
 |---------------------|--------|-------|
-| **Windows 10/11**   | 🔧 Esboço | Instruções PowerShell manuais |
+| **Windows 10/11**   | ✅ Funcional | DNS automático via PowerShell (Set-DnsClientServerAddress) |
 | **macOS**           | ❌ Fora do escopo | Não planejado |
 | **Android/iOS**     | ❌ Fora do escopo | Não planejado |
 
@@ -729,11 +760,12 @@ Containers podem ter configuração DNS separada.
 - ✅ Smoke tests (dig / testcategory.com)
 - ✅ Instruções de reversão
 
-### ESBOÇO INICIAL (Windows):
-- 🔧 Interface para detecção de Windows
-- 🔧 Estrutura para PowerShell (Set-DnsClientServerAddress)
-- 🔧 Notas sobre DoH no Edge/Chrome
-- 🔧 Implementação mínima (não bloqueia MVP Linux)
+### WINDOWS (10/11):
+- ✅ Detecção de Windows e de navegadores (Program Files / AppData)
+- ✅ Troca de DNS automática via PowerShell (`Set-DnsClientServerAddress`, IPv4 + IPv6)
+- ✅ Verificação (smoke test) via `Resolve-DnsName` (fallback `nslookup`)
+- ✅ Detecção de administrador e reversão (`-ResetServerAddresses`)
+- 🔧 Bloqueador de anúncios: automático no Firefox; guiado (loja) no Chrome/Edge
 
 ### FORA DO ESCOPO (por decisão do projeto):
 - ❌ macOS

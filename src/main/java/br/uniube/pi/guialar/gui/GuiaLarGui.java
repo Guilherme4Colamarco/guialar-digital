@@ -1,15 +1,10 @@
 package br.uniube.pi.guialar.gui;
 
-import br.uniube.pi.guialar.aplicacao.deteccao.DetectorDistroService;
-import br.uniube.pi.guialar.aplicacao.deteccao.DetectorNavegadorService;
-import br.uniube.pi.guialar.aplicacao.dns.ConfiguradorDnsService;
-import br.uniube.pi.guialar.aplicacao.extensao.InstaladorExtensaoService;
-import br.uniube.pi.guialar.aplicacao.verificacao.VerificacaoDnsService;
-import br.uniube.pi.guialar.dominio.distro.InfoDistro;
+import br.uniube.pi.guialar.aplicacao.plataforma.PlataformaFactory;
+import br.uniube.pi.guialar.aplicacao.plataforma.PlataformaService;
 import br.uniube.pi.guialar.dominio.dns.ConfiguracaoDns;
-import br.uniube.pi.guialar.dominio.dns.ServidorDns;
 import br.uniube.pi.guialar.dominio.navegador.Navegador;
-import br.uniube.pi.guialar.dominio.navegador.TipoNavegador;
+import br.uniube.pi.guialar.dominio.sistema.SistemaInfo;
 import br.uniube.pi.guialar.dominio.verificacao.ResultadoVerificacao;
 
 import javax.swing.BorderFactory;
@@ -36,7 +31,6 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Scanner;
 
 /**
  * Interface gráfica (Swing) do GuiaLar Digital em "Modo Simples".
@@ -62,11 +56,7 @@ public class GuiaLarGui {
     private static final Color COR_OK = new Color(0x1B, 0x7A, 0x2E);
     private static final Color COR_ATENCAO = new Color(0xB3, 0x5A, 0x00);
 
-    private final DetectorDistroService detectorDistro;
-    private final DetectorNavegadorService detectorNavegador;
-    private final ConfiguradorDnsService configuradorDns;
-    private final InstaladorExtensaoService instaladorExtensao;
-    private final VerificacaoDnsService verificacaoDns;
+    private final PlataformaService plataforma;
 
     private JFrame frame;
     private JTextArea areaProgresso;
@@ -75,15 +65,11 @@ public class GuiaLarGui {
     private JButton botaoProteger;
     private JButton botaoDetalhes;
 
-    private InfoDistro distro;
+    private SistemaInfo sistema;
     private List<Navegador> navegadores = new ArrayList<>();
 
     public GuiaLarGui() {
-        this.detectorDistro = new DetectorDistroService();
-        this.detectorNavegador = new DetectorNavegadorService();
-        this.configuradorDns = new ConfiguradorDnsService();
-        this.instaladorExtensao = new InstaladorExtensaoService();
-        this.verificacaoDns = new VerificacaoDnsService();
+        this.plataforma = PlataformaFactory.criar();
     }
 
     /** Ponto de entrada da GUI. */
@@ -94,8 +80,8 @@ public class GuiaLarGui {
     private void construir() {
         aplicarLookAndFeel();
 
-        distro = detectorDistro.detectar();
-        navegadores = deduplicar(detectorNavegador.detectar());
+        sistema = plataforma.descreverSistema();
+        navegadores = deduplicar(plataforma.detectarNavegadores());
 
         frame = new JFrame("GuiaLar Digital");
         frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
@@ -197,9 +183,9 @@ public class GuiaLarGui {
         cartao.add(item(navTexto));
         cartao.add(Box.createVerticalStrut(8));
 
-        boolean compativel = distro.isSuportada();
+        boolean compativel = sistema.isCompativel();
         JLabel status = item(compativel
-            ? "• &nbsp;Seu computador é <b>compatível</b> — pode continuar."
+            ? "• &nbsp;Seu computador (" + sistema.getNomeAmigavel() + ") é <b>compatível</b> — pode continuar."
             : "• &nbsp;Seu computador ainda <b>não é compatível</b> com o GuiaLar.");
         status.setForeground(compativel ? COR_OK : COR_ATENCAO);
         cartao.add(status);
@@ -291,15 +277,16 @@ public class GuiaLarGui {
     }
 
     private void onProteger() {
-        if (!distro.isSuportada()) {
+        if (!sistema.isCompativel()) {
             JOptionPane.showMessageDialog(frame,
                 "Este computador ainda não é compatível com o GuiaLar Digital.\n"
-                    + "Ele funciona nos sistemas Linux mais comuns (Debian, Ubuntu, Fedora e Arch).",
+                    + "Ele funciona no Windows 10/11 e nos sistemas Linux mais comuns "
+                    + "(Debian, Ubuntu, Fedora e Arch).",
                 "Ainda não dá para continuar", JOptionPane.INFORMATION_MESSAGE);
             return;
         }
 
-        boolean admin = isRoot();
+        boolean admin = plataforma.isAdministrador();
         StringBuilder msg = new StringBuilder();
         msg.append("Vamos deixar seu computador mais seguro. Isto vai:\n\n");
         msg.append("   • Bloquear sites perigosos (vírus e golpes)\n");
@@ -344,15 +331,14 @@ public class GuiaLarGui {
                 System.setErr(ponte);
                 try {
                     publish("Ativando a proteção contra sites perigosos e conteúdo +18…");
-                    ConfiguracaoDns resultado = configuradorDns.configurar(distro);
+                    ConfiguracaoDns resultado = plataforma.protegerDns();
                     dnsOk = resultado.isAplicado();
                     publish(dnsOk
                         ? "✓ Proteção ativada no seu computador."
                         : "• Ainda não deu para ativar a proteção agora (o programa precisa de permissão de administrador).");
 
                     publish("Conferindo se a proteção está funcionando…");
-                    List<ResultadoVerificacao> resultados = verificacaoDns.verificar();
-                    verificacaoDns.exibirResumo(resultados);
+                    List<ResultadoVerificacao> resultados = plataforma.verificarProtecao();
                     testesTotal = resultados.size();
                     for (ResultadoVerificacao r : resultados) {
                         if (r.isSucesso()) {
@@ -364,7 +350,7 @@ public class GuiaLarGui {
                     if (!navegadores.isEmpty()) {
                         publish("Preparando o bloqueador de anúncios em " + nomesNavegadores() + "…");
                         for (Navegador nav : navegadores) {
-                            boolean ok = instaladorExtensao.instalar(nav);
+                            boolean ok = plataforma.prepararNavegador(nav);
                             nav.setExtensaoInstalada(ok);
                         }
                         publish("✓ Bloqueador de anúncios preparado.");
@@ -392,8 +378,7 @@ public class GuiaLarGui {
                 if (dnsOk) {
                     progresso("✓ Pronto! Seu computador está mais protegido.");
                 } else {
-                    progresso("Quase lá! Para concluir, feche o programa e abra novamente "
-                        + "como administrador (botão direito → \"Executar como administrador\").");
+                    progresso("Quase lá! Para concluir, " + plataforma.instrucoesAdmin() + ".");
                 }
                 if (!navegadores.isEmpty()) {
                     progresso("Dica: falta um último ajuste dentro do seu navegador para a proteção "
@@ -414,23 +399,6 @@ public class GuiaLarGui {
             }
         }
         return String.join(", ", nomes);
-    }
-
-    private boolean isRoot() {
-        if ("root".equals(System.getProperty("user.name"))) {
-            return true;
-        }
-        try {
-            Process p = new ProcessBuilder("id", "-u").redirectErrorStream(true).start();
-            try (Scanner sc = new Scanner(p.getInputStream())) {
-                if (sc.hasNextInt()) {
-                    return sc.nextInt() == 0;
-                }
-            }
-        } catch (Exception ignored) {
-            // Sem permissão de administrador.
-        }
-        return false;
     }
 
     private List<Navegador> deduplicar(List<Navegador> lista) {
