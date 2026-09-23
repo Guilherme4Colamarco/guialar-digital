@@ -13,6 +13,10 @@ import br.uniube.pi.guialar.gui.GuiaLarGui;
 import br.uniube.pi.guialar.dominio.sistema.TipoSistema;
 
 import java.awt.GraphicsEnvironment;
+import java.io.FileDescriptor;
+import java.io.FileOutputStream;
+import java.io.PrintStream;
+import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.List;
 
@@ -27,12 +31,31 @@ import java.util.List;
 public class GuiaLarApplication {
 
     public static void main(String[] args) {
+        configurarConsoleUtf8();
+
         if (deveUsarGui(args)) {
             GuiaLarGui.iniciar();
             return;
         }
 
         executarCli(args);
+    }
+
+    /**
+     * No JDK Windows o System.out padrão usa a code page do console (cp1252/850),
+     * o que corrompe português no cmd e no Wine. UTF-8 + {@code chcp 65001} nos .bat.
+     */
+    static void configurarConsoleUtf8() {
+        String os = System.getProperty("os.name", "").toLowerCase();
+        if (!os.contains("win")) {
+            return;
+        }
+        try {
+            System.setOut(new PrintStream(new FileOutputStream(FileDescriptor.out), true, StandardCharsets.UTF_8));
+            System.setErr(new PrintStream(new FileOutputStream(FileDescriptor.err), true, StandardCharsets.UTF_8));
+        } catch (Exception ignored) {
+            // mantém o encoding padrão do console
+        }
     }
 
     /**

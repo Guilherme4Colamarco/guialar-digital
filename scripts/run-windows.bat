@@ -1,6 +1,7 @@
 @echo off
 REM GuiaLar Digital - launcher Windows (sem admin para diagnóstico)
 setlocal
+chcp 65001 >nul
 set JAR=%~dp0guialar-digital.jar
 if not exist "%JAR%" set JAR=%~dp0..\build\jar\guialar-digital.jar
 
@@ -13,8 +14,8 @@ if errorlevel 1 (
 )
 
 if "%~1"=="" (
-  java -jar "%JAR%" --gui
+  java -Dfile.encoding=UTF-8 -jar "%JAR%" --gui
 ) else (
-  java -jar "%JAR%" %*
+  java -Dfile.encoding=UTF-8 -jar "%JAR%" %*
 )
 endlocal
