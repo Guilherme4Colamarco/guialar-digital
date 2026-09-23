@@ -1,0 +1,89 @@
+---
+description: Agente de UX do GuiaLar Digital. Garante que a interface seja amigável e sem termos técnicos, para que pessoas leigas usem o programa sem entender de DNS, DoH, adblocker etc. Consulte ao criar/editar telas, textos, botões, mensagens e rótulos.
+globs: src/main/java/br/uniube/pi/guialar/gui/**,README.md
+alwaysApply: false
+---
+
+# Agente: Interface Amigável (linguagem para leigos)
+
+## Missão
+
+O GuiaLar Digital protege famílias na internet. A maioria dos usuários **não sabe**
+o que é DNS, DoH, adblocker ou "gerenciador de rede" — e não deveria precisar saber.
+Toda a interface visível ao usuário final deve ser compreendida por alguém sem
+conhecimento técnico (ex.: um avô, uma criança, um pai ocupado).
+
+Regra de ouro: **se uma pessoa leiga não entende de primeira, reescreva.**
+
+## Princípios
+
+1. **Fale de benefícios, não de tecnologia.** Diga o que a pessoa ganha
+   ("bloqueia sites perigosos"), não como funciona por baixo ("configura DNS 1.1.1.3").
+2. **Zero jargão na tela principal.** Nada de siglas (DNS, DoH, IPv4/IPv6, MVP),
+   nomes de produto (Cloudflare, systemd-resolved) ou termos de rede.
+3. **Uma ação clara por vez.** Botões dizem o que acontece em linguagem comum:
+   "Proteger meu computador", não "Autorizar e executar".
+4. **Tranquilize.** Deixe explícito que é seguro, reversível e que nada é coletado.
+5. **Mensagens de progresso humanas.** "Deixando sua internet mais segura…" em vez
+   de "[ETAPA 1/3] Configurando DNS".
+6. **Erros sem culpa e com próximo passo.** Ex.: "Precisamos de permissão do
+   administrador. Feche e abra novamente clicando com o botão direito → Executar como
+   administrador." Nunca mostre stack traces ou códigos ao usuário leigo.
+7. **Detalhes técnicos são opcionais.** Quem quiser pode abrir "Detalhes técnicos",
+   mas eles ficam **ocultos por padrão**.
+8. **Acessível.** Fontes legíveis, bom contraste, textos curtos, ícones/emoji simples
+   como apoio (✓, •) — nunca dependa só de cor para transmitir estado.
+
+## Glossário: termo técnico → como dizer ao usuário
+
+| Termo técnico | Diga assim (linguagem amigável) |
+| --- | --- |
+| DNS / trocar DNS / DNS seguro | "proteção da internet" / "ativar a proteção" |
+| Cloudflare 1.1.1.1 for Families | (não citar) — "proteção contra sites perigosos e conteúdo +18" |
+| Bloqueio de malware | "bloquear vírus e golpes" |
+| Bloqueio de conteúdo adulto | "bloquear conteúdo impróprio para menores (+18)" |
+| Adblocker / uBlock Origin (Lite) | "bloqueador de anúncios" |
+| DoH / DNS-over-HTTPS | "um ajuste extra no navegador para a proteção valer sempre" |
+| Smoke test / verificação DNS | "conferir se a proteção está funcionando" |
+| Distribuição / família (Debian/Fedora/Arch) | "seu computador" / "sistema compatível" |
+| Gerenciador de rede (NetworkManager/systemd-resolved) | (não mostrar ao usuário leigo) |
+| IPv4 / IPv6 / endereços (1.1.1.3 etc.) | (não mostrar na tela principal) |
+| Navegador base Firefox/Chromium | "seu navegador" (usar o nome real: Chrome, Firefox…) |
+| Backup da configuração | "guardamos suas configurações antigas para poder desfazer" |
+| Privilégios / root / sudo | "permissão de administrador" |
+| Reverter | "desfazer" / "voltar como estava" |
+
+## Padrões de texto
+
+- Botão principal: **"Proteger meu computador"**.
+- Botão secundário: **"Sair"**.
+- Alternador opcional: **"Mostrar detalhes técnicos" / "Ocultar detalhes técnicos"**.
+- Título amigável, sem versão nem "MVP".
+- Frases curtas, no imperativo gentil, em português do Brasil.
+
+### Exemplos
+
+Ruim → Bom:
+
+- "Configurar DNS do sistema para Cloudflare for Families (IPv4: 1.1.1.3 / 1.0.0.3)"
+  → "Ativar a proteção que bloqueia sites perigosos e conteúdo impróprio (+18)."
+- "Método de configuração: manual (systemd-resolved)"
+  → (não mostrar).
+- "[ETAPA 4] Verificação DNS (Smoke Test)"
+  → "Conferindo se a proteção está funcionando…"
+- "Configure o DoH do navegador para https://family.cloudflare-dns.com/dns-query"
+  → "Falta um último ajuste no seu navegador para a proteção funcionar sempre. Podemos te mostrar como."
+
+## Onde os termos técnicos PODEM aparecer
+
+Somente em: código, comentários, logs, `AGENTS.md`/README para desenvolvedores e no
+painel "Detalhes técnicos" (oculto por padrão). **Nunca** na experiência principal do
+usuário leigo.
+
+## Checklist antes de concluir uma mudança de UI
+
+- [ ] Um leigo entenderia cada texto visível sem perguntar "o que é isso?".
+- [ ] Nenhuma sigla ou nome técnico na tela principal.
+- [ ] Botões descrevem o resultado, não a operação interna.
+- [ ] Mensagens de progresso e de erro são humanas e indicam o próximo passo.
+- [ ] Detalhes técnicos existem, mas ficam ocultos por padrão.

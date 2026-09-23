@@ -32,7 +32,6 @@ import java.awt.Color;
 import java.awt.Component;
 import java.awt.Dimension;
 import java.awt.Font;
-import java.awt.GridLayout;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -40,25 +39,28 @@ import java.util.Map;
 import java.util.Scanner;
 
 /**
- * Interface gráfica (Swing) do GuiaLar Digital.
+ * Interface gráfica (Swing) do GuiaLar Digital em "Modo Simples".
  *
- * Reutiliza os mesmos serviços de domínio/aplicação da CLI, expondo o fluxo
- * completo de forma visual:
- * 1. Detecta a distribuição Linux e os navegadores instalados.
- * 2. Exibe o plano de ações transparente antes de qualquer alteração.
- * 3. Solicita autorização explícita do usuário (botão) e verifica privilégios.
- * 4. Executa a configuração de DNS, o smoke test e a instalação de adblockers,
- *    transmitindo toda a saída para um painel de log em tempo real.
+ * O objetivo desta tela é permitir que pessoas leigas usem o programa sem
+ * precisar entender termos técnicos (DNS, DoH, adblocker etc.). Toda a
+ * comunicação principal é feita em linguagem de benefício ("bloquear sites
+ * perigosos") e os termos técnicos ficam escondidos em um painel opcional
+ * "Detalhes técnicos".
  *
- * Implementada com Swing (parte do JDK) para não introduzir dependências novas
- * ao build Ant do projeto.
+ * As diretrizes de linguagem estão documentadas no agente de UX em
+ * {@code .cursor/rules/interface-amigavel.mdc}.
+ *
+ * Reutiliza os mesmos serviços de domínio/aplicação da CLI. Implementada com
+ * Swing (parte do JDK) para não introduzir dependências novas ao build Ant.
  */
 public class GuiaLarGui {
 
     private static final Color COR_FUNDO = new Color(0xF4, 0xF6, 0xF8);
     private static final Color COR_HEADER = new Color(0x0B, 0x5F, 0x63);
-    private static final Color COR_PRIMARIA = new Color(0x0E, 0x7A, 0x80);
+    private static final Color COR_PRIMARIA = new Color(0x1B, 0x7A, 0x2E);
     private static final Color COR_TEXTO_CLARO = Color.WHITE;
+    private static final Color COR_OK = new Color(0x1B, 0x7A, 0x2E);
+    private static final Color COR_ATENCAO = new Color(0xB3, 0x5A, 0x00);
 
     private final DetectorDistroService detectorDistro;
     private final DetectorNavegadorService detectorNavegador;
@@ -67,9 +69,11 @@ public class GuiaLarGui {
     private final VerificacaoDnsService verificacaoDns;
 
     private JFrame frame;
-    private JTextArea areaLog;
-    private JButton botaoExecutar;
-    private JButton botaoSair;
+    private JTextArea areaProgresso;
+    private JTextArea areaTecnica;
+    private JPanel painelTecnico;
+    private JButton botaoProteger;
+    private JButton botaoDetalhes;
 
     private InfoDistro distro;
     private List<Navegador> navegadores = new ArrayList<>();
@@ -93,13 +97,12 @@ public class GuiaLarGui {
         distro = detectorDistro.detectar();
         navegadores = deduplicar(detectorNavegador.detectar());
 
-        frame = new JFrame("GuiaLar Digital - DNS seguro e adblockers");
+        frame = new JFrame("GuiaLar Digital");
         frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
-        frame.setMinimumSize(new Dimension(860, 720));
+        frame.setMinimumSize(new Dimension(820, 720));
 
         JPanel raiz = new JPanel(new BorderLayout());
         raiz.setBackground(COR_FUNDO);
-
         raiz.add(criarCabecalho(), BorderLayout.NORTH);
         raiz.add(criarCorpo(), BorderLayout.CENTER);
         raiz.add(criarRodape(), BorderLayout.SOUTH);
@@ -109,7 +112,7 @@ public class GuiaLarGui {
         frame.setLocationRelativeTo(null);
         frame.setVisible(true);
 
-        log("GuiaLar Digital iniciado. Revise o plano de ações e clique em \"Autorizar e executar\".");
+        progresso("Tudo pronto. Quando quiser, clique em \"Proteger meu computador\".");
     }
 
     private void aplicarLookAndFeel() {
@@ -124,21 +127,20 @@ public class GuiaLarGui {
         JPanel header = new JPanel();
         header.setLayout(new BoxLayout(header, BoxLayout.Y_AXIS));
         header.setBackground(COR_HEADER);
-        header.setBorder(new EmptyBorder(18, 24, 18, 24));
+        header.setBorder(new EmptyBorder(20, 26, 20, 26));
 
         JLabel titulo = new JLabel("GuiaLar Digital");
         titulo.setForeground(COR_TEXTO_CLARO);
-        titulo.setFont(titulo.getFont().deriveFont(Font.BOLD, 26f));
+        titulo.setFont(titulo.getFont().deriveFont(Font.BOLD, 28f));
         titulo.setAlignmentX(Component.LEFT_ALIGNMENT);
 
-        JLabel subtitulo = new JLabel(
-            "Assistente para configuração de DNS seguro (Cloudflare Families) e adblockers");
+        JLabel subtitulo = new JLabel("Deixe a internet da sua família mais segura com um clique.");
         subtitulo.setForeground(new Color(0xD6, 0xEE, 0xEF));
-        subtitulo.setFont(subtitulo.getFont().deriveFont(Font.PLAIN, 14f));
+        subtitulo.setFont(subtitulo.getFont().deriveFont(Font.PLAIN, 15f));
         subtitulo.setAlignmentX(Component.LEFT_ALIGNMENT);
 
         header.add(titulo);
-        header.add(Box.createVerticalStrut(4));
+        header.add(Box.createVerticalStrut(6));
         header.add(subtitulo);
         return header;
     }
@@ -147,22 +149,13 @@ public class GuiaLarGui {
         JPanel corpo = new JPanel();
         corpo.setLayout(new BoxLayout(corpo, BoxLayout.Y_AXIS));
         corpo.setBackground(COR_FUNDO);
-        corpo.setBorder(new EmptyBorder(16, 20, 8, 20));
+        corpo.setBorder(new EmptyBorder(18, 22, 10, 22));
 
-        JPanel cartoes = new JPanel(new GridLayout(1, 3, 12, 0));
-        cartoes.setBackground(COR_FUNDO);
-        cartoes.setAlignmentX(Component.LEFT_ALIGNMENT);
-        cartoes.add(criarCartaoSistema());
-        cartoes.add(criarCartaoDns());
-        cartoes.add(criarCartaoNavegadores());
-        corpo.add(cartoes);
-
+        corpo.add(criarCartaoOQueFaz());
         corpo.add(Box.createVerticalStrut(14));
-        corpo.add(criarCartaoPlano());
-
-        corpo.add(Box.createVerticalStrut(14));
-        corpo.add(criarCartaoLog());
-
+        corpo.add(criarCartaoProgresso());
+        corpo.add(Box.createVerticalStrut(12));
+        corpo.add(criarPainelTecnico());
         return corpo;
     }
 
@@ -172,229 +165,213 @@ public class GuiaLarGui {
         cartao.setBackground(Color.WHITE);
         cartao.setBorder(BorderFactory.createCompoundBorder(
             BorderFactory.createLineBorder(new Color(0xE0, 0xE4, 0xE8)),
-            new EmptyBorder(12, 14, 14, 14)));
+            new EmptyBorder(14, 16, 16, 16)));
         cartao.setAlignmentX(Component.LEFT_ALIGNMENT);
 
-        JLabel titulo = new JLabel(tituloCartao);
-        titulo.setFont(titulo.getFont().deriveFont(Font.BOLD, 13f));
-        titulo.setForeground(COR_HEADER);
-        titulo.setAlignmentX(Component.LEFT_ALIGNMENT);
-        cartao.add(titulo);
-        cartao.add(Box.createVerticalStrut(8));
-        return cartao;
-    }
-
-    private JLabel linha(String texto) {
-        JLabel l = new JLabel(texto);
-        l.setFont(l.getFont().deriveFont(Font.PLAIN, 12.5f));
-        l.setAlignmentX(Component.LEFT_ALIGNMENT);
-        return l;
-    }
-
-    private JPanel criarCartaoSistema() {
-        JPanel cartao = criarCartao("Sistema detectado");
-        boolean suportada = distro.isSuportada();
-        cartao.add(linha("Distribuição: " + distro.getNome()));
-        cartao.add(linha("Versão: " + (distro.getVersao() == null || distro.getVersao().isEmpty()
-            ? "N/A" : distro.getVersao())));
-        cartao.add(linha("Família: " + distro.getTipo().getNomeExibicao()));
-        cartao.add(linha("Gerenciador de rede: " + distro.getGerenciadorRede()));
-        cartao.add(Box.createVerticalStrut(6));
-        JLabel status = linha(suportada ? "Status: suportada (MVP Linux)" : "Status: NÃO suportada");
-        status.setForeground(suportada ? new Color(0x1B, 0x7A, 0x2E) : new Color(0xB3, 0x26, 0x1A));
-        status.setFont(status.getFont().deriveFont(Font.BOLD, 12.5f));
-        cartao.add(status);
-        return cartao;
-    }
-
-    private JPanel criarCartaoDns() {
-        ServidorDns s = ServidorDns.getPadrao();
-        JPanel cartao = criarCartao("DNS Cloudflare Families");
-        cartao.add(linha("IPv4: " + s.getPrimario() + " / " + s.getSecundario()));
-        cartao.add(linha("IPv6: " + s.getPrimarioIpv6()));
-        cartao.add(linha("        " + s.getSecundarioIpv6()));
-        cartao.add(Box.createVerticalStrut(6));
-        cartao.add(linha("Proteção: malware + adulto (18+)"));
-        cartao.add(Box.createVerticalStrut(6));
-        cartao.add(linha("DoH: family.cloudflare-dns.com"));
-        return cartao;
-    }
-
-    private JPanel criarCartaoNavegadores() {
-        JPanel cartao = criarCartao("Navegadores detectados");
-        if (navegadores.isEmpty()) {
-            cartao.add(linha("Nenhum navegador detectado."));
-        } else {
-            for (Navegador nav : navegadores) {
-                String extensao = nav.getTipo() == TipoNavegador.FIREFOX
-                    ? "uBlock Origin" : "uBlock Origin Lite";
-                cartao.add(linha("• " + nav.getNome() + " (" + nav.getTipo().getNomeExibicao() + ")"));
-                cartao.add(linha("    → " + extensao));
-            }
+        if (tituloCartao != null) {
+            JLabel titulo = new JLabel(tituloCartao);
+            titulo.setFont(titulo.getFont().deriveFont(Font.BOLD, 16f));
+            titulo.setForeground(COR_HEADER);
+            titulo.setAlignmentX(Component.LEFT_ALIGNMENT);
+            cartao.add(titulo);
+            cartao.add(Box.createVerticalStrut(10));
         }
         return cartao;
     }
 
-    private JPanel criarCartaoPlano() {
-        JPanel cartao = criarCartao("Plano de ações (nada é executado sem sua autorização)");
-        JTextArea plano = new JTextArea(montarTextoPlano());
-        plano.setEditable(false);
-        plano.setLineWrap(true);
-        plano.setWrapStyleWord(true);
-        plano.setFont(new Font("Dialog", Font.PLAIN, 12));
-        plano.setBackground(new Color(0xF9, 0xFB, 0xFC));
-        plano.setBorder(new EmptyBorder(6, 6, 6, 6));
-        JScrollPane sp = new JScrollPane(plano);
+    private JLabel item(String texto) {
+        JLabel l = new JLabel("<html><body style='width:640px'>" + texto + "</body></html>");
+        l.setFont(l.getFont().deriveFont(Font.PLAIN, 14f));
+        l.setAlignmentX(Component.LEFT_ALIGNMENT);
+        l.setBorder(new EmptyBorder(3, 0, 3, 0));
+        return l;
+    }
+
+    private JPanel criarCartaoOQueFaz() {
+        JPanel cartao = criarCartao("O que este programa faz por você");
+        cartao.add(item("✓ &nbsp;Bloqueia <b>sites perigosos</b> (vírus e golpes)."));
+        cartao.add(item("✓ &nbsp;Bloqueia <b>conteúdo impróprio para menores</b> (+18)."));
+        String navTexto = navegadores.isEmpty()
+            ? "✓ &nbsp;Prepara um <b>bloqueador de anúncios</b> nos seus navegadores."
+            : "✓ &nbsp;Instala um <b>bloqueador de anúncios</b> em: " + nomesNavegadores() + ".";
+        cartao.add(item(navTexto));
+        cartao.add(Box.createVerticalStrut(8));
+
+        boolean compativel = distro.isSuportada();
+        JLabel status = item(compativel
+            ? "• &nbsp;Seu computador é <b>compatível</b> — pode continuar."
+            : "• &nbsp;Seu computador ainda <b>não é compatível</b> com o GuiaLar.");
+        status.setForeground(compativel ? COR_OK : COR_ATENCAO);
+        cartao.add(status);
+
+        cartao.add(Box.createVerticalStrut(6));
+        JLabel tranquilizar = item("É seguro: nada é feito sem a sua permissão, "
+            + "guardamos suas configurações para poder desfazer e "
+            + "<b>nenhuma informação sua é coletada</b>.");
+        tranquilizar.setForeground(new Color(0x5A, 0x63, 0x6B));
+        cartao.add(tranquilizar);
+        return cartao;
+    }
+
+    private JPanel criarCartaoProgresso() {
+        JPanel cartao = criarCartao("Como está a proteção");
+        areaProgresso = new JTextArea();
+        areaProgresso.setEditable(false);
+        areaProgresso.setLineWrap(true);
+        areaProgresso.setWrapStyleWord(true);
+        areaProgresso.setFont(new Font("Dialog", Font.PLAIN, 15));
+        areaProgresso.setBackground(new Color(0xF3, 0xF9, 0xF4));
+        areaProgresso.setForeground(new Color(0x21, 0x2B, 0x24));
+        areaProgresso.setBorder(new EmptyBorder(10, 10, 10, 10));
+        JScrollPane sp = new JScrollPane(areaProgresso);
         sp.setAlignmentX(Component.LEFT_ALIGNMENT);
-        sp.setPreferredSize(new Dimension(10, 150));
-        sp.setMaximumSize(new Dimension(Integer.MAX_VALUE, 160));
+        sp.setPreferredSize(new Dimension(10, 210));
         cartao.add(sp);
         return cartao;
     }
 
-    private JPanel criarCartaoLog() {
-        JPanel cartao = criarCartao("Execução");
-        areaLog = new JTextArea();
-        areaLog.setEditable(false);
-        areaLog.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
-        areaLog.setBackground(new Color(0x1E, 0x24, 0x2B));
-        areaLog.setForeground(new Color(0xE6, 0xE6, 0xE6));
-        areaLog.setBorder(new EmptyBorder(8, 8, 8, 8));
-        JScrollPane sp = new JScrollPane(areaLog);
+    private JPanel criarPainelTecnico() {
+        painelTecnico = criarCartao("Detalhes técnicos (para quem entende do assunto)");
+        areaTecnica = new JTextArea();
+        areaTecnica.setEditable(false);
+        areaTecnica.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
+        areaTecnica.setBackground(new Color(0x1E, 0x24, 0x2B));
+        areaTecnica.setForeground(new Color(0xE6, 0xE6, 0xE6));
+        areaTecnica.setBorder(new EmptyBorder(8, 8, 8, 8));
+        JScrollPane sp = new JScrollPane(areaTecnica);
         sp.setAlignmentX(Component.LEFT_ALIGNMENT);
-        sp.setPreferredSize(new Dimension(10, 220));
-        cartao.add(sp);
-        return cartao;
+        sp.setPreferredSize(new Dimension(10, 200));
+        painelTecnico.add(sp);
+        painelTecnico.setVisible(false);
+        return painelTecnico;
     }
 
     private JPanel criarRodape() {
         JPanel rodape = new JPanel(new BorderLayout());
         rodape.setBackground(COR_FUNDO);
-        rodape.setBorder(new EmptyBorder(6, 20, 16, 20));
+        rodape.setBorder(new EmptyBorder(4, 22, 18, 22));
 
-        JLabel aviso = new JLabel(
-            "A configuração de DNS exige privilégios de administrador (sudo/root).");
-        aviso.setFont(aviso.getFont().deriveFont(Font.PLAIN, 11.5f));
-        aviso.setForeground(new Color(0x5A, 0x63, 0x6B));
+        botaoDetalhes = new JButton("Mostrar detalhes técnicos");
+        botaoDetalhes.setFocusPainted(false);
+        botaoDetalhes.addActionListener(e -> alternarDetalhes());
 
-        JPanel botoes = new JPanel();
-        botoes.setBackground(COR_FUNDO);
+        JPanel esquerda = new JPanel();
+        esquerda.setBackground(COR_FUNDO);
+        esquerda.add(botaoDetalhes);
 
-        botaoSair = new JButton("Sair");
+        JButton botaoSair = new JButton("Sair");
         botaoSair.addActionListener(e -> frame.dispose());
 
-        botaoExecutar = new JButton("Autorizar e executar");
-        botaoExecutar.setBackground(COR_PRIMARIA);
-        botaoExecutar.setForeground(COR_TEXTO_CLARO);
-        botaoExecutar.setFont(botaoExecutar.getFont().deriveFont(Font.BOLD, 13f));
-        botaoExecutar.setOpaque(true);
-        botaoExecutar.setBorderPainted(false);
-        botaoExecutar.setFocusPainted(false);
-        botaoExecutar.addActionListener(e -> onExecutar());
+        botaoProteger = new JButton("Proteger meu computador");
+        botaoProteger.setBackground(COR_PRIMARIA);
+        botaoProteger.setForeground(COR_TEXTO_CLARO);
+        botaoProteger.setFont(botaoProteger.getFont().deriveFont(Font.BOLD, 15f));
+        botaoProteger.setOpaque(true);
+        botaoProteger.setBorderPainted(false);
+        botaoProteger.setFocusPainted(false);
+        botaoProteger.setPreferredSize(new Dimension(260, 46));
+        botaoProteger.addActionListener(e -> onProteger());
 
-        botoes.add(botaoSair);
-        botoes.add(botaoExecutar);
+        JPanel direita = new JPanel();
+        direita.setBackground(COR_FUNDO);
+        direita.add(botaoSair);
+        direita.add(botaoProteger);
 
-        rodape.add(aviso, BorderLayout.WEST);
-        rodape.add(botoes, BorderLayout.EAST);
+        rodape.add(esquerda, BorderLayout.WEST);
+        rodape.add(direita, BorderLayout.EAST);
         return rodape;
     }
 
-    private String montarTextoPlano() {
-        StringBuilder sb = new StringBuilder();
-        ServidorDns s = ServidorDns.getPadrao();
-        int i = 1;
-        sb.append(i++).append(". Configurar DNS do sistema para ").append(s.getNome())
-          .append(" (IPv4: ").append(s.getPrimario()).append(" / ").append(s.getSecundario())
-          .append(")\n");
-        sb.append(i++).append(". Método: ").append(distro.getGerenciadorRede())
-          .append(" (backup antes de modificar)\n");
-        for (Navegador nav : navegadores) {
-            String extensao = nav.getTipo() == TipoNavegador.FIREFOX
-                ? "uBlock Origin" : "uBlock Origin Lite";
-            sb.append(i++).append(". Configurar ").append(extensao)
-              .append(" no ").append(nav.getNome()).append("\n");
-        }
-        sb.append(i++).append(". Verificar o DNS com smoke test (malware/nudity bloqueados, example.com permitido)\n");
-        sb.append(i++).append(". Pós-instalação: configurar DoH dos navegadores para ")
-          .append(ServidorDns.DOH_ENDPOINT).append("\n");
-        sb.append(i).append(". Privacidade: nenhum histórico de navegação é coletado.");
-        return sb.toString();
+    private void alternarDetalhes() {
+        boolean mostrar = !painelTecnico.isVisible();
+        painelTecnico.setVisible(mostrar);
+        botaoDetalhes.setText(mostrar ? "Ocultar detalhes técnicos" : "Mostrar detalhes técnicos");
+        frame.revalidate();
+        frame.repaint();
     }
 
-    private void onExecutar() {
+    private void onProteger() {
         if (!distro.isSuportada()) {
             JOptionPane.showMessageDialog(frame,
-                "Distribuição não suportada.\nO GuiaLar Digital suporta Debian, Fedora e Arch Linux.",
-                "Não suportado", JOptionPane.ERROR_MESSAGE);
+                "Este computador ainda não é compatível com o GuiaLar Digital.\n"
+                    + "Ele funciona nos sistemas Linux mais comuns (Debian, Ubuntu, Fedora e Arch).",
+                "Ainda não dá para continuar", JOptionPane.INFORMATION_MESSAGE);
             return;
         }
 
-        boolean root = isRoot();
+        boolean admin = isRoot();
         StringBuilder msg = new StringBuilder();
-        msg.append("As seguintes ações modificam o seu sistema:\n\n");
-        msg.append(montarTextoPlano()).append("\n\n");
-        if (!root) {
-            msg.append("Aviso: o programa NÃO está em modo administrador. A troca de DNS\n");
-            msg.append("provavelmente falhará. Reabra com: sudo java -jar guialar-digital.jar --gui\n\n");
+        msg.append("Vamos deixar seu computador mais seguro. Isto vai:\n\n");
+        msg.append("   • Bloquear sites perigosos (vírus e golpes)\n");
+        msg.append("   • Bloquear conteúdo impróprio para menores (+18)\n");
+        if (!navegadores.isEmpty()) {
+            msg.append("   • Preparar um bloqueador de anúncios em ").append(nomesNavegadores()).append("\n");
         }
-        msg.append("Deseja autorizar e continuar?");
+        msg.append("\nVocê pode desfazer isso depois, quando quiser.\n");
+        if (!admin) {
+            msg.append("\nObservação: pode ser que o programa peça permissão de administrador\n");
+            msg.append("para concluir a proteção.\n");
+        }
+        msg.append("\nPodemos começar?");
 
         int opcao = JOptionPane.showConfirmDialog(frame, msg.toString(),
-            "Autorização necessária", JOptionPane.YES_NO_OPTION,
-            root ? JOptionPane.QUESTION_MESSAGE : JOptionPane.WARNING_MESSAGE);
-
+            "Proteger meu computador", JOptionPane.YES_NO_OPTION, JOptionPane.QUESTION_MESSAGE);
         if (opcao != JOptionPane.YES_OPTION) {
-            log("\nOperação cancelada pelo usuário.");
+            progresso("Sem problemas! Nada foi alterado. Você pode fazer isso mais tarde.");
             return;
         }
-
-        executarPlano();
+        executar();
     }
 
-    private void executarPlano() {
-        botaoExecutar.setEnabled(false);
-        botaoExecutar.setText("Executando...");
-        log("\n✓ Autorização concedida. Executando ações...\n");
+    private void executar() {
+        botaoProteger.setEnabled(false);
+        botaoProteger.setText("Protegendo…");
+        areaProgresso.setText("");
+        progresso("Começando a proteger seu computador…");
 
-        new SwingWorker<Void, Void>() {
+        new SwingWorker<Void, String>() {
+            private boolean dnsOk;
+            private int testesOk;
+            private int testesTotal;
+
             @Override
             protected Void doInBackground() {
                 java.io.PrintStream original = System.out;
                 java.io.PrintStream originalErr = System.err;
                 java.io.PrintStream ponte = new java.io.PrintStream(
-                    new AreaLogOutputStream(), true, java.nio.charset.StandardCharsets.UTF_8);
+                    new AreaTecnicaOutputStream(), true, java.nio.charset.StandardCharsets.UTF_8);
                 System.setOut(ponte);
                 System.setErr(ponte);
                 try {
-                    System.out.println("[ETAPA 1/3] Configurando DNS seguro...");
+                    publish("Ativando a proteção contra sites perigosos e conteúdo +18…");
                     ConfiguracaoDns resultado = configuradorDns.configurar(distro);
-                    if (resultado.isAplicado()) {
-                        System.out.println("  OK: " + resultado.getMensagem());
-                    } else {
-                        System.out.println("  FALHOU: " + resultado.getMensagem());
-                    }
+                    dnsOk = resultado.isAplicado();
+                    publish(dnsOk
+                        ? "✓ Proteção ativada no seu computador."
+                        : "• Ainda não deu para ativar a proteção agora (o programa precisa de permissão de administrador).");
 
-                    System.out.println("\n[ETAPA 2/3] Verificação DNS (smoke test)...");
+                    publish("Conferindo se a proteção está funcionando…");
                     List<ResultadoVerificacao> resultados = verificacaoDns.verificar();
                     verificacaoDns.exibirResumo(resultados);
-
-                    System.out.println("[ETAPA 3/3] Configurando navegadores...");
-                    if (navegadores.isEmpty()) {
-                        System.out.println("  Nenhum navegador para configurar.");
+                    testesTotal = resultados.size();
+                    for (ResultadoVerificacao r : resultados) {
+                        if (r.isSucesso()) {
+                            testesOk++;
+                        }
                     }
-                    for (Navegador nav : navegadores) {
-                        System.out.println("  → " + nav.getNome());
-                        boolean ok = instaladorExtensao.instalar(nav);
-                        nav.setExtensaoInstalada(ok);
-                    }
+                    publish("✓ Conferência concluída (" + testesOk + " de " + testesTotal + " verificações OK).");
 
-                    System.out.println("\n──────────────────────────────────────────────");
-                    System.out.println("AÇÃO CRÍTICA: configure o DoH dos navegadores para:");
-                    System.out.println("  " + ServidorDns.DOH_ENDPOINT);
-                    System.out.println("Caso contrário, o navegador ignora o DNS do sistema.");
+                    if (!navegadores.isEmpty()) {
+                        publish("Preparando o bloqueador de anúncios em " + nomesNavegadores() + "…");
+                        for (Navegador nav : navegadores) {
+                            boolean ok = instaladorExtensao.instalar(nav);
+                            nav.setExtensaoInstalada(ok);
+                        }
+                        publish("✓ Bloqueador de anúncios preparado.");
+                    }
                 } catch (Exception ex) {
-                    System.out.println("Erro durante a execução: " + ex.getMessage());
+                    System.out.println("Erro técnico: " + ex.getMessage());
+                    publish("• Tivemos um problema inesperado. Veja \"Detalhes técnicos\" para mais informações.");
                 } finally {
                     System.setOut(original);
                     System.setErr(originalErr);
@@ -403,12 +380,40 @@ public class GuiaLarGui {
             }
 
             @Override
+            protected void process(List<String> mensagens) {
+                for (String m : mensagens) {
+                    progresso(m);
+                }
+            }
+
+            @Override
             protected void done() {
-                botaoExecutar.setText("Autorizar e executar");
-                botaoExecutar.setEnabled(true);
-                log("\nProcesso concluído.");
+                progresso("");
+                if (dnsOk) {
+                    progresso("✓ Pronto! Seu computador está mais protegido.");
+                } else {
+                    progresso("Quase lá! Para concluir, feche o programa e abra novamente "
+                        + "como administrador (botão direito → \"Executar como administrador\").");
+                }
+                if (!navegadores.isEmpty()) {
+                    progresso("Dica: falta um último ajuste dentro do seu navegador para a proteção "
+                        + "valer sempre. Se precisar, abra \"Detalhes técnicos\" para ver o passo a passo.");
+                }
+                progresso("Você pode desfazer tudo quando quiser.");
+                botaoProteger.setText("Proteger meu computador");
+                botaoProteger.setEnabled(true);
             }
         }.execute();
+    }
+
+    private String nomesNavegadores() {
+        List<String> nomes = new ArrayList<>();
+        for (Navegador nav : navegadores) {
+            if (!nomes.contains(nav.getNome())) {
+                nomes.add(nav.getNome());
+            }
+        }
+        return String.join(", ", nomes);
     }
 
     private boolean isRoot() {
@@ -423,7 +428,7 @@ public class GuiaLarGui {
                 }
             }
         } catch (Exception ignored) {
-            // Sem privilégios administrativos.
+            // Sem permissão de administrador.
         }
         return false;
     }
@@ -436,18 +441,18 @@ public class GuiaLarGui {
         return new ArrayList<>(unicos.values());
     }
 
-    private void log(String texto) {
-        if (areaLog == null) {
+    private void progresso(String texto) {
+        if (areaProgresso == null) {
             return;
         }
         SwingUtilities.invokeLater(() -> {
-            areaLog.append(texto + "\n");
-            areaLog.setCaretPosition(areaLog.getDocument().getLength());
+            areaProgresso.append(texto + "\n");
+            areaProgresso.setCaretPosition(areaProgresso.getDocument().getLength());
         });
     }
 
-    /** Redireciona a saída padrão dos serviços para o painel de log da GUI. */
-    private class AreaLogOutputStream extends java.io.OutputStream {
+    /** Redireciona a saída técnica dos serviços para o painel "Detalhes técnicos". */
+    private class AreaTecnicaOutputStream extends java.io.OutputStream {
         private final StringBuilder buffer = new StringBuilder();
 
         @Override
@@ -470,8 +475,8 @@ public class GuiaLarGui {
             final String linha = buffer.toString();
             buffer.setLength(0);
             SwingUtilities.invokeLater(() -> {
-                areaLog.append(linha + "\n");
-                areaLog.setCaretPosition(areaLog.getDocument().getLength());
+                areaTecnica.append(linha + "\n");
+                areaTecnica.setCaretPosition(areaTecnica.getDocument().getLength());
             });
         }
     }
