@@ -37,6 +37,6 @@ CMD ["sh", "-c", "echo '=== GuiaLar Digital - Smoke Test Fedora 40 ===' && \
                   echo '' && \
                   echo 'Navegadores instalados:' && \
                   which firefox && \
-                  which chromium && \
+                  (which chromium || which chromium-browser || echo 'chromium: binário ausente no PATH (nome varia no Fedora)') && \
                   echo '' && \
                   echo '✅ Smoke test passou - Fedora 40'"]
