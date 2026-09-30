@@ -19,23 +19,23 @@ import java.util.List;
 
 /**
  * Serviço para configuração de DNS do sistema.
- * 
+ *
  * DNS PADRÃO: Cloudflare 1.1.1.1 for Families (Malware + Adulto)
  * - IPv4 Primário: 1.1.1.3
  * - IPv4 Secundário: 1.0.0.3
  * - IPv6 Primário: 2606:4700:4700::1113
  * - IPv6 Secundário: 2606:4700:4700::1003
- * 
+ *
  * Bloqueia malware e conteúdo adulto (18+).
  * Não coleta histórico de navegação.
- * 
+ *
  * ESTRATÉGIA DE DETECÇÃO:
  * - NÃO edita /etc/resolv.conf diretamente (pode ser stub/symlink)
  * - Detecta gerenciador: NetworkManager (nmcli), systemd-resolved (resolvectl), ou Netplan
  * - Sempre faz backup antes de modificar
  * - Fedora/Debian: geralmente NetworkManager + systemd-resolved
  * - Arch: varia (NetworkManager, systemd-resolved, ou manual)
- * 
+ *
  * LIMITAÇÕES CONHECIDAS:
  * - VPN pode sobrescrever DNS do sistema
  * - Docker containers podem usar DNS próprio
@@ -61,7 +61,10 @@ public class ConfiguradorDnsService {
     }
 
     private ConfiguracaoDns configurarDebian(ServidorDns servidor, InfoDistro distro) {
-        if ("NetworkManager".equals(distro.getGerenciadorRede())) {
+        // Verificar se usa Netplan (Ubuntu Server)
+        if (Files.exists(Path.of("/etc/netplan"))) {
+            return configurarNetplan(servidor);
+        } else if ("NetworkManager".equals(distro.getGerenciadorRede())) {
             return configurarNetworkManager(servidor);
         } else if ("systemd-resolved".equals(distro.getGerenciadorRede())) {
             return configurarSystemdResolved(servidor);
@@ -97,14 +100,14 @@ public class ConfiguradorDnsService {
 
             backupConfigNetworkManager(conexao);
 
-            executarComando("nmcli", "connection", "modify", conexao, 
+            executarComando("nmcli", "connection", "modify", conexao,
                 "ipv4.dns", servidor.getPrimario() + " " + servidor.getSecundario());
-            executarComando("nmcli", "connection", "modify", conexao, 
+            executarComando("nmcli", "connection", "modify", conexao,
                 "ipv4.ignore-auto-dns", "yes");
-            
-            executarComando("nmcli", "connection", "modify", conexao, 
+
+            executarComando("nmcli", "connection", "modify", conexao,
                 "ipv6.dns", servidor.getPrimarioIpv6() + " " + servidor.getSecundarioIpv6());
-            executarComando("nmcli", "connection", "modify", conexao, 
+            executarComando("nmcli", "connection", "modify", conexao,
                 "ipv6.ignore-auto-dns", "yes");
 
             executarComando("nmcli", "connection", "up", conexao);
@@ -123,26 +126,121 @@ public class ConfiguradorDnsService {
     }
 
     /**
+     * Configura DNS via Netplan (Ubuntu Server, derivados).
+     * Cria arquivo YAML em /etc/netplan/ com configuração DNS.
+     */
+    private ConfiguracaoDns configurarNetplan(ServidorDns servidor) {
+        try {
+            Path netplanDir = Path.of("/etc/netplan");
+            if (!Files.exists(netplanDir)) {
+                return ConfiguracaoDns.erro("Netplan", "Diretório /etc/netplan não encontrado");
+            }
+
+            // Encontrar arquivo de configuração existente
+            Path configFile = null;
+            try (java.nio.file.DirectoryStream<Path> stream = Files.newDirectoryStream(netplanDir, "*.yaml")) {
+                for (Path entry : stream) {
+                    configFile = entry;
+                    break;
+                }
+            }
+
+            // Se não encontrou, criar um novo
+            if (configFile == null) {
+                configFile = netplanDir.resolve("99-guialar-dns.yaml");
+            }
+
+            // Backup do arquivo se existir
+            if (Files.exists(configFile)) {
+                String timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss"));
+                Path backup = Path.of(configFile.toString() + BACKUP_SUFFIX + timestamp);
+                Files.copy(configFile, backup, StandardCopyOption.REPLACE_EXISTING);
+                System.out.println("  ℹ️  Backup: " + backup);
+            }
+
+            // Criar configuração Netplan YAML
+            List<String> linhas = new ArrayList<>();
+            linhas.add("# Configurado por GuiaLar Digital");
+            linhas.add("# Cloudflare 1.1.1.1 for Families (Malware + Adulto)");
+            linhas.add("# Para reverter: sudo rm " + configFile + " && sudo netplan apply");
+            linhas.add("");
+            linhas.add("network:");
+            linhas.add("  version: 2");
+            linhas.add("  ethernets:");
+            linhas.add("    all:");
+            linhas.add("      match:");
+            linhas.add("        name: en*");
+            linhas.add("      dhcp4: true");
+            linhas.add("      dhcp6: true");
+            linhas.add("      nameservers:");
+            linhas.add("        addresses:");
+            linhas.add("          - " + servidor.getPrimario());
+            linhas.add("          - " + servidor.getSecundario());
+            linhas.add("          - " + servidor.getPrimarioIpv6());
+            linhas.add("          - " + servidor.getSecundarioIpv6());
+
+            Files.write(configFile, linhas, StandardOpenOption.CREATE,
+                StandardOpenOption.TRUNCATE_EXISTING);
+
+            // Aplicar configuração
+            executarComando("netplan", "apply");
+
+            System.out.println("  ℹ️  Para reverter:");
+            System.out.println("     sudo rm " + configFile);
+            System.out.println("     sudo netplan apply");
+
+            return ConfiguracaoDns.sucesso(servidor, "Netplan");
+
+        } catch (Exception e) {
+            return ConfiguracaoDns.erro("Netplan", e.getMessage());
+        }
+    }
+
+    /**
      * Configura DNS via systemd-resolved (Arch, algumas instalações Debian/Ubuntu).
+     * USA DROP-IN para não truncar o arquivo original.
      */
     private ConfiguracaoDns configurarSystemdResolved(ServidorDns servidor) {
         try {
-            Path resolvedConf = Path.of("/etc/systemd/resolved.conf");
+            // Usar drop-in ao invés de truncar o arquivo principal
+            Path dropinDir = Path.of("/etc/systemd/resolved.conf.d");
+            Path dropinFile = dropinDir.resolve("99-guialar.conf");
+
+            // Criar diretório se não existir
+            Files.createDirectories(dropinDir);
+
+            // Fazer backup do drop-in se já existir
+            if (Files.exists(dropinFile)) {
+                String timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss"));
+                Path backup = Path.of("/etc/systemd/resolved.conf.d/99-guialar.conf" + BACKUP_SUFFIX + timestamp);
+                Files.copy(dropinFile, backup, StandardCopyOption.REPLACE_EXISTING);
+                System.out.println("  ℹ️  Backup do drop-in: " + backup);
+            }
+
+            // Criar drop-in com configuração Cloudflare Families
             List<String> linhas = new ArrayList<>();
-            
+            linhas.add("# Configurado por GuiaLar Digital");
+            linhas.add("# Cloudflare 1.1.1.1 for Families (Malware + Adulto)");
+            linhas.add("# Para reverter: sudo rm " + dropinFile + " && sudo systemctl restart systemd-resolved");
+            linhas.add("");
             linhas.add("[Resolve]");
-            linhas.add("DNS=" + servidor.getPrimario() + " " + servidor.getSecundario());
+            linhas.add("DNS=" + servidor.getPrimario() + " " + servidor.getSecundario() + " " +
+                       servidor.getPrimarioIpv6() + " " + servidor.getSecundarioIpv6());
             linhas.add("FallbackDNS=");
             linhas.add("Domains=~.");
             linhas.add("DNSSEC=allow-downgrade");
             linhas.add("DNSOverTLS=opportunistic");
 
-            Files.write(resolvedConf, linhas, StandardOpenOption.CREATE, 
+            Files.write(dropinFile, linhas, StandardOpenOption.CREATE,
                 StandardOpenOption.TRUNCATE_EXISTING);
 
             executarComando("systemctl", "restart", "systemd-resolved");
 
-            return ConfiguracaoDns.sucesso(servidor, "systemd-resolved");
+            System.out.println("  ℹ️  Para reverter:");
+            System.out.println("     sudo rm " + dropinFile);
+            System.out.println("     sudo systemctl restart systemd-resolved");
+
+            return ConfiguracaoDns.sucesso(servidor, "systemd-resolved (drop-in)");
         } catch (Exception e) {
             return ConfiguracaoDns.erro("systemd-resolved", e.getMessage());
         }
@@ -150,19 +248,46 @@ public class ConfiguradorDnsService {
 
     /**
      * Configura DNS via /etc/resolv.conf (fallback manual).
+     * VERIFICA se é symlink stub antes de editar.
      */
     private ConfiguracaoDns configurarResolvConf(ServidorDns servidor) {
         try {
             Path resolvConf = Path.of("/etc/resolv.conf");
+
+            // Verificar se é symlink (geralmente aponta para stub do systemd)
+            if (Files.isSymbolicLink(resolvConf)) {
+                Path target = Files.readSymbolicLink(resolvConf);
+                System.out.println("  ⚠ /etc/resolv.conf é um symlink para: " + target);
+
+                if (target.toString().contains("systemd") || target.toString().contains("stub")) {
+                    return ConfiguracaoDns.erro("resolv.conf",
+                        "É um stub do systemd. Use systemd-resolved ou NetworkManager.");
+                }
+            }
+
+            // Fazer backup
+            if (Files.exists(resolvConf)) {
+                String timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss"));
+                Path backup = Path.of("/etc/resolv.conf" + BACKUP_SUFFIX + timestamp);
+                Files.copy(resolvConf, backup, StandardCopyOption.REPLACE_EXISTING);
+                System.out.println("  ℹ️  Backup: " + backup);
+            }
+
+            // Criar novo resolv.conf com IPv4 E IPv6
             List<String> linhas = new ArrayList<>();
-            
             linhas.add("# Configurado por GuiaLar Digital");
             linhas.add("# Cloudflare 1.1.1.1 for Families (Malware + Adulto)");
             linhas.add("# Bloqueia malware e conteúdo adulto (18+)");
+            linhas.add("");
+            linhas.add("# IPv4");
             linhas.add("nameserver " + servidor.getPrimario());
             linhas.add("nameserver " + servidor.getSecundario());
+            linhas.add("");
+            linhas.add("# IPv6");
+            linhas.add("nameserver " + servidor.getPrimarioIpv6());
+            linhas.add("nameserver " + servidor.getSecundarioIpv6());
 
-            Files.write(resolvConf, linhas, StandardOpenOption.CREATE, 
+            Files.write(resolvConf, linhas, StandardOpenOption.CREATE,
                 StandardOpenOption.TRUNCATE_EXISTING);
 
             return ConfiguracaoDns.sucesso(servidor, "resolv.conf");
@@ -174,32 +299,102 @@ public class ConfiguradorDnsService {
     private void backupConfigNetworkManager(String conexao) {
         try {
             String timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss"));
-            System.out.println("  ℹ️  Fazendo backup da conexão: " + conexao);
-            System.out.println("     Timestamp: " + timestamp);
+
+            // Obter configuração DNS atual
+            Process processDns = new ProcessBuilder("nmcli", "-t", "-f", "ipv4.dns,ipv6.dns",
+                "connection", "show", conexao)
+                .redirectErrorStream(true)
+                .start();
+
+            BufferedReader reader = new BufferedReader(new InputStreamReader(processDns.getInputStream()));
+            List<String> config = new ArrayList<>();
+            String linha;
+
+            while ((linha = reader.readLine()) != null) {
+                config.add(linha);
+            }
+
+            processDns.waitFor();
+
+            // Salvar backup em arquivo
+            Path backupDir = Path.of(System.getProperty("user.home"), ".guialar", "backups");
+            Files.createDirectories(backupDir);
+
+            Path backupFile = backupDir.resolve("nm-" + conexao + "-" + timestamp + ".txt");
+            Files.write(backupFile, config);
+
+            System.out.println("  ℹ️  Backup salvo: " + backupFile);
+            System.out.println("     Conexão: " + conexao);
+
         } catch (Exception e) {
             System.err.println("  ⚠ Não foi possível criar backup: " + e.getMessage());
         }
     }
 
     private String obterConexaoAtiva() throws IOException, InterruptedException {
-        Process process = new ProcessBuilder("nmcli", "-t", "-f", "NAME,TYPE,DEVICE", 
+        Process process = new ProcessBuilder("nmcli", "-t", "-f", "NAME,TYPE,DEVICE",
             "connection", "show", "--active")
             .redirectErrorStream(true)
             .start();
 
+        String melhorConexao = null;
+
+        // Tipos de conexão que devemos EVITAR (VPN, docker, bridges)
+        String[] tiposIgnorar = {"vpn", "tun", "docker", "bridge", "veth"};
+
+        // Tipos preferidos (em ordem de prioridade)
+        String[] tiposPreferidos = {"802-3-ethernet", "ethernet", "802-11-wireless", "wifi"};
+
         try (BufferedReader reader = new BufferedReader(
                 new InputStreamReader(process.getInputStream()))) {
-            String linha = reader.readLine();
-            if (linha != null) {
-                return linha.split(":")[0];
+            String linha;
+
+            while ((linha = reader.readLine()) != null) {
+                String[] partes = linha.split(":");
+                if (partes.length < 3) continue;
+
+                String nome = partes[0];
+                String tipo = partes[1].toLowerCase();
+                String device = partes[2];
+
+                // Ignorar VPN, docker, bridges
+                boolean ignorar = false;
+                for (String tipoIgnorar : tiposIgnorar) {
+                    if (tipo.contains(tipoIgnorar) || device.contains(tipoIgnorar)) {
+                        ignorar = true;
+                        break;
+                    }
+                }
+
+                if (ignorar) {
+                    continue;
+                }
+
+                // Priorizar ethernet/wifi
+                for (String tipoPreferido : tiposPreferidos) {
+                    if (tipo.contains(tipoPreferido)) {
+                        melhorConexao = nome;
+                        break;
+                    }
+                }
+
+                // Se ainda não temos conexão, pegar esta
+                if (melhorConexao == null) {
+                    melhorConexao = nome;
+                }
+
+                // Se achamos ethernet, preferir ela e parar
+                if (tipo.contains("ethernet") || tipo.contains("802-3")) {
+                    break;
+                }
             }
         }
 
         process.waitFor();
-        return null;
+        return melhorConexao;
     }
 
-    private void executarComando(String... comando) throws IOException, InterruptedException {
+    public void executarComando(String... comando) throws IOException, InterruptedException {
         Process process = new ProcessBuilder(comando)
             .redirectErrorStream(true)
             .start();
