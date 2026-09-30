@@ -1,5 +1,29 @@
 # Guia de Testes - GuiaLar Digital
 
+## Verificação nesta máquina Windows
+
+- Compilação executada com JDK 21: `ant clean dist-windows`.
+- Os testes PowerShell usam mocks; foram validados aplicação, falha de UAC,
+  detecção de navegador, manifesto e reversão sem tocar no DNS real.
+- Este computador é gerenciado por uma instituição e bloqueia leitura/escrita
+  de DNS. Não execute testes de alteração de DNS nele. Para testar a interface,
+  use `java -jar build/jar/guialar-digital.jar --gui`; para o diagnóstico,
+  use `java -jar build/jar/guialar-digital.jar --diagnostico`.
+- A aplicação só deve ser testada em Linux dentro de um ambiente descartável
+  (container/VM) com as ferramentas do gerenciador de rede correspondente.
+
+## Interface para pessoas sem conhecimento técnico
+
+1. Abra o GuiaLar sem privilégios de administrador.
+2. Confirme que o cartão principal explica se a proteção está ativa, pendente
+   ou não pôde ser verificada, sem afirmar que está ativa quando a rede bloqueia
+   a leitura.
+3. Confirme que “Tentar ativar proteção”, “Proteger navegadores” e
+   “Verificar novamente” aparecem como ações principais.
+4. Confirme que dados como endereços IP e o log só aparecem em “Ver detalhes
+   técnicos”.
+5. Confirme que “Desfazer DNS” não aparece quando o GuiaLar não tem manifesto.
+
 ## 🧪 Testes do MVP Linux
 
 ### Pré-requisitos para Teste Completo
@@ -245,3 +269,4 @@ Ao reportar problemas, incluir:
 3. Navegadores instalados (`which firefox chromium google-chrome`)
 4. Saída completa do programa
 5. Resultado dos testes com `dig`
+
