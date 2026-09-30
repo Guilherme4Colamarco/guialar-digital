@@ -34,6 +34,7 @@ public class WindowsAdapterSmokeTest {
         testBrowserDetectorCaminhos();
         testGuiasNavegador();
         testScriptContemSetDns();
+        testScriptsPreservamPoliticaDhcpEIpv6();
 
         System.out.println();
         if (falhas == 0) {
@@ -224,6 +225,24 @@ public class WindowsAdapterSmokeTest {
         ok("testScriptContemSetDns");
     }
 
+    private static void testScriptsPreservamPoliticaDhcpEIpv6() {
+        String leitura = WindowsDnsChanger.scriptListarAdaptadores();
+        assertTrue("consulta DHCP real", leitura.contains("Win32_NetworkAdapterConfiguration")
+            && leitura.contains("DHCPEnabled"));
+        var a = new WindowsDnsManifestStore.EstadoAdaptador("Wi-Fi", 12,
+            List.of("8.8.8.8"), List.of("2001:4860:4860::8888"), false);
+        String aplicar = WindowsDnsChanger.scriptAplicarDns(List.of(a), ServidorDns.getPadrao());
+        assertTrue("IPv6 não é ignorado", !aplicar.contains("catch { }"));
+        var manifesto = WindowsDnsManifestStore.ManifestoDns.criar(WindowsDnsChanger.METODO,
+            "1.1.1.3", java.util.Map.of("Wi-Fi", a));
+        String desfazer = WindowsDnsChanger.scriptReverter(manifesto);
+        assertTrue("restaura IPv6", desfazer.contains("-AddressFamily IPv6")
+            && desfazer.contains("2001:4860:4860::8888"));
+        assertTrue("restaura IPv4 estático sem reset", desfazer.contains("8.8.8.8")
+            && !desfazer.contains("-ResetServerAddresses"));
+        ok("testScriptsPreservamPoliticaDhcpEIpv6");
+    }
+
     // --- asserts ---
 
     private static boolean scriptContains(String script, String token) {
@@ -248,3 +267,4 @@ public class WindowsAdapterSmokeTest {
         System.out.println("OK   " + nome);
     }
 }
+

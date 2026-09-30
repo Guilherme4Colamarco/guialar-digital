@@ -77,6 +77,9 @@ public class GuiaLarGui {
     private JButton botaoGuias;
     private JButton botaoDesfazer;
     private JButton botaoSair;
+    private JLabel statusAmigavel;
+    private JLabel detalheAmigavel;
+    private JPanel detalhesTecnicos;
 
     private TipoSistema tipoSistema;
     private InfoDistro distro;
@@ -123,7 +126,7 @@ public class GuiaLarGui {
 
         frame = new JFrame("GuiaLar Digital - DNS seguro e adblockers");
         frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
-        frame.setMinimumSize(new Dimension(900, 740));
+        frame.setMinimumSize(new Dimension(900, 680));
 
         JPanel raiz = new JPanel(new BorderLayout());
         raiz.setBackground(COR_FUNDO);
@@ -158,14 +161,13 @@ public class GuiaLarGui {
         header.setBackground(COR_HEADER);
         header.setBorder(new EmptyBorder(18, 24, 18, 24));
 
-        JLabel titulo = new JLabel("GuiaLar Digital");
+        JLabel titulo = new JLabel("GuiaLar");
         titulo.setForeground(COR_TEXTO_CLARO);
         titulo.setFont(titulo.getFont().deriveFont(Font.BOLD, 26f));
         titulo.setAlignmentX(Component.LEFT_ALIGNMENT);
 
         JLabel subtitulo = new JLabel(
-            "Assistente para DNS seguro (Cloudflare Families) e adblockers — "
-                + tipoSistema.getNome());
+            "Proteja a navegação da sua família");
         subtitulo.setForeground(new Color(0xD6, 0xEE, 0xEF));
         subtitulo.setFont(subtitulo.getFont().deriveFont(Font.PLAIN, 14f));
         subtitulo.setAlignmentX(Component.LEFT_ALIGNMENT);
@@ -182,19 +184,110 @@ public class GuiaLarGui {
         corpo.setBackground(COR_FUNDO);
         corpo.setBorder(new EmptyBorder(16, 20, 8, 20));
 
-        JPanel cartoes = new JPanel(new GridLayout(1, 3, 12, 0));
-        cartoes.setBackground(COR_FUNDO);
-        cartoes.setAlignmentX(Component.LEFT_ALIGNMENT);
-        cartoes.add(criarCartaoSistema());
-        cartoes.add(criarCartaoDns());
-        cartoes.add(criarCartaoNavegadores());
-        corpo.add(cartoes);
+        JPanel status = criarCartao("Como está a proteção");
+        statusAmigavel = linha("");
+        statusAmigavel.setFont(statusAmigavel.getFont().deriveFont(Font.BOLD, 20f));
+        detalheAmigavel = linha("");
+        detalheAmigavel.setFont(detalheAmigavel.getFont().deriveFont(Font.PLAIN, 14f));
+        status.add(statusAmigavel);
+        status.add(detalheAmigavel);
+        status.setMaximumSize(new Dimension(Integer.MAX_VALUE, 130));
+        corpo.add(status);
+        corpo.add(Box.createVerticalStrut(14));
 
+        JPanel tarefas = new JPanel(new GridLayout(1, 3, 12, 0));
+        tarefas.setBackground(COR_FUNDO);
+        tarefas.setAlignmentX(Component.LEFT_ALIGNMENT);
+        tarefas.add(criarCartaoTarefa("1. Tentar ativar proteção", "Filtra sites perigosos e inadequados. Pode pedir autorização do responsável pelo computador."));
+        tarefas.add(criarCartaoTarefa("2. Proteger navegadores", "Veja instruções simples para bloquear anúncios no Edge, Chrome e outros navegadores."));
+        tarefas.add(criarCartaoTarefa("3. Verificar novamente", "Confira se a proteção já está ativa nesta rede."));
+        corpo.add(tarefas);
         corpo.add(Box.createVerticalStrut(14));
-        corpo.add(criarCartaoPlano());
-        corpo.add(Box.createVerticalStrut(14));
-        corpo.add(criarCartaoLog());
+        corpo.add(criarResumoEncontrado());
+        corpo.add(Box.createVerticalStrut(8));
+        JButton detalhes = new JButton("Ver detalhes técnicos");
+        detalhes.setAlignmentX(Component.LEFT_ALIGNMENT);
+        detalhes.addActionListener(e -> alternarDetalhesTecnicos());
+        corpo.add(detalhes);
+        detalhesTecnicos = new JPanel();
+        detalhesTecnicos.setLayout(new BoxLayout(detalhesTecnicos, BoxLayout.Y_AXIS));
+        detalhesTecnicos.setBackground(COR_FUNDO);
+        detalhesTecnicos.setVisible(false);
+        detalhesTecnicos.add(criarCartaoSistema());
+        detalhesTecnicos.add(Box.createVerticalStrut(10));
+        detalhesTecnicos.add(criarCartaoDns());
+        detalhesTecnicos.add(Box.createVerticalStrut(10));
+        detalhesTecnicos.add(criarCartaoNavegadores());
+        detalhesTecnicos.add(Box.createVerticalStrut(10));
+        JPanel tecnicos = new JPanel(new GridLayout(1, 3, 10, 0));
+        tecnicos.setBackground(COR_FUNDO);
+        tecnicos.add(criarCartaoSistema());
+        tecnicos.add(criarCartaoDns());
+        tecnicos.add(criarCartaoNavegadores());
+        detalhesTecnicos.add(tecnicos);
+        detalhesTecnicos.add(Box.createVerticalStrut(10));
+        detalhesTecnicos.add(criarCartaoPlano());
+        detalhesTecnicos.add(Box.createVerticalStrut(10));
+        detalhesTecnicos.add(criarCartaoLog());
+        corpo.add(detalhesTecnicos);
+        corpo.add(Box.createVerticalStrut(8));
+        JLabel ajuda = linha("Você pode usar o GuiaLar sem mudar nada. Em computadores da faculdade ou do trabalho, peça ajuda ao suporte local.");
+        ajuda.setForeground(new Color(0x5A, 0x63, 0x6B));
+        corpo.add(ajuda);
+        atualizarResumoAmigavel();
         return corpo;
+    }
+
+    private JPanel criarCartaoTarefa(String titulo, String descricao) {
+        JPanel p = criarCartao(titulo);
+        JLabel d = linha("<html><body style='width: 205px'>" + descricao + "</body></html>");
+        d.setFont(d.getFont().deriveFont(Font.PLAIN, 14f));
+        p.add(d);
+        return p;
+    }
+
+    private JPanel criarResumoEncontrado() {
+        JPanel p = criarCartao("O que encontramos");
+        String nomes = navegadores.isEmpty() ? "Nenhum navegador foi encontrado automaticamente." : "Navegadores encontrados: "
+            + String.join(", ", navegadores.stream().map(Navegador::getNome).toList());
+        p.add(linha(nomes));
+        p.add(linha(estadoAmigavelDns()));
+        return p;
+    }
+
+    private String estadoAmigavelDns() {
+        if (diagnostico == null) return "Não foi possível verificar a rede ainda.";
+        return switch (diagnostico.getStatusDns()) {
+            case APLICADO -> "Proteção encontrada nesta rede.";
+            case LEITURA_BLOQUEADA -> "A rede bloqueou a consulta. Nenhuma alteração foi feita.";
+            case PARCIAL -> "Parte da proteção foi encontrada; confirme os detalhes antes de continuar.";
+            case NAO_APLICADO -> "A proteção da rede ainda não está ativa pelo GuiaLar.";
+            case DESCONHECIDO -> "A proteção ainda não pôde ser verificada.";
+        };
+    }
+
+    private void alternarDetalhesTecnicos() {
+        detalhesTecnicos.setVisible(!detalhesTecnicos.isVisible());
+        frame.revalidate();
+        frame.pack();
+    }
+
+    private void atualizarResumoAmigavel() {
+        if (statusAmigavel == null || diagnostico == null) return;
+        StatusDns estado = diagnostico.getStatusDns();
+        if (estado == StatusDns.APLICADO) {
+            statusAmigavel.setText("Proteção da rede ativa");
+            detalheAmigavel.setText("O GuiaLar encontrou a proteção configurada neste computador.");
+            statusAmigavel.setForeground(new Color(0x1B, 0x7A, 0x2E));
+        } else if (estado == StatusDns.LEITURA_BLOQUEADA) {
+            statusAmigavel.setText("A proteção ainda não foi confirmada");
+            detalheAmigavel.setText("A rede não permitiu consultar essa configuração. Isso é comum em computadores da faculdade ou do trabalho. Nada foi alterado.");
+            statusAmigavel.setForeground(new Color(0x8A, 0x5A, 0x00));
+        } else {
+            statusAmigavel.setText("A proteção da rede não está ativa pelo GuiaLar");
+            detalheAmigavel.setText("Você ainda pode seguir os passos para proteger seus navegadores. Nenhuma alteração será feita sem sua autorização.");
+            statusAmigavel.setForeground(new Color(0x8A, 0x5A, 0x00));
+        }
     }
 
     private JPanel criarCartao(String tituloCartao) {
@@ -329,7 +422,9 @@ public class GuiaLarGui {
         String avisoTxt = tipoSistema.isWindows()
             ? "Diagnóstico não precisa de admin. Aplicar DNS pode pedir UAC (ou falhar em laboratório)."
             : "A configuração de DNS exige privilégios de administrador (sudo/root).";
-        JLabel aviso = new JLabel(avisoTxt);
+        JLabel aviso = new JLabel(tipoSistema.isWindows()
+            ? "Você decide antes de qualquer mudança. Em PCs gerenciados, peça ajuda ao suporte."
+            : avisoTxt);
         aviso.setFont(aviso.getFont().deriveFont(Font.PLAIN, 11.5f));
         aviso.setForeground(new Color(0x5A, 0x63, 0x6B));
 
@@ -346,11 +441,12 @@ public class GuiaLarGui {
         botaoGuias.addActionListener(e -> onAbrirGuias());
 
         botaoDesfazer = new JButton("Desfazer DNS");
-        botaoDesfazer.setVisible(tipoSistema.isWindows());
+        botaoDesfazer.setVisible(tipoSistema.isWindows()
+            && new br.uniube.pi.guialar.aplicacao.adaptadores.windows.WindowsDnsManifestStore().existe());
         botaoDesfazer.addActionListener(e -> onDesfazer());
 
         botaoExecutar = new JButton(tipoSistema.isWindows()
-            ? "Tentar aplicar DNS" : "Autorizar e executar");
+            ? "Tentar ativar proteção" : "Ativar proteção");
         botaoExecutar.setBackground(COR_PRIMARIA);
         botaoExecutar.setForeground(COR_TEXTO_CLARO);
         botaoExecutar.setFont(botaoExecutar.getFont().deriveFont(Font.BOLD, 13f));
@@ -360,11 +456,10 @@ public class GuiaLarGui {
         botaoExecutar.addActionListener(e -> onExecutar());
 
         botoes.add(botaoSair);
+        botaoDiagnostico.setText("Verificar novamente");
         botoes.add(botaoDiagnostico);
+        botaoGuias.setText("Proteger navegadores");
         botoes.add(botaoGuias);
-        if (tipoSistema.isWindows()) {
-            botoes.add(botaoDesfazer);
-        }
         botoes.add(botaoExecutar);
 
         rodape.add(aviso, BorderLayout.WEST);
@@ -415,6 +510,8 @@ public class GuiaLarGui {
                 try {
                     diagnostico = get();
                     navegadores = deduplicar(diagnostico.getNavegadores());
+                    atualizarResumoAmigavel();
+                    if (tipoSistema.isWindows()) botaoDesfazer.setVisible(new br.uniube.pi.guialar.aplicacao.adaptadores.windows.WindowsDnsManifestStore().existe());
                     log("\n--- Diagnóstico atualizado ---\n" + diagnostico.formatarRelatorio());
                     if (diagnostico.getStatusDns() != StatusDns.APLICADO) {
                         log("Filtro de sistema: NÃO afirmado como ativo (status: "
@@ -533,7 +630,7 @@ public class GuiaLarGui {
                         "Falha ao aplicar DNS. O sistema não foi alterado.\n" + ex.getMessage(),
                         "Erro", JOptionPane.ERROR_MESSAGE);
                 } finally {
-                    botaoExecutar.setText("Tentar aplicar DNS");
+                    botaoExecutar.setText("Tentar ativar proteção");
                     botaoExecutar.setEnabled(true);
                     onDiagnostico();
                 }
@@ -622,7 +719,7 @@ public class GuiaLarGui {
 
             @Override
             protected void done() {
-                botaoExecutar.setText("Autorizar e executar");
+                    botaoExecutar.setText("Ativar proteção");
                 botaoExecutar.setEnabled(true);
                 log("\nProcesso concluído.");
             }
@@ -692,3 +789,4 @@ public class GuiaLarGui {
         }
     }
 }
+

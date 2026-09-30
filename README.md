@@ -21,12 +21,16 @@ O GuiaLar Digital é uma aplicação **desktop Java** (não web) que automatiza 
 - ✅ Debian, Fedora e Arch Linux
 - ✅ DNS via NetworkManager / systemd-resolved / Netplan + extensões
 
-**Windows (smoke test / laboratório):**
+**Windows:**
 - ✅ Detecção de SO, elevação UAC, DNS atual, navegadores (Edge/Chrome/Firefox/Brave)
 - ✅ Diagnóstico **sem admin**
 - ✅ Aplicação de DNS via PowerShell `Set-DnsClientServerAddress` (UAC só na escrita)
 - ✅ Manifesto em `%LOCALAPPDATA%\GuiaLar\` para Desfazer
 - ✅ Degradação graciosa: sem admin/GPO → status **não aplicado**, sem crash
+
+> Na interface gráfica, o estado da proteção e as três ações principais são
+> apresentados em linguagem direta. Informações como IPv6, permissões e detalhes
+> do diagnóstico ficam no painel **Ver detalhes técnicos**.
 
 **FORA DO ESCOPO (por enquanto):**
 - ❌ macOS
@@ -84,15 +88,16 @@ O GuiaLar Digital é uma aplicação **desktop Java** (não web) que automatiza 
 
 3. **Execute a aplicação:**
    ```bash
-   sudo java -jar build/jar/guialar-digital.jar
+   java -jar build/jar/guialar-digital.jar --gui
    ```
    
    Ou use o Ant diretamente:
    ```bash
-   sudo ant run
+   ant run
    ```
 
-   > **Nota:** É necessário `sudo` para alterar as configurações de DNS do sistema.
+   > **Nota:** O diagnóstico e os guias de navegador não precisam de administrador.
+   > O GuiaLar pede autorização apenas quando você escolhe ativar a proteção da rede.
 
 ### Comandos Ant Disponíveis
 
@@ -816,3 +821,4 @@ Este é um projeto acadêmico. Sugestões e melhorias são bem-vindas através d
 ## 📄 Licença
 
 Projeto acadêmico desenvolvido para Projetos Integrados I - Uniube (2026/2)
+

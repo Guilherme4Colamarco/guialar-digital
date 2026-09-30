@@ -247,9 +247,9 @@ public class WindowsDnsChanger implements DnsChanger {
               }
               $dhcp = $true
               try {
-                $cfg = Get-DnsClientServerAddress -InterfaceIndex $a.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue
-                # se há endereços estáticos tipicamente ainda reportamos; Reset usa -ResetServerAddresses
-              } catch {}
+                $cfg = Get-CimInstance Win32_NetworkAdapterConfiguration -Filter ("InterfaceIndex=" + $a.ifIndex) -ErrorAction Stop
+                if ($cfg) { $dhcp = [bool]$cfg.DHCPEnabled }
+              } catch { $dhcp = $false }
               $alias = $a.Name -replace '[\\|\\r\\n]',' '
               Write-Output ("ALIAS={0}|INDEX={1}|IPV4={2}|IPV6={3}|DHCP={4}" -f $alias, $a.ifIndex, ($ipv4 -join ','), ($ipv6 -join ','), $dhcp)
             }
@@ -265,9 +265,7 @@ public class WindowsDnsChanger implements DnsChanger {
             sb.append(String.format("""
                 try {
                   Set-DnsClientServerAddress -InterfaceIndex %d -ServerAddresses @('%s','%s')
-                  try {
-                    Set-DnsClientServerAddress -InterfaceIndex %d -AddressFamily IPv6 -ServerAddresses @('%s','%s')
-                  } catch { }
+                  Set-DnsClientServerAddress -InterfaceIndex %d -AddressFamily IPv6 -ServerAddresses @('%s','%s')
                   $ok++
                 } catch {
                   Write-Error $_.Exception.Message
@@ -308,6 +306,15 @@ public class WindowsDnsChanger implements DnsChanger {
                       Set-DnsClientServerAddress -InterfaceAlias '%s' -ServerAddresses @(%s)
                     }
                     """, a.interfaceIndex(), ips, a.alias().replace("'", "''"), ips));
+            }
+            if (!a.ipv6Anterior().isEmpty()) {
+                String ips6 = a.ipv6Anterior().stream()
+                    .map(ip -> "'" + ip + "'")
+                    .reduce((x, y) -> x + "," + y)
+                    .orElse("");
+                sb.append(String.format("""
+                    Set-DnsClientServerAddress -InterfaceIndex %d -AddressFamily IPv6 -ServerAddresses @(%s)
+                    """, a.interfaceIndex(), ips6));
             }
         }
         sb.append("Write-Output 'REVERTED'\n");
@@ -353,3 +360,4 @@ public class WindowsDnsChanger implements DnsChanger {
         return t.length() > 280 ? t.substring(0, 277) + "..." : t;
     }
 }
+
