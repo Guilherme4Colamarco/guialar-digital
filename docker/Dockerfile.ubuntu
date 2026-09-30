@@ -1,0 +1,45 @@
+FROM ubuntu:24.04
+
+LABEL maintainer="GuiaLar Digital"
+LABEL description="Smoke test environment - Ubuntu 24.04"
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Instalar dependências
+RUN apt-get update && apt-get install -y \
+    openjdk-17-jdk \
+    ant \
+    dnsutils \
+    firefox \
+    chromium-browser \
+    curl \
+    git \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copiar código
+COPY . /app
+
+# Compilar
+RUN ant clean jar
+
+# Verificar build
+RUN test -f build/jar/guialar-digital.jar || exit 1
+
+CMD ["sh", "-c", "echo '=== GuiaLar Digital - Smoke Test Ubuntu 24.04 ===' && \
+                  java -version && \
+                  ant -version && \
+                  echo '' && \
+                  echo 'JAR criado:' && \
+                  ls -lh build/jar/guialar-digital.jar && \
+                  echo '' && \
+                  echo 'Distribuição detectada:' && \
+                  cat /etc/os-release | grep PRETTY_NAME && \
+                  echo '' && \
+                  echo 'Navegadores instalados:' && \
+                  which firefox && \
+                  which chromium-browser && \
+                  echo '' && \
+                  echo '✅ Smoke test passou - Ubuntu 24.04'"]

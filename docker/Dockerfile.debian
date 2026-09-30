@@ -1,0 +1,48 @@
+FROM debian:12
+
+LABEL maintainer="GuiaLar Digital"
+LABEL description="Smoke test environment - Debian 12"
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Instalar dependências
+RUN apt-get update && apt-get install -y \
+    openjdk-17-jdk \
+    ant \
+    dnsutils \
+    firefox-esr \
+    chromium \
+    curl \
+    git \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# Criar diretório de trabalho
+WORKDIR /app
+
+# Copiar código (ou montar como volume)
+COPY . /app
+
+# Compilar
+RUN ant clean jar
+
+# Teste básico: verificar se JAR foi criado
+RUN test -f build/jar/guialar-digital.jar || exit 1
+
+# Por padrão, apenas mostra informações
+CMD ["sh", "-c", "echo '=== GuiaLar Digital - Smoke Test Debian ===' && \
+                  java -version && \
+                  ant -version && \
+                  echo '' && \
+                  echo 'JAR criado:' && \
+                  ls -lh build/jar/guialar-digital.jar && \
+                  echo '' && \
+                  echo 'Distribuição detectada:' && \
+                  cat /etc/os-release | grep PRETTY_NAME && \
+                  echo '' && \
+                  echo 'Navegadores instalados:' && \
+                  which firefox-esr && \
+                  which chromium && \
+                  echo '' && \
+                  echo '⚠️  Nota: Troca de DNS requer VM com systemd completo' && \
+                  echo 'Use este ambiente apenas para smoke tests básicos.'"]

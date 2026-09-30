@@ -1,0 +1,43 @@
+FROM archlinux:latest
+
+LABEL maintainer="GuiaLar Digital"
+LABEL description="Smoke test environment - Arch Linux"
+
+# Atualizar sistema e instalar dependências
+RUN pacman -Syu --noconfirm && \
+    pacman -S --noconfirm \
+    jdk17-openjdk \
+    apache-ant \
+    bind-tools \
+    firefox \
+    chromium \
+    curl \
+    git \
+    && pacman -Scc --noconfirm
+
+WORKDIR /app
+
+# Copiar código
+COPY . /app
+
+# Compilar
+RUN ant clean jar
+
+# Verificar build
+RUN test -f build/jar/guialar-digital.jar || exit 1
+
+CMD ["sh", "-c", "echo '=== GuiaLar Digital - Smoke Test Arch Linux ===' && \
+                  java -version && \
+                  ant -version && \
+                  echo '' && \
+                  echo 'JAR criado:' && \
+                  ls -lh build/jar/guialar-digital.jar && \
+                  echo '' && \
+                  echo 'Distribuição detectada:' && \
+                  cat /etc/os-release | grep PRETTY_NAME && \
+                  echo '' && \
+                  echo 'Navegadores instalados:' && \
+                  which firefox && \
+                  which chromium && \
+                  echo '' && \
+                  echo '✅ Smoke test passou - Arch Linux'"]
