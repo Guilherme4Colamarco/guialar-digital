@@ -55,7 +55,7 @@ public class GuiaLarCli {
         InfoDistro distro = detectarSistema();
         if (!distro.isSuportada()) {
             System.err.println("\n❌ Distribuição não suportada.");
-            System.err.println("   O GuiaLar Digital suporta apenas Debian, Fedora e Arch Linux.");
+            System.err.println("   O GuiaLar Digital suporta Debian, Fedora, Arch Linux e NixOS.");
             System.exit(1);
         }
 
