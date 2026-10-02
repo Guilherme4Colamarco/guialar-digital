@@ -191,7 +191,7 @@ Expectativa em PC trancado:
         <echo message="  ant test / test-windows - Testes do adapter Windows (mocks)"/>
         <echo message="  ant dist           - Distribuição completa"/>
         <echo message="  ant dist-windows   - Pacote para copiar ao PC Windows do lab"/>
-        <echo message="  ant run            - CLI (Linux: sudo para DNS)"/>
+        <echo message="  ant run            - CLI (Linux: pkexec ao aplicar DNS)"/>
         <echo message="  ant run-gui        - Interface gráfica"/>
         <echo message="  ant run-diagnostico - Diagnóstico sem privilégios"/>
         <echo message="  ant rebuild        - Limpa e reconstrói tudo"/>

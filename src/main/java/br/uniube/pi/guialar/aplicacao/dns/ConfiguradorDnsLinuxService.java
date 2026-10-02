@@ -5,36 +5,41 @@ import br.uniube.pi.guialar.aplicacao.adaptadores.linux.LinuxCommandRunner;
 import br.uniube.pi.guialar.aplicacao.adaptadores.linux.LinuxDnsBackend;
 import br.uniube.pi.guialar.aplicacao.adaptadores.linux.LinuxDnsBackendSelector;
 import br.uniube.pi.guialar.aplicacao.adaptadores.linux.LinuxDnsManifestStore;
+import br.uniube.pi.guialar.aplicacao.adaptadores.linux.LinuxNmConexaoEstado;
+import br.uniube.pi.guialar.aplicacao.adaptadores.linux.LinuxNmManifestCodec;
+import br.uniube.pi.guialar.aplicacao.adaptadores.linux.LinuxNmcliTerseParser;
+import br.uniube.pi.guialar.aplicacao.adaptadores.linux.LinuxPkexecMensagens;
+import br.uniube.pi.guialar.aplicacao.adaptadores.linux.LinuxShellEscape;
+import br.uniube.pi.guialar.aplicacao.adaptadores.linux.LinuxSystemPaths;
 import br.uniube.pi.guialar.aplicacao.adaptadores.linux.NixOsDnsSupport;
 import br.uniube.pi.guialar.aplicacao.adaptadores.linux.ProcessLinuxCommandRunner;
+import br.uniube.pi.guialar.aplicacao.verificacao.VerificacaoDnsService;
 import br.uniube.pi.guialar.dominio.distro.InfoDistro;
 import br.uniube.pi.guialar.dominio.distro.TipoDistro;
 import br.uniube.pi.guialar.dominio.dns.ConfiguracaoDns;
 import br.uniube.pi.guialar.dominio.dns.ServidorDns;
+import br.uniube.pi.guialar.dominio.verificacao.ResultadoVerificacao;
 
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
-import java.nio.file.StandardOpenOption;
-import java.time.LocalDateTime;
-import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Properties;
 
 /**
- * Configuração/reversão de DNS no Linux: GUI como usuário, escrita elevada via pkexec.
+ * Configuração/reversão de DNS no Linux: uma elevação pkexec por aplicar/desfazer.
  */
 public class ConfiguradorDnsLinuxService {
 
-    private static final String BACKUP_SUFFIX = ".guialar-backup-";
-    private static final String DROPIN_RESOLVED = "/etc/systemd/resolved.conf.d/99-guialar.conf";
+    private static final String HEREDOC_TAG = "GUAILAR_EOF";
 
     private final LinuxCommandRunner runner;
     private final LinuxDnsBackendSelector selector;
     private final NixOsDnsSupport nixOs;
     private final LinuxDnsManifestStore manifestStore;
+    private final VerificacaoDnsService verificacaoDns;
 
     public ConfiguradorDnsLinuxService() {
         this(new ProcessLinuxCommandRunner(), new LinuxDnsManifestStore());
@@ -45,6 +50,7 @@ public class ConfiguradorDnsLinuxService {
         this.manifestStore = manifestStore;
         this.selector = new LinuxDnsBackendSelector(runner);
         this.nixOs = new NixOsDnsSupport(runner, selector);
+        this.verificacaoDns = new VerificacaoDnsService();
     }
 
     public ConfiguradorDnsLinuxService(
@@ -56,6 +62,7 @@ public class ConfiguradorDnsLinuxService {
         this.selector = selector;
         this.nixOs = nixOs;
         this.manifestStore = manifestStore;
+        this.verificacaoDns = new VerificacaoDnsService();
     }
 
     public LinuxDnsBackendSelector getSelector() {
@@ -77,18 +84,31 @@ public class ConfiguradorDnsLinuxService {
         }
 
         LinuxDnsBackend backend = selector.selecionar(distro);
-        return switch (backend) {
+        ConfiguracaoDns aplicado = switch (backend) {
             case NETWORK_MANAGER -> configurarNetworkManager(servidor);
             case NETPLAN -> configurarNetplan(servidor);
             case SYSTEMD_RESOLVED -> configurarSystemdResolved(servidor);
             case RESOLV_CONF -> configurarResolvConf(servidor);
             case NIXOS_SNIPPET -> ConfiguracaoDns.erro("NixOS", "ramo inesperado");
         };
+        return finalizarComVerificacao(aplicado, servidor);
+    }
+
+    private ConfiguracaoDns finalizarComVerificacao(ConfiguracaoDns aplicado, ServidorDns servidor) {
+        if (aplicado.isAguardandoUsuario() || !aplicado.isAplicado()) {
+            return aplicado;
+        }
+        List<ResultadoVerificacao> resultados = verificacaoDns.verificar();
+        if (VerificacaoDnsService.protecaoConfirmada(resultados)) {
+            return aplicado;
+        }
+        return ConfiguracaoDns.sucessoComAviso(servidor, aplicado.getMetodoConfiguracao(),
+            "DNS gravado, mas a verificação ainda não confirmou o filtro. Use Verificar de novo.");
     }
 
     private ConfiguracaoDns configurarNixOs(ServidorDns servidor) {
         if (nixOs.podeUsarNetworkManager()) {
-            ConfiguracaoDns r = configurarNetworkManager(servidor);
+            ConfiguracaoDns r = finalizarComVerificacao(configurarNetworkManager(servidor), servidor);
             if (r.isAplicado()) {
                 return ConfiguracaoDns.sucessoComAviso(servidor, r.getMetodoConfiguracao(),
                     nixOs.notaEnsureProfiles());
@@ -115,57 +135,101 @@ public class ConfiguradorDnsLinuxService {
 
     private ConfiguracaoDns configurarNetworkManager(ServidorDns servidor) {
         try {
-            String conexao = obterConexaoAtiva();
-            if (conexao == null) {
-                return ConfiguracaoDns.erro("NetworkManager", "Nenhuma conexão ativa encontrada");
+            LinuxCommandResult ativas = runner.executar(false, "nmcli", "-t", "-f", "NAME,TYPE,DEVICE",
+                "connection", "show", "--active");
+            List<LinuxNmcliTerseParser.ConexaoAtiva> todas =
+                LinuxNmcliTerseParser.parseConexoesAtivas(ativas.stdout());
+
+            List<String> vpns = new ArrayList<>();
+            List<String> alvos = new ArrayList<>();
+            for (LinuxNmcliTerseParser.ConexaoAtiva c : todas) {
+                if (c.isVpnOuTunel()) {
+                    vpns.add(c.nome());
+                    continue;
+                }
+                if (c.isRedeFisicaOuWifi()) {
+                    alvos.add(c.nome());
+                }
+            }
+            if (alvos.isEmpty()) {
+                return ConfiguracaoDns.erro("NetworkManager",
+                    "Nenhuma conexão ethernet/Wi‑Fi ativa encontrada (VPN não é alterada).");
             }
 
-            Path backupFile = backupConfigNetworkManager(conexao);
-
-            LinuxCommandResult r1 = runner.executar(true, "nmcli", "connection", "modify", conexao,
-                "ipv4.dns", servidor.getPrimario() + " " + servidor.getSecundario());
-            if (!r1.sucesso()) {
-                return falhaPkexec("NetworkManager", r1);
-            }
-            runner.executar(true, "nmcli", "connection", "modify", conexao,
-                "ipv4.ignore-auto-dns", "yes");
-            runner.executar(true, "nmcli", "connection", "modify", conexao,
-                "ipv6.dns", servidor.getPrimarioIpv6() + " " + servidor.getSecundarioIpv6());
-            runner.executar(true, "nmcli", "connection", "modify", conexao,
-                "ipv6.ignore-auto-dns", "yes");
-            LinuxCommandResult up = runner.executar(true, "nmcli", "connection", "up", conexao);
-            if (!up.sucesso()) {
-                return falhaPkexec("NetworkManager", up);
+            List<LinuxNmConexaoEstado> backups = new ArrayList<>();
+            for (String nome : alvos) {
+                backups.add(lerEstadoConexao(nome));
             }
 
-            salvarManifestoAplicado(LinuxDnsBackend.NETWORK_MANAGER.getRotulo(), conexao, backupFile, null);
+            String script = montarScriptNmAplicar(servidor, alvos);
+            LinuxCommandResult elevado = runner.executarScriptPrivilegiado(script);
+            ConfiguracaoDns falha = interpretarPkexec("NetworkManager", elevado, false);
+            if (falha != null) {
+                return falha;
+            }
+
+            Properties props = new Properties();
+            props.setProperty(LinuxDnsManifestStore.KEY_METODO, LinuxDnsBackend.NETWORK_MANAGER.getRotulo());
+            props.setProperty(LinuxDnsManifestStore.KEY_MODO, LinuxDnsManifestStore.MODO_APLICADO);
+            LinuxNmManifestCodec.gravarConexoes(props, backups);
+            manifestStore.salvar(props);
+
+            if (!vpns.isEmpty()) {
+                return ConfiguracaoDns.sucessoComAviso(servidor, "NetworkManager",
+                    "VPN detectada (" + String.join(", ", vpns) + ") — não alteramos a VPN; só ethernet/Wi‑Fi.");
+            }
             return ConfiguracaoDns.sucesso(servidor, "NetworkManager");
         } catch (Exception e) {
             return ConfiguracaoDns.erro("NetworkManager", e.getMessage());
         }
     }
 
+    private LinuxNmConexaoEstado lerEstadoConexao(String nome) throws IOException, InterruptedException {
+        LinuxCommandResult r = runner.executar(false, "nmcli", "-t", "-f",
+            "ipv4.dns,ipv6.dns,ipv4.ignore-auto-dns,ipv6.ignore-auto-dns",
+            "connection", "show", nome);
+        Map<String, String> campos = LinuxNmcliTerseParser.parseCamposDns(r.stdout());
+        return new LinuxNmConexaoEstado(
+            nome,
+            campos.getOrDefault("ipv4.dns", ""),
+            campos.getOrDefault("ipv6.dns", ""),
+            campos.getOrDefault("ipv4.ignore-auto-dns", "no"),
+            campos.getOrDefault("ipv6.ignore-auto-dns", "no")
+        );
+    }
+
+    private String montarScriptNmAplicar(ServidorDns servidor, List<String> conexoes) {
+        String v4 = servidor.getPrimario() + " " + servidor.getSecundario();
+        String v6 = servidor.getPrimarioIpv6() + " " + servidor.getSecundarioIpv6();
+        StringBuilder sb = new StringBuilder();
+        sb.append("set -e\n");
+        for (String nome : conexoes) {
+            String q = LinuxShellEscape.shSingleQuote(nome);
+            sb.append("nmcli connection modify ").append(q).append(" ipv4.dns ")
+                .append(LinuxShellEscape.shSingleQuote(v4)).append("\n");
+            sb.append("nmcli connection modify ").append(q).append(" ipv4.ignore-auto-dns yes\n");
+            sb.append("nmcli connection modify ").append(q).append(" ipv6.dns ")
+                .append(LinuxShellEscape.shSingleQuote(v6)).append("\n");
+            sb.append("nmcli connection modify ").append(q).append(" ipv6.ignore-auto-dns yes\n");
+            sb.append("nmcli connection up ").append(q).append("\n");
+        }
+        return sb.toString();
+    }
+
     private ConfiguracaoDns configurarNetplan(ServidorDns servidor) {
         try {
-            Path netplanDir = Path.of("/etc/netplan");
-            Path configFile = netplanDir.resolve("99-guialar-dns.yaml");
-
-            List<String> linhas = montarYamlNetplan(servidor, configFile);
-
-            Path staging = stagingUsuario("99-guialar-dns.yaml");
-            Files.write(staging, linhas, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
-
-            runner.executar(true, "mkdir", "-p", netplanDir.toString());
-            LinuxCommandResult cp = runner.executar(true, "cp", staging.toString(), configFile.toString());
-            if (!cp.sucesso()) {
-                return falhaPkexec("Netplan", cp);
+            String conteudo = String.join("\n", montarYamlNetplan(servidor)) + "\n";
+            String script = "set -e\nmkdir -p /etc/netplan\n"
+                + "cat > " + LinuxSystemPaths.NETPLAN_GUAILAR + " << '" + HEREDOC_TAG + "'\n"
+                + conteudo
+                + HEREDOC_TAG + "\n"
+                + "netplan apply\n";
+            LinuxCommandResult elevado = runner.executarScriptPrivilegiado(script);
+            ConfiguracaoDns falha = interpretarPkexec("Netplan", elevado, false);
+            if (falha != null) {
+                return falha;
             }
-            LinuxCommandResult apply = runner.executar(true, "netplan", "apply");
-            if (!apply.sucesso()) {
-                return falhaPkexec("Netplan", apply);
-            }
-
-            salvarManifestoAplicado(LinuxDnsBackend.NETPLAN.getRotulo(), null, null, configFile);
+            salvarManifestoSimples(LinuxDnsBackend.NETPLAN.getRotulo());
             return ConfiguracaoDns.sucesso(servidor, "Netplan");
         } catch (Exception e) {
             return ConfiguracaoDns.erro("Netplan", e.getMessage());
@@ -174,32 +238,18 @@ public class ConfiguradorDnsLinuxService {
 
     private ConfiguracaoDns configurarSystemdResolved(ServidorDns servidor) {
         try {
-            List<String> linhas = new ArrayList<>();
-            linhas.add("# Configurado por GuiaLar Digital");
-            linhas.add("# Para reverter: remova /etc/systemd/resolved.conf.d/99-guialar.conf e reinicie systemd-resolved");
-            linhas.add("");
-            linhas.add("[Resolve]");
-            linhas.add("DNS=" + servidor.getPrimario() + " " + servidor.getSecundario() + " "
-                + servidor.getPrimarioIpv6() + " " + servidor.getSecundarioIpv6());
-            linhas.add("FallbackDNS=");
-            linhas.add("Domains=~.");
-            linhas.add("DNSSEC=allow-downgrade");
-            linhas.add("DNSOverTLS=opportunistic");
-
-            Path staging = stagingUsuario("99-guialar.conf");
-            Files.write(staging, linhas, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
-
-            runner.executar(true, "mkdir", "-p", "/etc/systemd/resolved.conf.d");
-            LinuxCommandResult cp = runner.executar(true, "cp", staging.toString(), DROPIN_RESOLVED);
-            if (!cp.sucesso()) {
-                return falhaPkexec("systemd-resolved", cp);
+            String conteudo = String.join("\n", montarResolvedDropin(servidor)) + "\n";
+            String script = "set -e\nmkdir -p " + LinuxSystemPaths.DIR_RESOLVED_DROPIN + "\n"
+                + "cat > " + LinuxSystemPaths.DROPIN_RESOLVED + " << '" + HEREDOC_TAG + "'\n"
+                + conteudo
+                + HEREDOC_TAG + "\n"
+                + "systemctl restart systemd-resolved\n";
+            LinuxCommandResult elevado = runner.executarScriptPrivilegiado(script);
+            ConfiguracaoDns falha = interpretarPkexec("systemd-resolved", elevado, false);
+            if (falha != null) {
+                return falha;
             }
-            LinuxCommandResult restart = runner.executar(true, "systemctl", "restart", "systemd-resolved");
-            if (!restart.sucesso()) {
-                return falhaPkexec("systemd-resolved", restart);
-            }
-
-            salvarManifestoAplicado(LinuxDnsBackend.SYSTEMD_RESOLVED.getRotulo(), null, null, Path.of(DROPIN_RESOLVED));
+            salvarManifestoSimples(LinuxDnsBackend.SYSTEMD_RESOLVED.getRotulo());
             return ConfiguracaoDns.sucesso(servidor, "systemd-resolved (drop-in 99-guialar.conf)");
         } catch (Exception e) {
             return ConfiguracaoDns.erro("systemd-resolved", e.getMessage());
@@ -208,7 +258,7 @@ public class ConfiguradorDnsLinuxService {
 
     private ConfiguracaoDns configurarResolvConf(ServidorDns servidor) {
         try {
-            Path resolvConf = Path.of("/etc/resolv.conf");
+            Path resolvConf = Path.of(LinuxSystemPaths.RESOLV_CONF);
             if (Files.isSymbolicLink(resolvConf)) {
                 Path target = Files.readSymbolicLink(resolvConf);
                 if (target.toString().contains("systemd") || target.toString().contains("stub")) {
@@ -216,31 +266,19 @@ public class ConfiguradorDnsLinuxService {
                         "É um stub do systemd. Use systemd-resolved ou NetworkManager.");
                 }
             }
-
-            List<String> linhas = new ArrayList<>();
-            linhas.add("# Configurado por GuiaLar Digital");
-            linhas.add("nameserver " + servidor.getPrimario());
-            linhas.add("nameserver " + servidor.getSecundario());
-            linhas.add("nameserver " + servidor.getPrimarioIpv6());
-            linhas.add("nameserver " + servidor.getSecundarioIpv6());
-
-            String timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss"));
-            if (Files.exists(resolvConf)) {
-                Path backupRemoto = Path.of("/etc/resolv.conf" + BACKUP_SUFFIX + timestamp);
-                LinuxCommandResult cpBak = runner.executar(true, "cp", resolvConf.toString(), backupRemoto.toString());
-                if (!cpBak.sucesso()) {
-                    return falhaPkexec("resolv.conf", cpBak);
-                }
+            String conteudo = montarResolvConf(servidor);
+            String script = "set -e\n"
+                + "if [ -f " + LinuxSystemPaths.RESOLV_CONF + " ]; then cp "
+                + LinuxSystemPaths.RESOLV_CONF + " " + LinuxSystemPaths.RESOLV_GUAILAR_BACKUP + "; fi\n"
+                + "cat > " + LinuxSystemPaths.RESOLV_CONF + " << '" + HEREDOC_TAG + "'\n"
+                + conteudo
+                + HEREDOC_TAG + "\n";
+            LinuxCommandResult elevado = runner.executarScriptPrivilegiado(script);
+            ConfiguracaoDns falha = interpretarPkexec("resolv.conf", elevado, false);
+            if (falha != null) {
+                return falha;
             }
-
-            Path staging = stagingUsuario("resolv.conf");
-            Files.write(staging, linhas, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
-            LinuxCommandResult cp = runner.executar(true, "cp", staging.toString(), resolvConf.toString());
-            if (!cp.sucesso()) {
-                return falhaPkexec("resolv.conf", cp);
-            }
-
-            salvarManifestoAplicado(LinuxDnsBackend.RESOLV_CONF.getRotulo(), null, null, resolvConf);
+            salvarManifestoSimples(LinuxDnsBackend.RESOLV_CONF.getRotulo());
             return ConfiguracaoDns.sucesso(servidor, "resolv.conf");
         } catch (Exception e) {
             return ConfiguracaoDns.erro("resolv.conf", e.getMessage());
@@ -256,8 +294,7 @@ public class ConfiguradorDnsLinuxService {
             String modo = props.getProperty(LinuxDnsManifestStore.KEY_MODO, LinuxDnsManifestStore.MODO_APLICADO);
             String metodo = props.getProperty(LinuxDnsManifestStore.KEY_METODO, "");
 
-            if (LinuxDnsManifestStore.MODO_AGUARDANDO_NIXOS.equals(modo)
-                    || metodo.contains("NixOS")) {
+            if (LinuxDnsManifestStore.MODO_AGUARDANDO_NIXOS.equals(modo)) {
                 String snippet = props.getProperty(LinuxDnsManifestStore.KEY_NIXOS_SNIPPET, "")
                     .replace("\\n", "\n");
                 manifestStore.remover();
@@ -266,19 +303,22 @@ public class ConfiguradorDnsLinuxService {
                         + snippet);
             }
 
+            ConfiguracaoDns resultado;
             if (metodo.contains("NetworkManager")) {
-                return reverterNetworkManager(props);
+                resultado = reverterNetworkManager(props);
+            } else if (metodo.contains("Netplan")) {
+                resultado = reverterNetplan();
+            } else if (metodo.contains("systemd-resolved")) {
+                resultado = reverterSystemdResolved();
+            } else if (metodo.contains("resolv.conf")) {
+                resultado = reverterResolvConf();
+            } else {
+                return ConfiguracaoDns.erro(metodo, "Método desconhecido no manifesto");
             }
-            if (metodo.contains("Netplan")) {
-                return reverterNetplan(props);
+            if (resultado.isAplicado()) {
+                manifestStore.remover();
             }
-            if (metodo.contains("systemd-resolved")) {
-                return reverterSystemdResolved();
-            }
-            if (metodo.contains("resolv.conf")) {
-                return reverterResolvConf();
-            }
-            return ConfiguracaoDns.erro(metodo, "Método desconhecido no manifesto");
+            return resultado;
         } catch (Exception e) {
             return ConfiguracaoDns.erro("Linux", e.getMessage());
         }
@@ -288,168 +328,113 @@ public class ConfiguradorDnsLinuxService {
         if (selector.isNixOs() && !nixOs.podeUsarNetworkManager()) {
             return nixOs.instrucaoDesfazerSnippet();
         }
-        StringBuilder sb = new StringBuilder("Para reverter o DNS no Linux:\n\n");
-        sb.append("systemd-resolved:\n");
-        sb.append("  sudo rm /etc/systemd/resolved.conf.d/99-guialar.conf\n");
-        sb.append("  sudo systemctl restart systemd-resolved\n\n");
-        sb.append("NetworkManager: use \"Desfazer\" no GuiaLar (manifesto em ~/.guialar/).\n");
-        return sb.toString();
+        return """
+            Para reverter o DNS no Linux use Desfazer proteção no GuiaLar (manifesto em ~/.guialar/).
+
+            systemd-resolved: remove /etc/systemd/resolved.conf.d/99-guialar.conf e reinicia o serviço.
+            """.trim();
     }
 
     private ConfiguracaoDns reverterNetworkManager(Properties props) throws Exception {
-        String conexao = props.getProperty(LinuxDnsManifestStore.KEY_CONEXAO);
-        if (conexao == null || conexao.isBlank()) {
-            throw new Exception("Conexão NM não registrada no manifesto");
+        List<LinuxNmConexaoEstado> conexoes = LinuxNmManifestCodec.lerConexoes(props);
+        if (conexoes.isEmpty()) {
+            throw new Exception("Nenhuma conexão registrada no manifesto");
         }
-        LinuxCommandResult r1 = runner.executar(true, "nmcli", "connection", "modify", conexao, "ipv4.dns", "");
-        if (!r1.sucesso()) {
-            return falhaPkexec("NetworkManager", r1);
+        StringBuilder sb = new StringBuilder();
+        sb.append("set -e\n");
+        for (LinuxNmConexaoEstado c : conexoes) {
+            String q = LinuxShellEscape.shSingleQuote(c.nome());
+            sb.append("nmcli connection modify ").append(q).append(" ipv4.dns ")
+                .append(LinuxShellEscape.shSingleQuote(c.ipv4Dns())).append("\n");
+            sb.append("nmcli connection modify ").append(q).append(" ipv4.ignore-auto-dns ")
+                .append(c.ipv4IgnoreAutoDns()).append("\n");
+            sb.append("nmcli connection modify ").append(q).append(" ipv6.dns ")
+                .append(LinuxShellEscape.shSingleQuote(c.ipv6Dns())).append("\n");
+            sb.append("nmcli connection modify ").append(q).append(" ipv6.ignore-auto-dns ")
+                .append(c.ipv6IgnoreAutoDns()).append("\n");
+            sb.append("nmcli connection up ").append(q).append("\n");
         }
-        runner.executar(true, "nmcli", "connection", "modify", conexao, "ipv4.ignore-auto-dns", "no");
-        runner.executar(true, "nmcli", "connection", "modify", conexao, "ipv6.dns", "");
-        runner.executar(true, "nmcli", "connection", "modify", conexao, "ipv6.ignore-auto-dns", "no");
-        runner.executar(true, "nmcli", "connection", "up", conexao);
-        manifestStore.remover();
-        return new ConfiguracaoDns(null, true, "NetworkManager", "DNS da conexão \"" + conexao + "\" revertido");
+        LinuxCommandResult elevado = runner.executarScriptPrivilegiado(sb.toString());
+        ConfiguracaoDns falha = interpretarPkexec("NetworkManager", elevado, true);
+        if (falha != null) {
+            return falha;
+        }
+        return new ConfiguracaoDns(null, true, "NetworkManager",
+            "DNS das conexões registradas foi restaurado.");
     }
 
-    private ConfiguracaoDns reverterNetplan(Properties props) throws Exception {
-        String arquivo = props.getProperty(LinuxDnsManifestStore.KEY_ARQUIVO_NETPLAN,
-            "/etc/netplan/99-guialar-dns.yaml");
-        LinuxCommandResult rm = runner.executar(true, "rm", "-f", arquivo);
-        if (!rm.sucesso()) {
-            return falhaPkexec("Netplan", rm);
+    private ConfiguracaoDns reverterNetplan() throws Exception {
+        String script = """
+            set -e
+            rm -f %s
+            netplan apply
+            """.formatted(LinuxSystemPaths.NETPLAN_GUAILAR);
+        LinuxCommandResult elevado = runner.executarScriptPrivilegiado(script);
+        ConfiguracaoDns falha = interpretarPkexec("Netplan", elevado, true);
+        if (falha != null) {
+            return falha;
         }
-        runner.executar(true, "netplan", "apply");
-        manifestStore.remover();
-        return new ConfiguracaoDns(null, true, "Netplan", "Arquivo Netplan do GuiaLar removido");
+        return new ConfiguracaoDns(null, true, "Netplan", "Arquivo Netplan do GuiaLar removido.");
     }
 
     private ConfiguracaoDns reverterSystemdResolved() throws Exception {
-        LinuxCommandResult rm = runner.executar(true, "rm", "-f", DROPIN_RESOLVED);
-        if (!rm.sucesso()) {
-            return falhaPkexec("systemd-resolved", rm);
+        String script = """
+            set -e
+            rm -f %s
+            systemctl restart systemd-resolved
+            """.formatted(LinuxSystemPaths.DROPIN_RESOLVED);
+        LinuxCommandResult elevado = runner.executarScriptPrivilegiado(script);
+        ConfiguracaoDns falha = interpretarPkexec("systemd-resolved", elevado, true);
+        if (falha != null) {
+            return falha;
         }
-        LinuxCommandResult restart = runner.executar(true, "systemctl", "restart", "systemd-resolved");
-        if (!restart.sucesso()) {
-            return falhaPkexec("systemd-resolved", restart);
-        }
-        manifestStore.remover();
         return new ConfiguracaoDns(null, true, "systemd-resolved",
-            "Arquivo /etc/systemd/resolved.conf.d/99-guialar.conf removido e systemd-resolved reiniciado");
+            "Arquivo /etc/systemd/resolved.conf.d/99-guialar.conf removido e systemd-resolved reiniciado.");
     }
 
     private ConfiguracaoDns reverterResolvConf() throws Exception {
-        Path etcDir = Path.of("/etc");
-        Path backup = null;
-        try (var stream = Files.newDirectoryStream(etcDir, "resolv.conf.guialar-backup-*")) {
-            List<Path> lista = new ArrayList<>();
-            for (Path p : stream) {
-                lista.add(p);
-            }
-            lista.sort(java.util.Comparator.comparing(Path::toString).reversed());
-            if (!lista.isEmpty()) {
-                backup = lista.get(0);
-            }
+        String script = """
+            set -e
+            if [ -f %s ]; then cp %s %s; else exit 1; fi
+            """.formatted(
+            LinuxSystemPaths.RESOLV_GUAILAR_BACKUP,
+            LinuxSystemPaths.RESOLV_GUAILAR_BACKUP,
+            LinuxSystemPaths.RESOLV_CONF
+        );
+        LinuxCommandResult elevado = runner.executarScriptPrivilegiado(script);
+        ConfiguracaoDns falha = interpretarPkexec("resolv.conf", elevado, true);
+        if (falha != null) {
+            return falha;
         }
-        if (backup == null) {
-            throw new Exception("Backup de resolv.conf não encontrado em /etc");
-        }
-        LinuxCommandResult cp = runner.executar(true, "cp", backup.toString(), "/etc/resolv.conf");
-        if (!cp.sucesso()) {
-            return falhaPkexec("resolv.conf", cp);
-        }
-        manifestStore.remover();
-        return new ConfiguracaoDns(null, true, "resolv.conf", "Backup restaurado: " + backup.getFileName());
+        return new ConfiguracaoDns(null, true, "resolv.conf", "Backup /etc/resolv.conf.guialar-backup restaurado.");
     }
 
-    private void salvarManifestoAplicado(String metodo, String conexao, Path backupNm, Path arquivo)
-            throws IOException {
+    private void salvarManifestoSimples(String metodo) throws IOException {
         Properties props = new Properties();
         props.setProperty(LinuxDnsManifestStore.KEY_METODO, metodo);
         props.setProperty(LinuxDnsManifestStore.KEY_MODO, LinuxDnsManifestStore.MODO_APLICADO);
-        if (conexao != null) {
-            props.setProperty(LinuxDnsManifestStore.KEY_CONEXAO, conexao);
-        }
-        if (backupNm != null) {
-            props.setProperty(LinuxDnsManifestStore.KEY_BACKUP_NM, backupNm.toString());
-        }
-        if (arquivo != null && metodo.contains("Netplan")) {
-            props.setProperty(LinuxDnsManifestStore.KEY_ARQUIVO_NETPLAN, arquivo.toString());
-        }
         manifestStore.salvar(props);
     }
 
-    private Path stagingUsuario(String nome) throws IOException {
-        Path dir = Path.of(System.getProperty("user.home"), ".guialar", "staging");
-        Files.createDirectories(dir);
-        return dir.resolve(nome);
-    }
-
-    private Path backupConfigNetworkManager(String conexao) throws IOException, InterruptedException {
-        LinuxCommandResult processDns = runner.executar(false, "nmcli", "-t", "-f", "ipv4.dns,ipv6.dns",
-            "connection", "show", conexao);
-        List<String> config = new ArrayList<>();
-        if (processDns.stdout() != null) {
-            for (String linha : processDns.stdout().split("\n")) {
-                config.add(linha);
-            }
-        }
-        String timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss"));
-        Path backupDir = Path.of(System.getProperty("user.home"), ".guialar", "backups");
-        Files.createDirectories(backupDir);
-        Path backupFile = backupDir.resolve("nm-" + conexao + "-" + timestamp + ".txt");
-        Files.write(backupFile, config);
-        return backupFile;
-    }
-
-    private String obterConexaoAtiva() throws IOException, InterruptedException {
-        LinuxCommandResult process = runner.executar(false, "nmcli", "-t", "-f", "NAME,TYPE,DEVICE",
-            "connection", "show", "--active");
-
-        String melhorConexao = null;
-        String[] tiposIgnorar = {"vpn", "tun", "docker", "bridge", "veth"};
-        String[] tiposPreferidos = {"802-3-ethernet", "ethernet", "802-11-wireless", "wifi"};
-
-        if (process.stdout() == null) {
+    private ConfiguracaoDns interpretarPkexec(String metodo, LinuxCommandResult r, boolean revertendo) {
+        if (r.sucesso()) {
             return null;
         }
-        for (String linha : process.stdout().split("\n")) {
-            String[] partes = linha.split(":");
-            if (partes.length < 3) {
-                continue;
-            }
-            String nome = partes[0];
-            String tipo = partes[1].toLowerCase();
-            String device = partes[2];
-
-            boolean ignorar = false;
-            for (String tipoIgnorar : tiposIgnorar) {
-                if (tipo.contains(tipoIgnorar) || device.contains(tipoIgnorar)) {
-                    ignorar = true;
-                    break;
-                }
-            }
-            if (ignorar) {
-                continue;
-            }
-            for (String tipoPreferido : tiposPreferidos) {
-                if (tipo.contains(tipoPreferido)) {
-                    melhorConexao = nome;
-                    break;
-                }
-            }
-            if (melhorConexao == null) {
-                melhorConexao = nome;
-            }
-            if (tipo.contains("ethernet") || tipo.contains("802-3")) {
-                break;
-            }
+        String msgUsuario = LinuxPkexecMensagens.mensagemUsuario(r.exitCode());
+        if (msgUsuario != null) {
+            return ConfiguracaoDns.naoAplicado(metodo, msgUsuario);
         }
-        return melhorConexao;
+        String detalhe = r.saidaCombinada();
+        if (revertendo) {
+            return ConfiguracaoDns.erro(metodo,
+                "Não foi possível desfazer completamente. O manifesto foi mantido. " + detalhe);
+        }
+        return ConfiguracaoDns.erro(metodo,
+            "A operação elevada falhou antes de concluir; o manifesto não foi salvo. "
+                + "Se algo mudou na rede, anote o horário e peça ajuda. " + detalhe);
     }
 
-    private List<String> montarYamlNetplan(ServidorDns servidor, Path configFile) {
+    private List<String> montarYamlNetplan(ServidorDns servidor) {
         List<String> linhas = new ArrayList<>();
         linhas.add("# Configurado por GuiaLar Digital");
         linhas.add("network:");
@@ -469,14 +454,31 @@ public class ConfiguradorDnsLinuxService {
         return linhas;
     }
 
-    private ConfiguracaoDns falhaPkexec(String metodo, LinuxCommandResult r) {
-        if (r.exitCode() == 127 && r.stderr() != null && r.stderr().contains("pkexec")) {
-            return ConfiguracaoDns.naoAplicado(metodo, r.stderr());
-        }
-        if (r.exitCode() == 126) {
-            return ConfiguracaoDns.naoAplicado(metodo,
-                "Autorização cancelada ou negada no pkexec (polkit). O sistema não foi alterado.");
-        }
-        return ConfiguracaoDns.erro(metodo, r.saidaCombinada());
+    private List<String> montarResolvedDropin(ServidorDns servidor) {
+        List<String> linhas = new ArrayList<>();
+        linhas.add("# Configurado por GuiaLar Digital");
+        linhas.add("[Resolve]");
+        linhas.add("DNS=" + servidor.getPrimario() + " " + servidor.getSecundario() + " "
+            + servidor.getPrimarioIpv6() + " " + servidor.getSecundarioIpv6());
+        linhas.add("FallbackDNS=");
+        linhas.add("Domains=~.");
+        linhas.add("DNSSEC=allow-downgrade");
+        linhas.add("DNSOverTLS=opportunistic");
+        return linhas;
+    }
+
+    private String montarResolvConf(ServidorDns servidor) {
+        return """
+            # Configurado por GuiaLar Digital
+            nameserver %s
+            nameserver %s
+            nameserver %s
+            nameserver %s
+            """.formatted(
+            servidor.getPrimario(),
+            servidor.getSecundario(),
+            servidor.getPrimarioIpv6(),
+            servidor.getSecundarioIpv6()
+        ).trim() + "\n";
     }
 }

@@ -10,7 +10,9 @@ import br.uniube.pi.guialar.aplicacao.dns.ConfiguradorDnsLinuxService;
 import br.uniube.pi.guialar.aplicacao.dns.ConfiguradorDnsService;
 import br.uniube.pi.guialar.aplicacao.dns.ConfiguradorDnsWindowsService;
 import br.uniube.pi.guialar.aplicacao.extensao.InstaladorExtensaoService;
+import br.uniube.pi.guialar.aplicacao.verificacao.LinuxProtecaoStatusService;
 import br.uniube.pi.guialar.aplicacao.verificacao.VerificacaoDnsService;
+import br.uniube.pi.guialar.dominio.sistema.TipoSistema;
 import br.uniube.pi.guialar.dominio.diagnostico.DiagnosticoAmbiente;
 import br.uniube.pi.guialar.dominio.diagnostico.StatusDns;
 import br.uniube.pi.guialar.dominio.distro.InfoDistro;
@@ -18,7 +20,6 @@ import br.uniube.pi.guialar.dominio.dns.ConfiguracaoDns;
 import br.uniube.pi.guialar.dominio.dns.ServidorDns;
 import br.uniube.pi.guialar.dominio.navegador.Navegador;
 import br.uniube.pi.guialar.dominio.navegador.TipoNavegador;
-import br.uniube.pi.guialar.dominio.sistema.TipoSistema;
 import br.uniube.pi.guialar.dominio.verificacao.ResultadoVerificacao;
 
 import javax.swing.BorderFactory;
@@ -130,6 +131,7 @@ public class GuiaLarGui {
             distro = detectorDistro.detectar();
             navegadores = deduplicar(detectorNavegador.detectar());
             diagnostico = diagnosticoService.diagnosticar();
+            textoCopiarNixOs = new LinuxProtecaoStatusService().carregarSnippetNixosPersistido();
         }
 
         frame = new JFrame("GuiaLar Digital - DNS seguro e adblockers");
@@ -147,6 +149,7 @@ public class GuiaLarGui {
         frame.setLocationRelativeTo(null);
         frame.setVisible(true);
 
+        atualizarBotoesManifesto();
         log("GuiaLar Digital iniciado (" + tipoSistema.getNome() + ").");
         if (tipoSistema.isWindows()) {
             log("Modo Windows: diagnóstico não exige admin. DNS só sob UAC.");
@@ -285,8 +288,8 @@ public class GuiaLarGui {
         if (statusAmigavel == null || diagnostico == null) return;
         StatusDns estado = diagnostico.getStatusDns();
         if (estado == StatusDns.APLICADO) {
-            statusAmigavel.setText("Proteção da rede ativa");
-            detalheAmigavel.setText("O GuiaLar encontrou a proteção configurada neste computador.");
+            statusAmigavel.setText("Protegido");
+            detalheAmigavel.setText("A verificação confirmou que sites perigosos estão bloqueados nesta rede.");
             statusAmigavel.setForeground(new Color(0x1B, 0x7A, 0x2E));
         } else if (estado == StatusDns.LEITURA_BLOQUEADA) {
             statusAmigavel.setText("A proteção ainda não foi confirmada");
@@ -521,6 +524,9 @@ public class GuiaLarGui {
         new SwingWorker<DiagnosticoAmbiente, Void>() {
             @Override
             protected DiagnosticoAmbiente doInBackground() {
+                if (tipoSistema != null && !tipoSistema.isWindows()) {
+                    return diagnosticoService.diagnosticarLinuxComVerificacao(tipoSistema);
+                }
                 return diagnosticoService.diagnosticar();
             }
 
@@ -529,9 +535,12 @@ public class GuiaLarGui {
                 try {
                     diagnostico = get();
                     navegadores = deduplicar(diagnostico.getNavegadores());
+                    if (tipoSistema != null && !tipoSistema.isWindows()) {
+                        textoCopiarNixOs = new LinuxProtecaoStatusService().carregarSnippetNixosPersistido();
+                    }
                     atualizarResumoAmigavel();
                     atualizarBotoesManifesto();
-                    log("\n--- Diagnóstico atualizado ---\n" + diagnostico.formatarRelatorio());
+                    log("\n--- Verificação atualizada ---\n" + diagnostico.formatarRelatorio());
                     if (diagnostico.getStatusDns() != StatusDns.APLICADO) {
                         log("Filtro de sistema: NÃO afirmado como ativo (status: "
                             + diagnostico.getStatusDns().getRotuloPt() + ").");
@@ -670,7 +679,7 @@ public class GuiaLarGui {
     private void onExecutarLinux() {
         if (distro == null || !distro.isSuportada()) {
             JOptionPane.showMessageDialog(frame,
-                "Distribuição não suportada.\nO GuiaLar Digital suporta Debian, Fedora e Arch Linux.",
+                "Distribuição não suportada.\nO GuiaLar Digital suporta Debian, Ubuntu, Fedora, Arch Linux e NixOS.",
                 "Não suportado", JOptionPane.ERROR_MESSAGE);
             return;
         }
@@ -721,9 +730,13 @@ public class GuiaLarGui {
                         System.out.println("  FALHOU: " + resultado.getMensagem());
                     }
 
-                    System.out.println("\n[ETAPA 2/3] Verificação DNS (smoke test)...");
-                    List<ResultadoVerificacao> resultados = verificacaoDns.verificar();
-                    verificacaoDns.exibirResumo(resultados);
+                    if (!resultado.isAguardandoUsuario() && resultado.isAplicado()) {
+                        System.out.println("\n[ETAPA 2/3] Verificação DNS já executada após aplicar.");
+                    } else if (resultado.isAguardandoUsuario()) {
+                        System.out.println("\n[ETAPA 2/3] Aguardando você aplicar no NixOS — verificação depois.");
+                    } else {
+                        System.out.println("\n[ETAPA 2/3] DNS não aplicado — verificação omitida.");
+                    }
 
                     System.out.println("[ETAPA 3/3] Configurando navegadores...");
                     if (navegadores.isEmpty()) {
@@ -751,31 +764,22 @@ public class GuiaLarGui {
             protected void done() {
                 try {
                     ConfiguracaoDns resultado = get();
-                    if (resultado != null && resultado.isAguardandoUsuario()) {
-                        textoCopiarNixOs = resultado.getTextoParaCopiar();
-                        diagnostico = diagnosticoService.diagnosticar();
-                        if (diagnostico != null) {
-                            diagnostico = DiagnosticoAmbiente.builder()
-                                .tipoSistema(diagnostico.getTipoSistema())
-                                .nomeSistema(diagnostico.getNomeSistema())
-                                .versaoSistema(diagnostico.getVersaoSistema())
-                                .arquitetura(diagnostico.getArquitetura())
-                                .processoElevado(diagnostico.isProcessoElevado())
-                                .podeElevar(diagnostico.isPodeElevar())
-                                .statusDns(StatusDns.AGUARDANDO_APLICACAO)
-                                .servidoresDnsAtuais(diagnostico.getServidoresDnsAtuais())
-                                .notaDns(resultado.getMensagem())
-                                .navegadores(diagnostico.getNavegadores())
-                                .notasConectividade(diagnostico.getNotasConectividade())
-                                .oQueFunciona(diagnostico.getOQueFunciona())
-                                .caminhoDadosUsuario(diagnostico.getCaminhoDadosUsuario())
-                                .build();
+                    if (resultado != null) {
+                        if (resultado.isAguardandoUsuario()) {
+                            textoCopiarNixOs = resultado.getTextoParaCopiar();
+                            diagnostico = diagnosticoService.diagnosticar();
+                            atualizarResumoAmigavel();
+                            JOptionPane.showMessageDialog(frame,
+                                "Copie a configuração com o botão \"Copiar configuração\",\n"
+                                    + "aplique no NixOS e depois clique em \"Verificar de novo\".",
+                                "Aguardando você aplicar", JOptionPane.INFORMATION_MESSAGE);
+                        } else if (!resultado.isAplicado()) {
+                            JOptionPane.showMessageDialog(frame, resultado.getMensagem(),
+                                "Não foi possível aplicar", JOptionPane.WARNING_MESSAGE);
+                        } else {
+                            diagnostico = diagnosticoService.diagnosticarLinuxComVerificacao(tipoSistema);
+                            atualizarResumoAmigavel();
                         }
-                        atualizarResumoAmigavel();
-                        JOptionPane.showMessageDialog(frame,
-                            "Copie a configuração com o botão \"Copiar configuração\",\n"
-                                + "aplique no NixOS e depois clique em \"Verificar de novo\".",
-                            "Aguardando você aplicar", JOptionPane.INFORMATION_MESSAGE);
                     }
                 } catch (Exception ignored) {
                 }

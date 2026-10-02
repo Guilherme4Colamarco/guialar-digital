@@ -181,12 +181,16 @@ public class GuiaLarCli {
         System.out.println();
         
         ConfiguracaoDns resultado = configuradorDns.configurar(distro);
-        
-        if (resultado.isAplicado()) {
+
+        if (resultado.isAguardandoUsuario()) {
+            System.out.println("⏳ Aguardando você aplicar: " + resultado.getMensagem());
+            System.out.println("--- Trecho para copiar ---");
+            System.out.println(resultado.getTextoParaCopiar());
+        } else if (resultado.isAplicado()) {
             System.out.println("✓ " + resultado.getMensagem());
             System.out.println("  Método: " + resultado.getMetodoConfiguracao());
         } else {
-            System.err.println("✗ " + resultado.getMensagem());
+            System.err.println("○ " + resultado.getMensagem());
             System.err.println("  Método tentado: " + resultado.getMetodoConfiguracao());
         }
         System.out.println();
@@ -229,7 +233,7 @@ public class GuiaLarCli {
         System.out.println("║                    Configuração Concluída                      ║");
         System.out.println("╚════════════════════════════════════════════════════════════════╝");
         System.out.println();
-        System.out.println("✓ DNS configurado para Cloudflare 1.1.1.1 for Families");
+        System.out.println("Revise o resumo da verificação acima antes de considerar a proteção ativa.");
         System.out.println("  • IPv4: 1.1.1.3 / 1.0.0.3");
         System.out.println("  • IPv6: 2606:4700:4700::1113 / 2606:4700:4700::1003");
         System.out.println("  • Proteção contra malware");

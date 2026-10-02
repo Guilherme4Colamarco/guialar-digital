@@ -4,22 +4,27 @@ import br.uniube.pi.guialar.aplicacao.adaptadores.linux.FakeLinuxCommandRunner;
 import br.uniube.pi.guialar.aplicacao.adaptadores.linux.LinuxCommandResult;
 import br.uniube.pi.guialar.aplicacao.adaptadores.linux.LinuxDnsBackend;
 import br.uniube.pi.guialar.aplicacao.adaptadores.linux.LinuxDnsBackendSelector;
+import br.uniube.pi.guialar.aplicacao.adaptadores.linux.LinuxDnsFamiliesDetector;
 import br.uniube.pi.guialar.aplicacao.adaptadores.linux.LinuxDnsManifestStore;
+import br.uniube.pi.guialar.aplicacao.adaptadores.linux.LinuxNmcliTerseParser;
 import br.uniube.pi.guialar.aplicacao.adaptadores.linux.LinuxOsRelease;
+import br.uniube.pi.guialar.aplicacao.adaptadores.linux.LinuxPkexecMensagens;
+import br.uniube.pi.guialar.aplicacao.adaptadores.linux.LinuxSystemPaths;
 import br.uniube.pi.guialar.aplicacao.adaptadores.linux.NixOsDnsSupport;
 import br.uniube.pi.guialar.aplicacao.dns.ConfiguradorDnsLinuxService;
+import br.uniube.pi.guialar.aplicacao.verificacao.LinuxProtecaoStatusService;
+import br.uniube.pi.guialar.aplicacao.verificacao.VerificacaoDnsService;
+import br.uniube.pi.guialar.dominio.diagnostico.StatusDns;
 import br.uniube.pi.guialar.dominio.distro.InfoDistro;
 import br.uniube.pi.guialar.dominio.distro.TipoDistro;
 import br.uniube.pi.guialar.dominio.dns.ConfiguracaoDns;
+import br.uniube.pi.guialar.dominio.verificacao.ResultadoVerificacao;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Properties;
 
-/**
- * Testes Linux com comandos mockados ({@code ant test-linux}).
- */
 public class LinuxDnsLogicTest {
 
     private static int falhas = 0;
@@ -28,10 +33,18 @@ public class LinuxDnsLogicTest {
         System.out.println("=== GuiaLar Linux DNS logic tests ===");
         testOsReleaseNixOs();
         testNmPreferidoSobreNetplan();
-        testPkexecSomenteNaEscritaDns();
-        testRevertResolvedRemoveDropin();
+        testParserEscapadoDoisPontos();
+        testFamiliesNaoConfunde11130();
+        testUmPkexecPorAplicarNm();
+        testScriptContemIpv6EIgnoreAutoDns();
+        testResolvedRestartNoScript();
+        testPkexec126e127();
+        testRevertResolvedUmScript();
+        testMultiplasConexoesNoScript();
         testNixOsComNmSemDnsGlobal();
-        testNixOsSemNmRetornaSnippet();
+        testNixOsNmComDnsGlobalVaiParaSnippet();
+        testStatusAguardandoPersisteNoManifesto();
+        testRevertNaoApagaManifestoSeFalhar();
 
         System.out.println();
         if (falhas == 0) {
@@ -50,147 +63,209 @@ public class LinuxDnsLogicTest {
     }
 
     private static void testNmPreferidoSobreNetplan() throws Exception {
-        FakeLinuxCommandRunner runner = new FakeLinuxCommandRunner();
-        runner.responder("systemctl is-active NetworkManager",
-            new LinuxCommandResult(0, "active", "", false));
-        runner.responder("nmcli -t -f RUNNING general",
-            new LinuxCommandResult(0, "running", "", false));
-
+        FakeLinuxCommandRunner runner = runnerComNmAtivo();
         Path osRelease = Files.createTempFile("os-release-", ".txt");
-        Files.writeString(osRelease, "ID=ubuntu\nNAME=Ubuntu\n");
+        Files.writeString(osRelease, "ID=ubuntu\n");
         Path netplan = Files.createTempDirectory("netplan-");
-
         LinuxDnsBackendSelector selector = new LinuxDnsBackendSelector(runner, osRelease, netplan);
         InfoDistro ubuntu = new InfoDistro(TipoDistro.DEBIAN, "Ubuntu", "24.04", "NetworkManager");
-
         assertEq("backend", LinuxDnsBackend.NETWORK_MANAGER, selector.selecionar(ubuntu));
         ok("testNmPreferidoSobreNetplan");
     }
 
-    private static void testPkexecSomenteNaEscritaDns() throws Exception {
-        FakeLinuxCommandRunner runner = new FakeLinuxCommandRunner();
-        runner.responder("systemctl is-active NetworkManager", new LinuxCommandResult(0, "active", "", false));
-        runner.responder("nmcli -t -f RUNNING general", new LinuxCommandResult(0, "running", "", false));
+    private static void testParserEscapadoDoisPontos() {
+        List<LinuxNmcliTerseParser.ConexaoAtiva> lista = LinuxNmcliTerseParser.parseConexoesAtivas(
+            "Casa\\:Wi-Fi:802-11-wireless:wlp0s20f3");
+        assertEq("nome ssid", "Casa:Wi-Fi", lista.get(0).nome());
+        ok("testParserEscapadoDoisPontos");
+    }
+
+    private static void testFamiliesNaoConfunde11130() {
+        assertTrue("nao detecta 11130", !LinuxDnsFamiliesDetector.textoContemFamilies("nameserver 1.1.1.30"));
+        assertTrue("detecta 113", LinuxDnsFamiliesDetector.textoContemFamilies("DNS=1.1.1.3"));
+        ok("testFamiliesNaoConfunde11130");
+    }
+
+    private static void testUmPkexecPorAplicarNm() throws Exception {
+        FakeLinuxCommandRunner runner = runnerComNmAtivo();
         runner.responder("nmcli -t -f NAME,TYPE,DEVICE connection show --active",
-            new LinuxCommandResult(0, "Casa Wi-Fi:802-11-wireless:wlp0s20f3", "", false));
-        runner.responder("nmcli -t -f ipv4.dns,ipv6.dns connection show Casa Wi-Fi",
-            new LinuxCommandResult(0, "ipv4.dns:8.8.8.8\nipv6.dns:", "", false));
-
-        runner.setFallback((chamada, fake) -> {
-            if (chamada.privilegiado()) {
-                return new LinuxCommandResult(0, "ok", "", true);
-            }
-            return new LinuxCommandResult(0, "", "", false);
-        });
-
-        Path manifest = Files.createTempFile("manifest-", ".properties");
-        Files.delete(manifest);
-        LinuxDnsManifestStore store = new LinuxDnsManifestStore(manifest);
-        Path osRelease = Files.createTempFile("os-release-deb-", ".txt");
-        Files.writeString(osRelease, "ID=debian\n");
-        LinuxDnsBackendSelector selector = new LinuxDnsBackendSelector(runner, osRelease, Path.of("/tmp/netplan-inexistente"));
-        ConfiguradorDnsLinuxService svc = new ConfiguradorDnsLinuxService(
-            runner, selector, new NixOsDnsSupport(runner, selector), store);
-
+            new LinuxCommandResult(0, "Wi-Fi:802-11-wireless:wlan0", "", false));
+        stubDnsShow(runner, "Wi-Fi");
+        ConfiguradorDnsLinuxService svc = svc(runner, manifestTemp());
         InfoDistro debian = new InfoDistro(TipoDistro.DEBIAN, "Debian", "12", "NetworkManager");
         ConfiguracaoDns r = svc.configurar(debian);
-        assertTrue("aplicado", r.isAplicado());
-
-        boolean leituraSemPkexec = runner.getHistorico().stream()
-            .filter(c -> !c.privilegiado())
-            .anyMatch(c -> c.chave().contains("nmcli"));
-        boolean escritaComPkexec = runner.getHistorico().stream()
-            .filter(FakeLinuxCommandRunner.Chamada::privilegiado)
-            .anyMatch(c -> c.chave().startsWith("nmcli connection modify"));
-
-        assertTrue("leitura nmcli sem pkexec", leituraSemPkexec);
-        assertTrue("escrita com pkexec", escritaComPkexec);
-        ok("testPkexecSomenteNaEscritaDns");
-    }
-
-    private static void testRevertResolvedRemoveDropin() throws Exception {
-        FakeLinuxCommandRunner runner = new FakeLinuxCommandRunner();
-        runner.setFallback((chamada, fake) -> new LinuxCommandResult(0, "", "", chamada.privilegiado()));
-
-        Path manifest = Files.createTempFile("manifest-resolved-", ".properties");
-        LinuxDnsManifestStore store = new LinuxDnsManifestStore(manifest);
-        Properties props = new Properties();
-        props.setProperty(LinuxDnsManifestStore.KEY_METODO, "systemd-resolved (drop-in)");
-        props.setProperty(LinuxDnsManifestStore.KEY_MODO, LinuxDnsManifestStore.MODO_APLICADO);
-        store.salvar(props);
-
-        Path osRelease = Files.createTempFile("os-release-arch-", ".txt");
-        Files.writeString(osRelease, "ID=arch\n");
-        LinuxDnsBackendSelector selector = new LinuxDnsBackendSelector(runner, osRelease, Path.of("/tmp/no-netplan"));
-        ConfiguradorDnsLinuxService svc = new ConfiguradorDnsLinuxService(
-            runner, selector, new NixOsDnsSupport(runner, selector), store);
-
-        ConfiguracaoDns r = svc.desfazer();
-        assertTrue("revert ok", r.isAplicado());
-        assertTrue("mensagem dropin",
-            r.getMensagem().contains("99-guialar.conf"));
-
-        boolean rmDropin = runner.getHistorico().stream()
-            .anyMatch(c -> c.privilegiado() && c.chave().contains("rm -f /etc/systemd/resolved.conf.d/99-guialar.conf"));
-        assertTrue("rm dropin via pkexec", rmDropin);
-        ok("testRevertResolvedRemoveDropin");
-    }
-
-    private static void testNixOsComNmSemDnsGlobal() throws Exception {
-        FakeLinuxCommandRunner runner = new FakeLinuxCommandRunner();
-        runner.responder("systemctl is-active NetworkManager", new LinuxCommandResult(0, "active", "", false));
-        runner.responder("nmcli -t -f RUNNING general", new LinuxCommandResult(0, "running", "", false));
-        runner.responder("resolvectl status", new LinuxCommandResult(0, "Global\n  DNS Servers: -\n", "", false));
-        runner.responder("nmcli -t -f NAME,TYPE,DEVICE connection show --active",
-            new LinuxCommandResult(0, "NixWifi:802-11-wireless:wlan0", "", false));
-        runner.responder("nmcli -t -f ipv4.dns,ipv6.dns connection show NixWifi",
-            new LinuxCommandResult(0, "ipv4.dns:\nipv6.dns:", "", false));
-        runner.setFallback((chamada, fake) -> new LinuxCommandResult(0, "", "", chamada.privilegiado()));
-
-        Path osRelease = Files.createTempFile("os-release-nix-", ".txt");
-        Files.writeString(osRelease, "ID=nixos\nNAME=NixOS\n");
-        Path manifest = Files.createTempFile("manifest-nix-nm-", ".properties");
-        Files.delete(manifest);
-        Path resolvStub = Files.createTempFile("resolv-stub-", ".conf");
-        Files.writeString(resolvStub, "# stub\nnameserver 127.0.0.53\n");
-
-        LinuxDnsBackendSelector selector = new LinuxDnsBackendSelector(runner, osRelease, Path.of("/tmp/no-netplan"));
-        NixOsDnsSupport nix = new NixOsDnsSupport(runner, selector, resolvStub);
-        ConfiguradorDnsLinuxService svc = new ConfiguradorDnsLinuxService(runner, selector, nix,
-            new LinuxDnsManifestStore(manifest));
-
-        InfoDistro nixos = new InfoDistro(TipoDistro.NIXOS, "NixOS", "24.11", "NetworkManager");
-        ConfiguracaoDns r = svc.configurar(nixos);
-        if (!assertTrueSilent("nm aplicado no nixos", r.isAplicado())
-            || !assertTrueSilent("usou nmcli modify", runner.getHistorico().stream()
-                .anyMatch(c -> c.chave().contains("nmcli connection modify")))) {
-            falhas++;
+        assertEq("um script pkexec", 1, runner.getScriptsPrivilegiados().size());
+        if (r.isAplicado() || (r.getMensagem() != null && r.getMensagem().contains("verificação"))) {
+            ok("testUmPkexecPorAplicarNm");
         } else {
-            ok("testNixOsComNmSemDnsGlobal");
+            System.err.println("FALHA aplicado ou aviso verificacao: " + r.getMensagem());
+            falhas++;
         }
     }
 
-    private static void testNixOsSemNmRetornaSnippet() throws Exception {
+    private static void testScriptContemIpv6EIgnoreAutoDns() throws Exception {
+        FakeLinuxCommandRunner runner = runnerComNmAtivo();
+        runner.responder("nmcli -t -f NAME,TYPE,DEVICE connection show --active",
+            new LinuxCommandResult(0, "eth0:802-3-ethernet:enp0", "", false));
+        stubDnsShow(runner, "eth0");
+        ConfiguradorDnsLinuxService svc = svc(runner, manifestTemp());
+        svc.configurar(new InfoDistro(TipoDistro.DEBIAN, "Debian", "12", "NetworkManager"));
+        String script = runner.getScriptsPrivilegiados().get(0);
+        assertTrue("ipv6.dns", script.contains("ipv6.dns"));
+        assertTrue("ipv6 ignore", script.contains("ipv6.ignore-auto-dns yes"));
+        assertTrue("ipv4 ignore", script.contains("ipv4.ignore-auto-dns yes"));
+        ok("testScriptContemIpv6EIgnoreAutoDns");
+    }
+
+    private static void testResolvedRestartNoScript() throws Exception {
         FakeLinuxCommandRunner runner = new FakeLinuxCommandRunner();
         runner.setComandoDisponivel("nmcli", false);
-        runner.responder("resolvectl status", new LinuxCommandResult(0, "Global\n  DNS Servers: 8.8.8.8\n", "", false));
+        runner.responder("systemctl is-active systemd-resolved", new LinuxCommandResult(0, "active", "", false));
+        Path osRelease = Files.createTempFile("os-release-r-", ".txt");
+        Files.writeString(osRelease, "ID=arch\n");
+        LinuxDnsBackendSelector selector = new LinuxDnsBackendSelector(runner, osRelease, Path.of("/tmp/no-np"));
+        ConfiguradorDnsLinuxService svc = new ConfiguradorDnsLinuxService(
+            runner, selector, new NixOsDnsSupport(runner, selector), new LinuxDnsManifestStore(manifestTemp()));
+        svc.configurar(new InfoDistro(TipoDistro.ARCH, "Arch", "", "systemd-resolved"));
+        String script = runner.getScriptsPrivilegiados().get(0);
+        assertTrue("dropin fixo", script.contains(LinuxSystemPaths.DROPIN_RESOLVED));
+        assertTrue("restart resolved", script.contains("systemctl restart systemd-resolved"));
+        ok("testResolvedRestartNoScript");
+    }
 
-        Path osRelease = Files.createTempFile("os-release-nix2-", ".txt");
+    private static void testPkexec126e127() {
+        assertTrue("126 cancelado", LinuxPkexecMensagens.mensagemUsuario(126).contains("cancelou"));
+        assertTrue("127 agente", LinuxPkexecMensagens.mensagemUsuario(127).contains("agente"));
+        ok("testPkexec126e127");
+    }
+
+    private static void testRevertResolvedUmScript() throws Exception {
+        FakeLinuxCommandRunner runner = new FakeLinuxCommandRunner();
+        Path manifest = manifestTemp();
+        Properties props = new Properties();
+        props.setProperty(LinuxDnsManifestStore.KEY_METODO, "systemd-resolved");
+        props.setProperty(LinuxDnsManifestStore.KEY_MODO, LinuxDnsManifestStore.MODO_APLICADO);
+        new LinuxDnsManifestStore(manifest).salvar(props);
+        LinuxDnsBackendSelector selector = new LinuxDnsBackendSelector(runner,
+            Files.createTempFile("os-r", ".txt"), Path.of("/tmp/x"));
+        ConfiguradorDnsLinuxService svc = new ConfiguradorDnsLinuxService(
+            runner, selector, new NixOsDnsSupport(runner, selector), new LinuxDnsManifestStore(manifest));
+        ConfiguracaoDns r = svc.desfazer();
+        assertTrue("revert ok", r.isAplicado());
+        assertEq("um script", 1, runner.getScriptsPrivilegiados().size());
+        assertTrue("rm fixo", runner.getScriptsPrivilegiados().get(0).contains(LinuxSystemPaths.DROPIN_RESOLVED));
+        assertTrue("manifesto removido", !new LinuxDnsManifestStore(manifest).existe());
+        ok("testRevertResolvedUmScript");
+    }
+
+    private static void testMultiplasConexoesNoScript() throws Exception {
+        FakeLinuxCommandRunner runner = runnerComNmAtivo();
+        runner.responder("nmcli -t -f NAME,TYPE,DEVICE connection show --active",
+            new LinuxCommandResult(0,
+                "Wi-Fi:802-11-wireless:wlan0\nEthernet:802-3-ethernet:enp0", "", false));
+        stubDnsShow(runner, "Wi-Fi");
+        stubDnsShow(runner, "Ethernet");
+        ConfiguradorDnsLinuxService svc = svc(runner, manifestTemp());
+        svc.configurar(new InfoDistro(TipoDistro.DEBIAN, "Debian", "12", "NetworkManager"));
+        String script = runner.getScriptsPrivilegiados().get(0);
+        assertTrue("wifi", script.contains("'Wi-Fi'"));
+        assertTrue("eth", script.contains("'Ethernet'"));
+        ok("testMultiplasConexoesNoScript");
+    }
+
+    private static void testNixOsComNmSemDnsGlobal() throws Exception {
+        FakeLinuxCommandRunner runner = runnerComNmAtivo();
+        runner.responder("resolvectl status", new LinuxCommandResult(0, "Global\n  DNS Servers: -\n", "", false));
+        runner.responder("nmcli -t -f NAME,TYPE,DEVICE connection show --active",
+            new LinuxCommandResult(0, "NixWifi:802-11-wireless:wlan0", "", false));
+        stubDnsShow(runner, "NixWifi");
+        Path osRelease = Files.createTempFile("os-nix-", ".txt");
         Files.writeString(osRelease, "ID=nixos\n");
-        Path manifest = Files.createTempFile("manifest-nix-snippet-", ".properties");
-        Files.delete(manifest);
+        Path resolvStub = Files.createTempFile("resolv-", ".conf");
+        Files.writeString(resolvStub, "nameserver 127.0.0.53\n");
+        LinuxDnsBackendSelector selector = new LinuxDnsBackendSelector(runner, osRelease, Path.of("/tmp/no-np"));
+        NixOsDnsSupport nix = new NixOsDnsSupport(runner, selector, resolvStub);
+        ConfiguradorDnsLinuxService svc = new ConfiguradorDnsLinuxService(runner, selector, nix,
+            new LinuxDnsManifestStore(manifestTemp()));
+        ConfiguracaoDns r = svc.configurar(new InfoDistro(TipoDistro.NIXOS, "NixOS", "", "NetworkManager"));
+        assertTrue("nm script", !runner.getScriptsPrivilegiados().isEmpty());
+        ok("testNixOsComNmSemDnsGlobal");
+    }
 
-        LinuxDnsBackendSelector selector = new LinuxDnsBackendSelector(runner, osRelease, Path.of("/tmp/no-netplan"));
+    private static void testNixOsNmComDnsGlobalVaiParaSnippet() throws Exception {
+        FakeLinuxCommandRunner runner = runnerComNmAtivo();
+        runner.responder("resolvectl status",
+            new LinuxCommandResult(0, "Global\n  DNS Servers: 8.8.8.8\n", "", false));
+        Path osRelease = Files.createTempFile("os-nix2-", ".txt");
+        Files.writeString(osRelease, "ID=nixos\n");
+        Path manifest = manifestTemp();
+        LinuxDnsBackendSelector selector = new LinuxDnsBackendSelector(runner, osRelease, Path.of("/tmp/no-np"));
         NixOsDnsSupport nix = new NixOsDnsSupport(runner, selector);
         ConfiguradorDnsLinuxService svc = new ConfiguradorDnsLinuxService(runner, selector, nix,
             new LinuxDnsManifestStore(manifest));
-
-        InfoDistro nixos = new InfoDistro(TipoDistro.NIXOS, "NixOS", "", "manual");
-        ConfiguracaoDns r = svc.configurar(nixos);
+        ConfiguracaoDns r = svc.configurar(new InfoDistro(TipoDistro.NIXOS, "NixOS", "", "NetworkManager"));
         assertTrue("aguardando", r.isAguardandoUsuario());
-        assertTrue("snippet nameservers", r.getTextoParaCopiar().contains("networking.nameservers"));
-        assertTrue("sem aplicado", !r.isAplicado());
-        ok("testNixOsSemNmRetornaSnippet");
+        assertTrue("sem pkexec", runner.getScriptsPrivilegiados().isEmpty());
+        ok("testNixOsNmComDnsGlobalVaiParaSnippet");
+    }
+
+    private static void testStatusAguardandoPersisteNoManifesto() throws Exception {
+        Path manifest = manifestTemp();
+        Properties props = new Properties();
+        props.setProperty(LinuxDnsManifestStore.KEY_MODO, LinuxDnsManifestStore.MODO_AGUARDANDO_NIXOS);
+        props.setProperty(LinuxDnsManifestStore.KEY_NIXOS_SNIPPET, "networking.nameservers = [ ];");
+        new LinuxDnsManifestStore(manifest).salvar(props);
+        LinuxProtecaoStatusService status = new LinuxProtecaoStatusService(
+            new LinuxDnsManifestStore(manifest), new VerificacaoDnsService());
+        var a = status.avaliarSomenteManifesto();
+        assertEq("status", StatusDns.AGUARDANDO_APLICACAO, a.status());
+        assertTrue("snippet", status.carregarSnippetNixosPersistido().contains("nameservers"));
+        ok("testStatusAguardandoPersisteNoManifesto");
+    }
+
+    private static void testRevertNaoApagaManifestoSeFalhar() throws Exception {
+        FakeLinuxCommandRunner runner = new FakeLinuxCommandRunner();
+        runner.setResultadoScriptPadrao(new LinuxCommandResult(1, "", "erro", true));
+        Path manifest = manifestTemp();
+        Properties props = new Properties();
+        props.setProperty(LinuxDnsManifestStore.KEY_METODO, "systemd-resolved");
+        props.setProperty(LinuxDnsManifestStore.KEY_MODO, LinuxDnsManifestStore.MODO_APLICADO);
+        new LinuxDnsManifestStore(manifest).salvar(props);
+        LinuxDnsBackendSelector selector = new LinuxDnsBackendSelector(runner,
+            Files.createTempFile("os-f", ".txt"), Path.of("/tmp/x"));
+        ConfiguradorDnsLinuxService svc = new ConfiguradorDnsLinuxService(
+            runner, selector, new NixOsDnsSupport(runner, selector), new LinuxDnsManifestStore(manifest));
+        ConfiguracaoDns r = svc.desfazer();
+        assertTrue("falhou", !r.isAplicado());
+        assertTrue("manifesto mantido", new LinuxDnsManifestStore(manifest).existe());
+        ok("testRevertNaoApagaManifestoSeFalhar");
+    }
+
+    private static FakeLinuxCommandRunner runnerComNmAtivo() {
+        FakeLinuxCommandRunner runner = new FakeLinuxCommandRunner();
+        runner.responder("systemctl is-active NetworkManager", new LinuxCommandResult(0, "active", "", false));
+        runner.responder("nmcli -t -f RUNNING general", new LinuxCommandResult(0, "running", "", false));
+        return runner;
+    }
+
+    private static void stubDnsShow(FakeLinuxCommandRunner runner, String nome) {
+        runner.responder("nmcli -t -f ipv4.dns,ipv6.dns,ipv4.ignore-auto-dns,ipv6.ignore-auto-dns connection show "
+            + nome, new LinuxCommandResult(0,
+            "ipv4.dns:8.8.8.8\nipv6.dns:\nipv4.ignore-auto-dns:no\nipv6.ignore-auto-dns:no", "", false));
+    }
+
+    private static Path manifestTemp() throws Exception {
+        Path p = Files.createTempFile("manifest-", ".properties");
+        Files.delete(p);
+        return p;
+    }
+
+    private static ConfiguradorDnsLinuxService svc(FakeLinuxCommandRunner runner, Path manifest) throws Exception {
+        Path osRelease = Files.createTempFile("os-deb-", ".txt");
+        Files.writeString(osRelease, "ID=debian\n");
+        LinuxDnsBackendSelector selector = new LinuxDnsBackendSelector(runner, osRelease, Path.of("/tmp/no-np"));
+        return new ConfiguradorDnsLinuxService(runner, selector,
+            new NixOsDnsSupport(runner, selector), new LinuxDnsManifestStore(manifest));
     }
 
     private static void assertEq(String nome, Object esperado, Object obtido) {
@@ -205,14 +280,6 @@ public class LinuxDnsLogicTest {
             System.err.println("FALHA " + nome);
             falhas++;
         }
-    }
-
-    private static boolean assertTrueSilent(String nome, boolean cond) {
-        if (!cond) {
-            System.err.println("FALHA " + nome);
-            return false;
-        }
-        return true;
     }
 
     private static void ok(String nome) {

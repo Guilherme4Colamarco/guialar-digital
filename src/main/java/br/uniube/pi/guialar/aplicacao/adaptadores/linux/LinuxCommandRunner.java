@@ -9,5 +9,10 @@ public interface LinuxCommandRunner {
 
     LinuxCommandResult executar(boolean privilegiado, String... comando) throws IOException, InterruptedException;
 
+    /**
+     * Uma única elevação pkexec executando o script em {@code bash -s} (stdin).
+     */
+    LinuxCommandResult executarScriptPrivilegiado(String script) throws IOException, InterruptedException;
+
     boolean comandoDisponivel(String comando);
 }

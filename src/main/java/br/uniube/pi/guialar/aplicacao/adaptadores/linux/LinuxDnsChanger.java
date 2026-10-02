@@ -43,8 +43,7 @@ public class LinuxDnsChanger implements DnsChanger {
             boolean encontrouFamilies = false;
 
             while ((linha = reader.readLine()) != null) {
-                if (linha.contains("1.1.1.3") || linha.contains("1.0.0.3") ||
-                    linha.contains("2606:4700:4700::1113") || linha.contains("2606:4700:4700::1003")) {
+                if (LinuxDnsFamiliesDetector.textoContemFamilies(linha)) {
                     encontrouFamilies = true;
                     break;
                 }
@@ -58,7 +57,7 @@ public class LinuxDnsChanger implements DnsChanger {
                 java.nio.file.Path resolvConf = java.nio.file.Path.of("/etc/resolv.conf");
                 if (java.nio.file.Files.exists(resolvConf)) {
                     String conteudo = java.nio.file.Files.readString(resolvConf);
-                    return conteudo.contains("1.1.1.3") || conteudo.contains("1.0.0.3");
+                    return LinuxDnsFamiliesDetector.textoContemFamilies(conteudo);
                 }
             } catch (Exception e2) {
                 // Ignora

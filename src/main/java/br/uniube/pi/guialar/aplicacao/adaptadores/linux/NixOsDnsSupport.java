@@ -29,6 +29,10 @@ public class NixOsDnsSupport {
      * @return true se há DNS global que competiria com NM por conexão.
      */
     public boolean temDnsGlobalConflitante() {
+        if (selector.networkManagerAtivo()) {
+            // DNS em resolv.conf costuma vir do NM/resolved — não tratar como global conflitante.
+            return temDnsGlobalResolved();
+        }
         if (temNameserversEstaticosResolvConf()) {
             return true;
         }
@@ -74,7 +78,8 @@ public class NixOsDnsSupport {
             if (Files.isSymbolicLink(resolvConf)) {
                 Path alvo = Files.readSymbolicLink(resolvConf);
                 String s = alvo.toString().toLowerCase(Locale.ROOT);
-                if (s.contains("systemd") || s.contains("stub") || s.contains("resolvconf")) {
+                if (s.contains("systemd") || s.contains("stub") || s.contains("resolvconf")
+                    || s.contains("networkmanager") || s.contains("nm-")) {
                     return false;
                 }
             }
