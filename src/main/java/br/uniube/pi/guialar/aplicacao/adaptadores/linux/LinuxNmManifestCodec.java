@@ -17,6 +17,9 @@ public final class LinuxNmManifestCodec {
             LinuxNmConexaoEstado c = conexoes.get(i);
             String p = "nm." + i + ".";
             props.setProperty(p + "name", c.nome());
+            if (c.uuid() != null && !c.uuid().isBlank()) {
+                props.setProperty(p + "uuid", c.uuid());
+            }
             props.setProperty(p + "ipv4.dns", nullToEmpty(c.ipv4Dns()));
             props.setProperty(p + "ipv6.dns", nullToEmpty(c.ipv6Dns()));
             props.setProperty(p + "ipv4.ignore-auto-dns", nullToEmpty(c.ipv4IgnoreAutoDns()));
@@ -30,6 +33,7 @@ public final class LinuxNmManifestCodec {
         for (int i = 0; i < count; i++) {
             String p = "nm." + i + ".";
             lista.add(new LinuxNmConexaoEstado(
+                props.getProperty(p + "uuid", ""),
                 props.getProperty(p + "name", ""),
                 props.getProperty(p + "ipv4.dns", ""),
                 props.getProperty(p + "ipv6.dns", ""),

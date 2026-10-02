@@ -6,6 +6,9 @@ import br.uniube.pi.guialar.aplicacao.adaptadores.linux.LinuxDnsBackend;
 import br.uniube.pi.guialar.aplicacao.adaptadores.linux.LinuxDnsBackendSelector;
 import br.uniube.pi.guialar.aplicacao.adaptadores.linux.LinuxDnsFamiliesDetector;
 import br.uniube.pi.guialar.aplicacao.adaptadores.linux.LinuxDnsManifestStore;
+import br.uniube.pi.guialar.aplicacao.adaptadores.linux.LinuxNmConexaoEstado;
+import br.uniube.pi.guialar.aplicacao.adaptadores.linux.LinuxNmManifestCodec;
+import br.uniube.pi.guialar.aplicacao.adaptadores.linux.LinuxNmManifestValidator;
 import br.uniube.pi.guialar.aplicacao.adaptadores.linux.LinuxNmcliTerseParser;
 import br.uniube.pi.guialar.aplicacao.adaptadores.linux.LinuxOsRelease;
 import br.uniube.pi.guialar.aplicacao.adaptadores.linux.LinuxPkexecMensagens;
@@ -45,6 +48,9 @@ public class LinuxDnsLogicTest {
         testNixOsNmComDnsGlobalVaiParaSnippet();
         testStatusAguardandoPersisteNoManifesto();
         testRevertNaoApagaManifestoSeFalhar();
+        testManifestoAdulteradoNaoExecutaPkexec();
+        testRevertNmUsaUuidComValoresEntreAspas();
+        testValidatorRejeitaInjecaoIgnoreAutoDns();
 
         System.out.println();
         if (falhas == 0) {
@@ -112,8 +118,8 @@ public class LinuxDnsLogicTest {
         svc.configurar(new InfoDistro(TipoDistro.DEBIAN, "Debian", "12", "NetworkManager"));
         String script = runner.getScriptsPrivilegiados().get(0);
         assertTrue("ipv6.dns", script.contains("ipv6.dns"));
-        assertTrue("ipv6 ignore", script.contains("ipv6.ignore-auto-dns yes"));
-        assertTrue("ipv4 ignore", script.contains("ipv4.ignore-auto-dns yes"));
+        assertTrue("ipv6 ignore", script.contains("ipv6.ignore-auto-dns 'yes'"));
+        assertTrue("ipv4 ignore", script.contains("ipv4.ignore-auto-dns 'yes'"));
         ok("testScriptContemIpv6EIgnoreAutoDns");
     }
 
@@ -168,8 +174,9 @@ public class LinuxDnsLogicTest {
         ConfiguradorDnsLinuxService svc = svc(runner, manifestTemp());
         svc.configurar(new InfoDistro(TipoDistro.DEBIAN, "Debian", "12", "NetworkManager"));
         String script = runner.getScriptsPrivilegiados().get(0);
-        assertTrue("wifi", script.contains("'Wi-Fi'"));
-        assertTrue("eth", script.contains("'Ethernet'"));
+        assertTrue("wifi uuid", script.contains(UUID_WIFI));
+        assertTrue("eth uuid", script.contains(UUID_ETH));
+        assertTrue("rollback trap", script.contains("guialar_nm_rollback"));
         ok("testMultiplasConexoesNoScript");
     }
 
@@ -248,10 +255,83 @@ public class LinuxDnsLogicTest {
         return runner;
     }
 
+    private static final String UUID_WIFI = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+    private static final String UUID_ETH = "bbbbbbbb-cccc-dddd-eeee-ffffffffffff";
+
     private static void stubDnsShow(FakeLinuxCommandRunner runner, String nome) {
+        String uuid = "Wi-Fi".equals(nome) ? UUID_WIFI : UUID_ETH;
+        stubUuid(runner, nome, uuid);
+        runner.responder("nmcli -t -f UUID,NAME connection show",
+            new LinuxCommandResult(0, UUID_WIFI + ":Wi-Fi\n" + UUID_ETH + ":Ethernet", "", false));
         runner.responder("nmcli -t -f ipv4.dns,ipv6.dns,ipv4.ignore-auto-dns,ipv6.ignore-auto-dns connection show "
             + nome, new LinuxCommandResult(0,
             "ipv4.dns:8.8.8.8\nipv6.dns:\nipv4.ignore-auto-dns:no\nipv6.ignore-auto-dns:no", "", false));
+    }
+
+    private static void stubUuid(FakeLinuxCommandRunner runner, String nome, String uuid) {
+        runner.responder("nmcli -t -g connection.uuid connection show " + nome,
+            new LinuxCommandResult(0, uuid, "", false));
+    }
+
+    private static void testManifestoAdulteradoNaoExecutaPkexec() throws Exception {
+        FakeLinuxCommandRunner runner = runnerComNmAtivo();
+        runner.responder("nmcli -t -f UUID,NAME connection show",
+            new LinuxCommandResult(0, UUID_WIFI + ":Wi-Fi", "", false));
+        Path manifest = manifestTemp();
+        Properties props = new Properties();
+        props.setProperty(LinuxDnsManifestStore.KEY_METODO, "NetworkManager");
+        props.setProperty(LinuxDnsManifestStore.KEY_MODO, LinuxDnsManifestStore.MODO_APLICADO);
+        props.setProperty(LinuxNmManifestCodec.KEY_NM_COUNT, "1");
+        props.setProperty("nm.0.uuid", UUID_WIFI);
+        props.setProperty("nm.0.name", "Wi-Fi");
+        props.setProperty("nm.0.ipv4.dns", "8.8.8.8");
+        props.setProperty("nm.0.ipv6.dns", "");
+        props.setProperty("nm.0.ipv4.ignore-auto-dns", "no; rm -rf /");
+        props.setProperty("nm.0.ipv6.ignore-auto-dns", "no");
+        new LinuxDnsManifestStore(manifest).salvar(props);
+        ConfiguradorDnsLinuxService svc = svc(runner, manifest);
+        ConfiguracaoDns r = svc.desfazer();
+        assertTrue("falhou validacao", !r.isAplicado());
+        assertTrue("sem pkexec", runner.getScriptsPrivilegiados().isEmpty());
+        assertTrue("manifesto mantido", new LinuxDnsManifestStore(manifest).existe());
+        ok("testManifestoAdulteradoNaoExecutaPkexec");
+    }
+
+    private static void testRevertNmUsaUuidComValoresEntreAspas() throws Exception {
+        FakeLinuxCommandRunner runner = runnerComNmAtivo();
+        runner.responder("nmcli -t -f UUID,NAME connection show",
+            new LinuxCommandResult(0, UUID_WIFI + ":Wi-Fi", "", false));
+        Path manifest = manifestTemp();
+        Properties props = new Properties();
+        props.setProperty(LinuxDnsManifestStore.KEY_METODO, "NetworkManager");
+        props.setProperty(LinuxDnsManifestStore.KEY_MODO, LinuxDnsManifestStore.MODO_APLICADO);
+        props.setProperty(LinuxNmManifestCodec.KEY_NM_COUNT, "1");
+        props.setProperty("nm.0.uuid", UUID_WIFI);
+        props.setProperty("nm.0.name", "Wi-Fi");
+        props.setProperty("nm.0.ipv4.dns", "8.8.8.8");
+        props.setProperty("nm.0.ipv6.dns", "");
+        props.setProperty("nm.0.ipv4.ignore-auto-dns", "no");
+        props.setProperty("nm.0.ipv6.ignore-auto-dns", "yes");
+        new LinuxDnsManifestStore(manifest).salvar(props);
+        ConfiguradorDnsLinuxService svc = svc(runner, manifest);
+        ConfiguracaoDns r = svc.desfazer();
+        assertTrue("revert ok", r.isAplicado());
+        String script = runner.getScriptsPrivilegiados().get(0);
+        assertTrue("uuid no script", script.contains(UUID_WIFI));
+        assertTrue("ignore entre aspas", script.contains("ipv4.ignore-auto-dns 'no'")
+            || script.contains("ipv4.ignore-auto-dns 'no'\n"));
+        ok("testRevertNmUsaUuidComValoresEntreAspas");
+    }
+
+    private static void testValidatorRejeitaInjecaoIgnoreAutoDns() {
+        FakeLinuxCommandRunner runner = runnerComNmAtivo();
+        runner.responder("nmcli -t -f UUID,NAME connection show",
+            new LinuxCommandResult(0, UUID_WIFI + ":Wi-Fi", "", false));
+        LinuxNmManifestValidator v = new LinuxNmManifestValidator(runner);
+        var r = v.validarParaRevert(List.of(new LinuxNmConexaoEstado(
+            UUID_WIFI, "Wi-Fi", "1.1.1.1", "", "yes; echo hacked", "no")));
+        assertTrue("invalido", !r.valido());
+        ok("testValidatorRejeitaInjecaoIgnoreAutoDns");
     }
 
     private static Path manifestTemp() throws Exception {

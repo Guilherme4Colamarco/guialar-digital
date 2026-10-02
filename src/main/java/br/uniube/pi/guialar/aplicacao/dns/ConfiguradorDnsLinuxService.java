@@ -7,6 +7,7 @@ import br.uniube.pi.guialar.aplicacao.adaptadores.linux.LinuxDnsBackendSelector;
 import br.uniube.pi.guialar.aplicacao.adaptadores.linux.LinuxDnsManifestStore;
 import br.uniube.pi.guialar.aplicacao.adaptadores.linux.LinuxNmConexaoEstado;
 import br.uniube.pi.guialar.aplicacao.adaptadores.linux.LinuxNmManifestCodec;
+import br.uniube.pi.guialar.aplicacao.adaptadores.linux.LinuxNmManifestValidator;
 import br.uniube.pi.guialar.aplicacao.adaptadores.linux.LinuxNmcliTerseParser;
 import br.uniube.pi.guialar.aplicacao.adaptadores.linux.LinuxPkexecMensagens;
 import br.uniube.pi.guialar.aplicacao.adaptadores.linux.LinuxShellEscape;
@@ -157,11 +158,17 @@ public class ConfiguradorDnsLinuxService {
             }
 
             List<LinuxNmConexaoEstado> backups = new ArrayList<>();
+            LinuxNmManifestValidator validator = new LinuxNmManifestValidator(runner);
             for (String nome : alvos) {
-                backups.add(lerEstadoConexao(nome));
+                LinuxNmConexaoEstado estado = lerEstadoConexao(nome);
+                LinuxNmManifestValidator.Resultado vr = validator.validarEstadoAoVivo(estado);
+                if (!vr.valido()) {
+                    return ConfiguracaoDns.erro("NetworkManager", vr.mensagem());
+                }
+                backups.add(vr.conexoes().get(0));
             }
 
-            String script = montarScriptNmAplicar(servidor, alvos);
+            String script = montarScriptNmAplicar(servidor, backups);
             LinuxCommandResult elevado = runner.executarScriptPrivilegiado(script);
             ConfiguracaoDns falha = interpretarPkexec("NetworkManager", elevado, false);
             if (falha != null) {
@@ -185,11 +192,15 @@ public class ConfiguradorDnsLinuxService {
     }
 
     private LinuxNmConexaoEstado lerEstadoConexao(String nome) throws IOException, InterruptedException {
+        LinuxCommandResult uuidResult = runner.executar(false, "nmcli", "-t", "-g", "connection.uuid",
+            "connection", "show", nome);
+        String uuid = uuidResult.stdout() != null ? uuidResult.stdout().trim() : "";
         LinuxCommandResult r = runner.executar(false, "nmcli", "-t", "-f",
             "ipv4.dns,ipv6.dns,ipv4.ignore-auto-dns,ipv6.ignore-auto-dns",
             "connection", "show", nome);
         Map<String, String> campos = LinuxNmcliTerseParser.parseCamposDns(r.stdout());
         return new LinuxNmConexaoEstado(
+            uuid,
             nome,
             campos.getOrDefault("ipv4.dns", ""),
             campos.getOrDefault("ipv6.dns", ""),
@@ -198,21 +209,45 @@ public class ConfiguradorDnsLinuxService {
         );
     }
 
-    private String montarScriptNmAplicar(ServidorDns servidor, List<String> conexoes) {
+    private String montarScriptNmAplicar(ServidorDns servidor, List<LinuxNmConexaoEstado> backups) {
         String v4 = servidor.getPrimario() + " " + servidor.getSecundario();
         String v6 = servidor.getPrimarioIpv6() + " " + servidor.getSecundarioIpv6();
         StringBuilder sb = new StringBuilder();
         sb.append("set -e\n");
-        for (String nome : conexoes) {
-            String q = LinuxShellEscape.shSingleQuote(nome);
+        sb.append("guialar_nm_rollback() {\n");
+        for (LinuxNmConexaoEstado b : backups) {
+            sb.append(montarBlocoNmRestaurar(b));
+        }
+        sb.append("}\n");
+        sb.append("trap guialar_nm_rollback ERR\n");
+        for (LinuxNmConexaoEstado b : backups) {
+            String q = LinuxShellEscape.shSingleQuote(b.uuid());
             sb.append("nmcli connection modify ").append(q).append(" ipv4.dns ")
                 .append(LinuxShellEscape.shSingleQuote(v4)).append("\n");
-            sb.append("nmcli connection modify ").append(q).append(" ipv4.ignore-auto-dns yes\n");
+            sb.append("nmcli connection modify ").append(q).append(" ipv4.ignore-auto-dns ")
+                .append(LinuxShellEscape.shSingleQuote("yes")).append("\n");
             sb.append("nmcli connection modify ").append(q).append(" ipv6.dns ")
                 .append(LinuxShellEscape.shSingleQuote(v6)).append("\n");
-            sb.append("nmcli connection modify ").append(q).append(" ipv6.ignore-auto-dns yes\n");
+            sb.append("nmcli connection modify ").append(q).append(" ipv6.ignore-auto-dns ")
+                .append(LinuxShellEscape.shSingleQuote("yes")).append("\n");
             sb.append("nmcli connection up ").append(q).append("\n");
         }
+        sb.append("trap - ERR\n");
+        return sb.toString();
+    }
+
+    private String montarBlocoNmRestaurar(LinuxNmConexaoEstado c) {
+        String q = LinuxShellEscape.shSingleQuote(c.uuid());
+        StringBuilder sb = new StringBuilder();
+        sb.append("nmcli connection modify ").append(q).append(" ipv4.dns ")
+            .append(LinuxShellEscape.shSingleQuote(c.ipv4Dns())).append("\n");
+        sb.append("nmcli connection modify ").append(q).append(" ipv4.ignore-auto-dns ")
+            .append(LinuxShellEscape.shSingleQuote(c.ipv4IgnoreAutoDns())).append("\n");
+        sb.append("nmcli connection modify ").append(q).append(" ipv6.dns ")
+            .append(LinuxShellEscape.shSingleQuote(c.ipv6Dns())).append("\n");
+        sb.append("nmcli connection modify ").append(q).append(" ipv6.ignore-auto-dns ")
+            .append(LinuxShellEscape.shSingleQuote(c.ipv6IgnoreAutoDns())).append("\n");
+        sb.append("nmcli connection up ").append(q).append("\n");
         return sb.toString();
     }
 
@@ -337,22 +372,15 @@ public class ConfiguradorDnsLinuxService {
 
     private ConfiguracaoDns reverterNetworkManager(Properties props) throws Exception {
         List<LinuxNmConexaoEstado> conexoes = LinuxNmManifestCodec.lerConexoes(props);
-        if (conexoes.isEmpty()) {
-            throw new Exception("Nenhuma conexão registrada no manifesto");
+        LinuxNmManifestValidator validator = new LinuxNmManifestValidator(runner);
+        LinuxNmManifestValidator.Resultado validado = validator.validarParaRevert(conexoes);
+        if (!validado.valido()) {
+            return ConfiguracaoDns.erro("NetworkManager", validado.mensagem());
         }
         StringBuilder sb = new StringBuilder();
         sb.append("set -e\n");
-        for (LinuxNmConexaoEstado c : conexoes) {
-            String q = LinuxShellEscape.shSingleQuote(c.nome());
-            sb.append("nmcli connection modify ").append(q).append(" ipv4.dns ")
-                .append(LinuxShellEscape.shSingleQuote(c.ipv4Dns())).append("\n");
-            sb.append("nmcli connection modify ").append(q).append(" ipv4.ignore-auto-dns ")
-                .append(c.ipv4IgnoreAutoDns()).append("\n");
-            sb.append("nmcli connection modify ").append(q).append(" ipv6.dns ")
-                .append(LinuxShellEscape.shSingleQuote(c.ipv6Dns())).append("\n");
-            sb.append("nmcli connection modify ").append(q).append(" ipv6.ignore-auto-dns ")
-                .append(c.ipv6IgnoreAutoDns()).append("\n");
-            sb.append("nmcli connection up ").append(q).append("\n");
+        for (LinuxNmConexaoEstado c : validado.conexoes()) {
+            sb.append(montarBlocoNmRestaurar(c));
         }
         LinuxCommandResult elevado = runner.executarScriptPrivilegiado(sb.toString());
         ConfiguracaoDns falha = interpretarPkexec("NetworkManager", elevado, true);
