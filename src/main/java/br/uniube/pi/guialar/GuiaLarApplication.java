@@ -93,7 +93,7 @@ public class GuiaLarApplication {
 
         if (sistema == TipoSistema.DESCONHECIDO) {
             System.err.println("❌ Sistema operacional não suportado.");
-            System.err.println("   O GuiaLar Digital suporta Linux (Debian/Fedora/Arch) e Windows.");
+            System.err.println("   O GuiaLar Digital suporta Linux (Debian/Fedora/Arch/NixOS) e Windows.");
             System.exit(1);
         }
 

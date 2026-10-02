@@ -9,7 +9,8 @@ public enum StatusDns {
     NAO_APLICADO("não aplicado"),
     PARCIAL("parcial"),
     DESCONHECIDO("desconhecido"),
-    LEITURA_BLOQUEADA("leitura bloqueada");
+    LEITURA_BLOQUEADA("leitura bloqueada"),
+    AGUARDANDO_APLICACAO("aguardando você aplicar");
 
     private final String rotuloPt;
 

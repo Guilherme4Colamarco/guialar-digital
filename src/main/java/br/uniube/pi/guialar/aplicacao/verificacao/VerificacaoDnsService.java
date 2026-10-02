@@ -25,6 +25,8 @@ public class VerificacaoDnsService {
 
     private static final String IP_BLOQUEADO = "0.0.0.0";
     private static final String IP_BLOQUEADO_IPv6 = "::";
+    private static final String DOMINIO_MALWARE = ServidorDns.URL_TESTE_MALWARE;
+    private static final String DOMINIO_NORMAL = "example.com";
 
     /**
      * Executa verificação completa do DNS.
@@ -32,6 +34,29 @@ public class VerificacaoDnsService {
      *
      * @return Lista de resultados da verificação
      */
+    /**
+     * Proteção confirmada: domínio de malware bloqueado e example.com permitido (IPv4 via stub).
+     */
+    public static boolean protecaoConfirmada(List<ResultadoVerificacao> resultados) {
+        if (resultados == null || resultados.isEmpty()) {
+            return false;
+        }
+        boolean malwareOk = false;
+        boolean exampleOk = false;
+        for (ResultadoVerificacao r : resultados) {
+            if (!r.isSucesso()) {
+                continue;
+            }
+            if (DOMINIO_MALWARE.equals(r.getUrl()) && "IPv4".equals(r.getMetodo()) && r.isBloqueado()) {
+                malwareOk = true;
+            }
+            if (DOMINIO_NORMAL.equals(r.getUrl()) && "IPv4".equals(r.getMetodo()) && !r.isBloqueado()) {
+                exampleOk = true;
+            }
+        }
+        return malwareOk && exampleOk;
+    }
+
     public List<ResultadoVerificacao> verificar() {
         List<ResultadoVerificacao> resultados = new ArrayList<>();
 

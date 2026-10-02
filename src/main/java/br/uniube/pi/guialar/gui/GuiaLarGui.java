@@ -5,10 +5,14 @@ import br.uniube.pi.guialar.aplicacao.deteccao.DetectorDistroService;
 import br.uniube.pi.guialar.aplicacao.deteccao.DetectorNavegadorService;
 import br.uniube.pi.guialar.aplicacao.deteccao.DetectorSistemaService;
 import br.uniube.pi.guialar.aplicacao.diagnostico.DiagnosticoAmbienteService;
+import br.uniube.pi.guialar.aplicacao.adaptadores.linux.LinuxDnsManifestStore;
+import br.uniube.pi.guialar.aplicacao.dns.ConfiguradorDnsLinuxService;
 import br.uniube.pi.guialar.aplicacao.dns.ConfiguradorDnsService;
 import br.uniube.pi.guialar.aplicacao.dns.ConfiguradorDnsWindowsService;
 import br.uniube.pi.guialar.aplicacao.extensao.InstaladorExtensaoService;
+import br.uniube.pi.guialar.aplicacao.verificacao.LinuxProtecaoStatusService;
 import br.uniube.pi.guialar.aplicacao.verificacao.VerificacaoDnsService;
+import br.uniube.pi.guialar.dominio.sistema.TipoSistema;
 import br.uniube.pi.guialar.dominio.diagnostico.DiagnosticoAmbiente;
 import br.uniube.pi.guialar.dominio.diagnostico.StatusDns;
 import br.uniube.pi.guialar.dominio.distro.InfoDistro;
@@ -16,7 +20,6 @@ import br.uniube.pi.guialar.dominio.dns.ConfiguracaoDns;
 import br.uniube.pi.guialar.dominio.dns.ServidorDns;
 import br.uniube.pi.guialar.dominio.navegador.Navegador;
 import br.uniube.pi.guialar.dominio.navegador.TipoNavegador;
-import br.uniube.pi.guialar.dominio.sistema.TipoSistema;
 import br.uniube.pi.guialar.dominio.verificacao.ResultadoVerificacao;
 
 import javax.swing.BorderFactory;
@@ -40,6 +43,8 @@ import java.awt.Component;
 import java.awt.Dimension;
 import java.awt.Font;
 import java.awt.GridLayout;
+import java.awt.Toolkit;
+import java.awt.datatransfer.StringSelection;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -64,6 +69,7 @@ public class GuiaLarGui {
     private final DetectorDistroService detectorDistro;
     private final DetectorNavegadorService detectorNavegador;
     private final ConfiguradorDnsService configuradorDns;
+    private final ConfiguradorDnsLinuxService configuradorDnsLinux;
     private final ConfiguradorDnsWindowsService configuradorDnsWindows;
     private final InstaladorExtensaoService instaladorExtensao;
     private final VerificacaoDnsService verificacaoDns;
@@ -76,7 +82,9 @@ public class GuiaLarGui {
     private JButton botaoDiagnostico;
     private JButton botaoGuias;
     private JButton botaoDesfazer;
+    private JButton botaoCopiarConfig;
     private JButton botaoSair;
+    private String textoCopiarNixOs;
     private JLabel statusAmigavel;
     private JLabel detalheAmigavel;
     private JPanel detalhesTecnicos;
@@ -90,7 +98,8 @@ public class GuiaLarGui {
         this.detectorSistema = new DetectorSistemaService();
         this.detectorDistro = new DetectorDistroService();
         this.detectorNavegador = new DetectorNavegadorService();
-        this.configuradorDns = new ConfiguradorDnsService();
+        this.configuradorDnsLinux = new ConfiguradorDnsLinuxService();
+        this.configuradorDns = new ConfiguradorDnsService(configuradorDnsLinux);
         this.configuradorDnsWindows = new ConfiguradorDnsWindowsService();
         this.instaladorExtensao = new InstaladorExtensaoService();
         this.verificacaoDns = new VerificacaoDnsService();
@@ -122,6 +131,7 @@ public class GuiaLarGui {
             distro = detectorDistro.detectar();
             navegadores = deduplicar(detectorNavegador.detectar());
             diagnostico = diagnosticoService.diagnosticar();
+            textoCopiarNixOs = new LinuxProtecaoStatusService().carregarSnippetNixosPersistido();
         }
 
         frame = new JFrame("GuiaLar Digital - DNS seguro e adblockers");
@@ -139,6 +149,7 @@ public class GuiaLarGui {
         frame.setLocationRelativeTo(null);
         frame.setVisible(true);
 
+        atualizarBotoesManifesto();
         log("GuiaLar Digital iniciado (" + tipoSistema.getNome() + ").");
         if (tipoSistema.isWindows()) {
             log("Modo Windows: diagnóstico não exige admin. DNS só sob UAC.");
@@ -262,6 +273,7 @@ public class GuiaLarGui {
             case LEITURA_BLOQUEADA -> "A rede bloqueou a consulta. Nenhuma alteração foi feita.";
             case PARCIAL -> "Parte da proteção foi encontrada; confirme os detalhes antes de continuar.";
             case NAO_APLICADO -> "A proteção da rede ainda não está ativa pelo GuiaLar.";
+            case AGUARDANDO_APLICACAO -> "Falta você colar a configuração no NixOS e rodar o rebuild.";
             case DESCONHECIDO -> "A proteção ainda não pôde ser verificada.";
         };
     }
@@ -276,12 +288,16 @@ public class GuiaLarGui {
         if (statusAmigavel == null || diagnostico == null) return;
         StatusDns estado = diagnostico.getStatusDns();
         if (estado == StatusDns.APLICADO) {
-            statusAmigavel.setText("Proteção da rede ativa");
-            detalheAmigavel.setText("O GuiaLar encontrou a proteção configurada neste computador.");
+            statusAmigavel.setText("Protegido");
+            detalheAmigavel.setText("A verificação confirmou que sites perigosos estão bloqueados nesta rede.");
             statusAmigavel.setForeground(new Color(0x1B, 0x7A, 0x2E));
         } else if (estado == StatusDns.LEITURA_BLOQUEADA) {
             statusAmigavel.setText("A proteção ainda não foi confirmada");
             detalheAmigavel.setText("A rede não permitiu consultar essa configuração. Isso é comum em computadores da faculdade ou do trabalho. Nada foi alterado.");
+            statusAmigavel.setForeground(new Color(0x8A, 0x5A, 0x00));
+        } else if (estado == StatusDns.AGUARDANDO_APLICACAO) {
+            statusAmigavel.setText("Aguardando você aplicar");
+            detalheAmigavel.setText("Copie o trecho para o configuration.nix, rode sudo nixos-rebuild switch e clique em Verificar de novo.");
             statusAmigavel.setForeground(new Color(0x8A, 0x5A, 0x00));
         } else {
             statusAmigavel.setText("A proteção da rede não está ativa pelo GuiaLar");
@@ -421,7 +437,7 @@ public class GuiaLarGui {
 
         String avisoTxt = tipoSistema.isWindows()
             ? "Diagnóstico não precisa de admin. Aplicar DNS pode pedir UAC (ou falhar em laboratório)."
-            : "A configuração de DNS exige privilégios de administrador (sudo/root).";
+            : "Só a troca de DNS pede senha de administrador (pkexec). O resto roda como usuário normal.";
         JLabel aviso = new JLabel(tipoSistema.isWindows()
             ? "Você decide antes de qualquer mudança. Em PCs gerenciados, peça ajuda ao suporte."
             : avisoTxt);
@@ -440,10 +456,14 @@ public class GuiaLarGui {
         botaoGuias = new JButton("Abrir guias");
         botaoGuias.addActionListener(e -> onAbrirGuias());
 
-        botaoDesfazer = new JButton("Desfazer DNS");
-        botaoDesfazer.setVisible(tipoSistema.isWindows()
-            && new br.uniube.pi.guialar.aplicacao.adaptadores.windows.WindowsDnsManifestStore().existe());
+        botaoDesfazer = new JButton("Desfazer proteção");
+        botaoDesfazer.setVisible(manifestoDesfazerVisivel());
         botaoDesfazer.addActionListener(e -> onDesfazer());
+
+        botaoCopiarConfig = new JButton("Copiar configuração");
+        botaoCopiarConfig.setVisible(textoCopiarNixOs != null && !textoCopiarNixOs.isBlank());
+        botaoCopiarConfig.setFont(botaoCopiarConfig.getFont().deriveFont(Font.BOLD, 14f));
+        botaoCopiarConfig.addActionListener(e -> copiarConfiguracaoNixOs());
 
         botaoExecutar = new JButton(tipoSistema.isWindows()
             ? "Tentar ativar proteção" : "Ativar proteção");
@@ -460,6 +480,8 @@ public class GuiaLarGui {
         botoes.add(botaoDiagnostico);
         botaoGuias.setText("Proteger navegadores");
         botoes.add(botaoGuias);
+        botoes.add(botaoCopiarConfig);
+        botoes.add(botaoDesfazer);
         botoes.add(botaoExecutar);
 
         rodape.add(aviso, BorderLayout.WEST);
@@ -502,6 +524,9 @@ public class GuiaLarGui {
         new SwingWorker<DiagnosticoAmbiente, Void>() {
             @Override
             protected DiagnosticoAmbiente doInBackground() {
+                if (tipoSistema != null && !tipoSistema.isWindows()) {
+                    return diagnosticoService.diagnosticarLinuxComVerificacao(tipoSistema);
+                }
                 return diagnosticoService.diagnosticar();
             }
 
@@ -510,9 +535,12 @@ public class GuiaLarGui {
                 try {
                     diagnostico = get();
                     navegadores = deduplicar(diagnostico.getNavegadores());
+                    if (tipoSistema != null && !tipoSistema.isWindows()) {
+                        textoCopiarNixOs = new LinuxProtecaoStatusService().carregarSnippetNixosPersistido();
+                    }
                     atualizarResumoAmigavel();
-                    if (tipoSistema.isWindows()) botaoDesfazer.setVisible(new br.uniube.pi.guialar.aplicacao.adaptadores.windows.WindowsDnsManifestStore().existe());
-                    log("\n--- Diagnóstico atualizado ---\n" + diagnostico.formatarRelatorio());
+                    atualizarBotoesManifesto();
+                    log("\n--- Verificação atualizada ---\n" + diagnostico.formatarRelatorio());
                     if (diagnostico.getStatusDns() != StatusDns.APLICADO) {
                         log("Filtro de sistema: NÃO afirmado como ativo (status: "
                             + diagnostico.getStatusDns().getRotuloPt() + ").");
@@ -545,10 +573,13 @@ public class GuiaLarGui {
     }
 
     private void onDesfazer() {
+        String extra = tipoSistema.isWindows()
+            ? "Pode solicitar UAC."
+            : "Pode solicitar pkexec (senha de administrador).";
         int opcao = JOptionPane.showConfirmDialog(frame,
             "Desfazer alterações de DNS feitas pelo GuiaLar?\n"
-                + "Pode solicitar UAC. Sem manifesto, nada será alterado.",
-            "Desfazer DNS", JOptionPane.YES_NO_OPTION);
+                + extra + " Sem manifesto, nada será alterado.",
+            "Desfazer proteção", JOptionPane.YES_NO_OPTION);
         if (opcao != JOptionPane.YES_OPTION) {
             return;
         }
@@ -556,7 +587,10 @@ public class GuiaLarGui {
         new SwingWorker<ConfiguracaoDns, Void>() {
             @Override
             protected ConfiguracaoDns doInBackground() {
-                return configuradorDnsWindows.desfazer();
+                if (tipoSistema.isWindows()) {
+                    return configuradorDnsWindows.desfazer();
+                }
+                return configuradorDnsLinux.desfazer();
             }
 
             @Override
@@ -564,6 +598,10 @@ public class GuiaLarGui {
                 try {
                     ConfiguracaoDns r = get();
                     log(r.isAplicado() ? "✓ " + r.getMensagem() : "○ " + r.getMensagem());
+                    if (!tipoSistema.isWindows() && r.getTextoParaCopiar() != null) {
+                        textoCopiarNixOs = r.getTextoParaCopiar();
+                    }
+                    atualizarBotoesManifesto();
                 } catch (Exception ex) {
                     log("Erro ao desfazer (sistema pode estar inalterado): " + ex.getMessage());
                 } finally {
@@ -641,7 +679,7 @@ public class GuiaLarGui {
     private void onExecutarLinux() {
         if (distro == null || !distro.isSuportada()) {
             JOptionPane.showMessageDialog(frame,
-                "Distribuição não suportada.\nO GuiaLar Digital suporta Debian, Fedora e Arch Linux.",
+                "Distribuição não suportada.\nO GuiaLar Digital suporta Debian, Ubuntu, Fedora, Arch Linux e NixOS.",
                 "Não suportado", JOptionPane.ERROR_MESSAGE);
             return;
         }
@@ -650,10 +688,8 @@ public class GuiaLarGui {
         StringBuilder msg = new StringBuilder();
         msg.append("As seguintes ações modificam o seu sistema:\n\n");
         msg.append(montarTextoPlano()).append("\n\n");
-        if (!root) {
-            msg.append("Aviso: o programa NÃO está em modo administrador. A troca de DNS\n");
-            msg.append("provavelmente falhará. Reabra com: sudo java -jar guialar-digital.jar --gui\n\n");
-        }
+        msg.append("A troca de DNS pedirá autorização do administrador (pkexec).\n");
+        msg.append("O manifesto para Desfazer ficará em ~/.guialar/\n\n");
         msg.append("Deseja autorizar e continuar?");
 
         int opcao = JOptionPane.showConfirmDialog(frame, msg.toString(),
@@ -673,27 +709,34 @@ public class GuiaLarGui {
         botaoExecutar.setText("Executando...");
         log("\n✓ Autorização concedida. Executando ações...\n");
 
-        new SwingWorker<Void, Void>() {
+        new SwingWorker<ConfiguracaoDns, Void>() {
             @Override
-            protected Void doInBackground() {
+            protected ConfiguracaoDns doInBackground() {
                 java.io.PrintStream original = System.out;
                 java.io.PrintStream originalErr = System.err;
                 java.io.PrintStream ponte = new java.io.PrintStream(
                     new AreaLogOutputStream(), true, java.nio.charset.StandardCharsets.UTF_8);
                 System.setOut(ponte);
                 System.setErr(ponte);
+                ConfiguracaoDns resultado = null;
                 try {
-                    System.out.println("[ETAPA 1/3] Configurando DNS seguro...");
-                    ConfiguracaoDns resultado = configuradorDns.configurar(distro);
-                    if (resultado.isAplicado()) {
+                    System.out.println("[ETAPA 1/3] Configurando DNS seguro (pkexec só nesta etapa)...");
+                    resultado = configuradorDns.configurar(distro);
+                    if (resultado.isAguardandoUsuario()) {
+                        System.out.println("  AGUARDANDO: " + resultado.getMensagem());
+                    } else if (resultado.isAplicado()) {
                         System.out.println("  OK: " + resultado.getMensagem());
                     } else {
                         System.out.println("  FALHOU: " + resultado.getMensagem());
                     }
 
-                    System.out.println("\n[ETAPA 2/3] Verificação DNS (smoke test)...");
-                    List<ResultadoVerificacao> resultados = verificacaoDns.verificar();
-                    verificacaoDns.exibirResumo(resultados);
+                    if (!resultado.isAguardandoUsuario() && resultado.isAplicado()) {
+                        System.out.println("\n[ETAPA 2/3] Verificação DNS já executada após aplicar.");
+                    } else if (resultado.isAguardandoUsuario()) {
+                        System.out.println("\n[ETAPA 2/3] Aguardando você aplicar no NixOS — verificação depois.");
+                    } else {
+                        System.out.println("\n[ETAPA 2/3] DNS não aplicado — verificação omitida.");
+                    }
 
                     System.out.println("[ETAPA 3/3] Configurando navegadores...");
                     if (navegadores.isEmpty()) {
@@ -714,16 +757,69 @@ public class GuiaLarGui {
                     System.setOut(original);
                     System.setErr(originalErr);
                 }
-                return null;
+                return resultado;
             }
 
             @Override
             protected void done() {
-                    botaoExecutar.setText("Ativar proteção");
+                try {
+                    ConfiguracaoDns resultado = get();
+                    if (resultado != null) {
+                        if (resultado.isAguardandoUsuario()) {
+                            textoCopiarNixOs = resultado.getTextoParaCopiar();
+                            diagnostico = diagnosticoService.diagnosticar();
+                            atualizarResumoAmigavel();
+                            JOptionPane.showMessageDialog(frame,
+                                "Copie a configuração com o botão \"Copiar configuração\",\n"
+                                    + "aplique no NixOS e depois clique em \"Verificar de novo\".",
+                                "Aguardando você aplicar", JOptionPane.INFORMATION_MESSAGE);
+                        } else if (!resultado.isAplicado()) {
+                            JOptionPane.showMessageDialog(frame, resultado.getMensagem(),
+                                "Não foi possível aplicar", JOptionPane.WARNING_MESSAGE);
+                        } else {
+                            diagnostico = diagnosticoService.diagnosticarLinuxComVerificacao(tipoSistema);
+                            atualizarResumoAmigavel();
+                        }
+                    }
+                } catch (Exception ignored) {
+                }
+                atualizarBotoesManifesto();
+                botaoExecutar.setText("Ativar proteção");
                 botaoExecutar.setEnabled(true);
                 log("\nProcesso concluído.");
             }
         }.execute();
+    }
+
+    private boolean manifestoDesfazerVisivel() {
+        if (tipoSistema == null) {
+            return false;
+        }
+        if (tipoSistema.isWindows()) {
+            return new br.uniube.pi.guialar.aplicacao.adaptadores.windows.WindowsDnsManifestStore().existe();
+        }
+        return new LinuxDnsManifestStore().existe();
+    }
+
+    private void atualizarBotoesManifesto() {
+        if (botaoDesfazer != null) {
+            botaoDesfazer.setVisible(manifestoDesfazerVisivel());
+        }
+        if (botaoCopiarConfig != null) {
+            botaoCopiarConfig.setVisible(textoCopiarNixOs != null && !textoCopiarNixOs.isBlank());
+        }
+    }
+
+    private void copiarConfiguracaoNixOs() {
+        if (textoCopiarNixOs == null || textoCopiarNixOs.isBlank()) {
+            return;
+        }
+        Toolkit.getDefaultToolkit().getSystemClipboard()
+            .setContents(new StringSelection(textoCopiarNixOs), null);
+        log("Configuração copiada para a área de transferência.");
+        JOptionPane.showMessageDialog(frame,
+            "Configuração copiada. Cole no configuration.nix e rode:\nsudo nixos-rebuild switch",
+            "Copiar configuração", JOptionPane.INFORMATION_MESSAGE);
     }
 
     private boolean isRoot() {
