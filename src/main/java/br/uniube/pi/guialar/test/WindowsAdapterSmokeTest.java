@@ -236,10 +236,31 @@ public class WindowsAdapterSmokeTest {
         var manifesto = WindowsDnsManifestStore.ManifestoDns.criar(WindowsDnsChanger.METODO,
             "1.1.1.3", java.util.Map.of("Wi-Fi", a));
         String desfazer = WindowsDnsChanger.scriptReverter(manifesto);
-        assertTrue("restaura IPv6", desfazer.contains("-AddressFamily IPv6")
-            && desfazer.contains("2001:4860:4860::8888"));
-        assertTrue("restaura IPv4 estático sem reset", desfazer.contains("8.8.8.8")
-            && !desfazer.contains("-ResetServerAddresses"));
+        assertTrue("aplicar não usa -AddressFamily (não existe no Set-)",
+            !aplicar.contains("-AddressFamily"));
+        assertTrue("aplicar envia IPv4 e IPv6 juntos", aplicar.contains(
+            "@('1.1.1.3','1.0.0.3','2606:4700:4700::1113','2606:4700:4700::1003')"));
+        assertTrue("desfazer não usa -AddressFamily", !desfazer.contains("-AddressFamily"));
+        assertTrue("desfazer limpa antes (remove IPv6 da Cloudflare)",
+            desfazer.contains("-ResetServerAddresses"));
+        assertTrue("restaura IPv4 estático e IPv6 juntos",
+            desfazer.contains("@('8.8.8.8','2001:4860:4860::8888')"));
+
+        var semV6 = new WindowsDnsManifestStore.EstadoAdaptador("Ethernet", 5,
+            List.of("192.168.0.1"), List.of(), false);
+        String desfazerSemV6 = WindowsDnsChanger.scriptReverter(WindowsDnsManifestStore.ManifestoDns.criar(
+            WindowsDnsChanger.METODO, "1.1.1.3", java.util.Map.of("Ethernet", semV6)));
+        assertTrue("sem IPv6 anterior: reset + IPv4 estático",
+            desfazerSemV6.contains("-ResetServerAddresses")
+                && desfazerSemV6.contains("@('192.168.0.1')")
+                && !desfazerSemV6.contains("2606:4700"));
+
+        var dhcp = new WindowsDnsManifestStore.EstadoAdaptador("Wi-Fi", 12,
+            List.of("192.168.0.1"), List.of(), true);
+        String desfazerDhcp = WindowsDnsChanger.scriptReverter(WindowsDnsManifestStore.ManifestoDns.criar(
+            WindowsDnsChanger.METODO, "1.1.1.3", java.util.Map.of("Wi-Fi", dhcp)));
+        assertTrue("DHCP: só reset", desfazerDhcp.contains("-ResetServerAddresses")
+            && !desfazerDhcp.contains("-ServerAddresses @("));
         ok("testScriptsPreservamPoliticaDhcpEIpv6");
     }
 

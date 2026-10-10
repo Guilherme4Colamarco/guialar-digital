@@ -12,7 +12,7 @@
 
 ✅ **Build System:** Apache Ant (build.xml)
 - Compilação: `ant jar`
-- Execução: `sudo java -jar build/jar/guialar-digital.jar`
+- Execução: `java -jar build/jar/guialar-digital.jar` (DNS no Linux pede pkexec; não use `sudo java`)
 - Clean/Rebuild: `ant clean`, `ant rebuild`
 
 ✅ **Arquitetura Modular:**
@@ -152,8 +152,8 @@ cli/
 # 1. Compilar
 ant jar
 
-# 2. Executar (requer sudo)
-sudo java -jar build/jar/guialar-digital.jar
+# 2. Executar (GUI como usuário; pkexec só ao aplicar/desfazer DNS)
+java -jar build/jar/guialar-digital.jar
 
 # 3. Verificar DNS
 resolvectl status

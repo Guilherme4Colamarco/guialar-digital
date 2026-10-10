@@ -6,6 +6,7 @@ import br.uniube.pi.guialar.aplicacao.adaptadores.linux.LinuxDnsBackend;
 import br.uniube.pi.guialar.aplicacao.adaptadores.linux.LinuxDnsBackendSelector;
 import br.uniube.pi.guialar.aplicacao.adaptadores.linux.LinuxDnsFamiliesDetector;
 import br.uniube.pi.guialar.aplicacao.adaptadores.linux.LinuxDnsManifestStore;
+import br.uniube.pi.guialar.aplicacao.adaptadores.linux.LinuxNetplanSupport;
 import br.uniube.pi.guialar.aplicacao.adaptadores.linux.LinuxNmConexaoEstado;
 import br.uniube.pi.guialar.aplicacao.adaptadores.linux.LinuxNmManifestCodec;
 import br.uniube.pi.guialar.aplicacao.adaptadores.linux.LinuxNmManifestValidator;
@@ -21,6 +22,7 @@ import br.uniube.pi.guialar.dominio.diagnostico.StatusDns;
 import br.uniube.pi.guialar.dominio.distro.InfoDistro;
 import br.uniube.pi.guialar.dominio.distro.TipoDistro;
 import br.uniube.pi.guialar.dominio.dns.ConfiguracaoDns;
+import br.uniube.pi.guialar.dominio.dns.ServidorDns;
 import br.uniube.pi.guialar.dominio.verificacao.ResultadoVerificacao;
 
 import java.nio.file.Files;
@@ -48,6 +50,9 @@ public class LinuxDnsLogicTest {
         testNixOsNmComDnsGlobalVaiParaSnippet();
         testStatusAguardandoPersisteNoManifesto();
         testRevertNaoApagaManifestoSeFalhar();
+        testExtrairInterfacesNetplan();
+        testGerarYamlNetplan();
+        testSepararComDnsProprioNetplan();
         testManifestoAdulteradoNaoExecutaPkexec();
         testRevertNmUsaUuidComValoresEntreAspas();
         testValidatorRejeitaInjecaoIgnoreAutoDns();
@@ -332,6 +337,58 @@ public class LinuxDnsLogicTest {
             UUID_WIFI, "Wi-Fi", "1.1.1.1", "", "yes; echo hacked", "no")));
         assertTrue("invalido", !r.valido());
         ok("testValidatorRejeitaInjecaoIgnoreAutoDns");
+    }
+
+    private static void testExtrairInterfacesNetplan() {
+        String yaml = """
+            network:
+              version: 2
+              ethernets:
+                enp0s3:
+                  dhcp4: true
+                "eth1":
+                  nameservers:
+                    addresses: [8.8.8.8]
+              wifis:
+                wlan0:
+                  dhcp6: yes
+            """;
+        var r = LinuxNetplanSupport.extrairInterfacesNetplan(yaml);
+        assertTrue("ethernets", r.containsKey("ethernets"));
+        assertTrue("enp0s3 dhcp", r.get("ethernets").get("enp0s3").dhcp4());
+        assertTrue("eth1 tem nameservers", r.get("ethernets").get("eth1").temNameservers());
+        ok("testExtrairInterfacesNetplan");
+    }
+
+    private static void testGerarYamlNetplan() {
+        var secoes = LinuxNetplanSupport.extrairInterfacesNetplan("""
+            network:
+              version: 2
+              ethernets:
+                enp0s3:
+                  dhcp4: true
+            """);
+        String yaml = LinuxNetplanSupport.gerarYamlGuialar(secoes, ServidorDns.getPadrao());
+        assertTrue("contem 99-guialar", yaml.contains("1.1.1.3"));
+        assertTrue("dhcp4 override", yaml.contains("dhcp4-overrides"));
+        ok("testGerarYamlNetplan");
+    }
+
+    private static void testSepararComDnsProprioNetplan() {
+        var secoes = LinuxNetplanSupport.extrairInterfacesNetplan("""
+            network:
+              version: 2
+              ethernets:
+                eth0:
+                  dhcp4: true
+                eth1:
+                  nameservers:
+                    addresses: [1.1.1.1]
+            """);
+        var removidas = LinuxNetplanSupport.separarComDnsProprio(secoes);
+        assertEq("removida eth1", List.of("eth1"), removidas);
+        assertTrue("so eth0", secoes.get("ethernets").containsKey("eth0"));
+        ok("testSepararComDnsProprioNetplan");
     }
 
     private static Path manifestTemp() throws Exception {

@@ -42,8 +42,8 @@ sudo pacman -S bind-tools    # Arch
 ant clean
 ant jar
 
-# Executar (modo interativo - requer sudo)
-sudo java -jar build/jar/guialar-digital.jar
+# Executar (modo interativo — sem sudo java; DNS Linux usa pkexec na hora de aplicar)
+java -jar build/jar/guialar-digital.jar
 ```
 
 ### 2. Fluxo de Teste Esperado

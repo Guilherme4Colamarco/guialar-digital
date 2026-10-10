@@ -7,6 +7,7 @@ import br.uniube.pi.guialar.aplicacao.adaptadores.linux.LinuxDnsBackendSelector;
 import br.uniube.pi.guialar.aplicacao.adaptadores.linux.LinuxDnsManifestStore;
 import br.uniube.pi.guialar.aplicacao.adaptadores.linux.LinuxNmConexaoEstado;
 import br.uniube.pi.guialar.aplicacao.adaptadores.linux.LinuxNmManifestCodec;
+import br.uniube.pi.guialar.aplicacao.adaptadores.linux.LinuxNetplanSupport;
 import br.uniube.pi.guialar.aplicacao.adaptadores.linux.LinuxNmManifestValidator;
 import br.uniube.pi.guialar.aplicacao.adaptadores.linux.LinuxNmcliTerseParser;
 import br.uniube.pi.guialar.aplicacao.adaptadores.linux.LinuxPkexecMensagens;
@@ -253,18 +254,45 @@ public class ConfiguradorDnsLinuxService {
 
     private ConfiguracaoDns configurarNetplan(ServidorDns servidor) {
         try {
-            String conteudo = String.join("\n", montarYamlNetplan(servidor)) + "\n";
-            String script = "set -e\nmkdir -p /etc/netplan\n"
-                + "cat > " + LinuxSystemPaths.NETPLAN_GUAILAR + " << '" + HEREDOC_TAG + "'\n"
+            Path netplanDir = Path.of(LinuxSystemPaths.NETPLAN_GUAILAR).getParent();
+            String nomeArquivo = Path.of(LinuxSystemPaths.NETPLAN_GUAILAR).getFileName().toString();
+            Map<String, Map<String, LinuxNetplanSupport.InterfaceNetplan>> secoes =
+                LinuxNetplanSupport.lerInterfacesDoDiretorio(netplanDir, nomeArquivo);
+            if (secoes.isEmpty()) {
+                return ConfiguracaoDns.naoAplicado("Netplan",
+                    "Nenhuma interface ethernet/wifi encontrada em " + netplanDir + ". Nada foi alterado.");
+            }
+            List<String> comDnsProprio = LinuxNetplanSupport.separarComDnsProprio(secoes);
+            String aviso = comDnsProprio.isEmpty() ? null
+                : "Interfaces com DNS fixo nos YAMLs de " + netplanDir + " não foram alteradas: "
+                    + String.join(", ", comDnsProprio)
+                    + " (o GuiaLar não edita esses arquivos).";
+            if (secoes.isEmpty()) {
+                return ConfiguracaoDns.naoAplicado("Netplan",
+                    (aviso != null ? aviso + " " : "") + "Nada foi alterado.");
+            }
+
+            String conteudo = LinuxNetplanSupport.gerarYamlGuialar(secoes, servidor);
+            String script = "set -e\n"
+                + "GUAILAR_NETPLAN=" + LinuxShellEscape.shSingleQuote(LinuxSystemPaths.NETPLAN_GUAILAR) + "\n"
+                + "trap 'rm -f \"$GUAILAR_NETPLAN\"; netplan apply 2>/dev/null || true' ERR\n"
+                + "mkdir -p /etc/netplan\n"
+                + "cat > \"$GUAILAR_NETPLAN\" << '" + HEREDOC_TAG + "'\n"
                 + conteudo
                 + HEREDOC_TAG + "\n"
-                + "netplan apply\n";
+                + "chmod 600 \"$GUAILAR_NETPLAN\" 2>/dev/null || true\n"
+                + "netplan generate\n"
+                + "netplan apply\n"
+                + "trap - ERR\n";
             LinuxCommandResult elevado = runner.executarScriptPrivilegiado(script);
             ConfiguracaoDns falha = interpretarPkexec("Netplan", elevado, false);
             if (falha != null) {
                 return falha;
             }
-            salvarManifestoSimples(LinuxDnsBackend.NETPLAN.getRotulo());
+            salvarManifestoNetplan();
+            if (aviso != null) {
+                return ConfiguracaoDns.sucessoComAviso(servidor, "Netplan", aviso);
+            }
             return ConfiguracaoDns.sucesso(servidor, "Netplan");
         } catch (Exception e) {
             return ConfiguracaoDns.erro("Netplan", e.getMessage());
@@ -395,6 +423,7 @@ public class ConfiguradorDnsLinuxService {
         String script = """
             set -e
             rm -f %s
+            netplan generate
             netplan apply
             """.formatted(LinuxSystemPaths.NETPLAN_GUAILAR);
         LinuxCommandResult elevado = runner.executarScriptPrivilegiado(script);
@@ -444,6 +473,14 @@ public class ConfiguradorDnsLinuxService {
         manifestStore.salvar(props);
     }
 
+    private void salvarManifestoNetplan() throws IOException {
+        Properties props = new Properties();
+        props.setProperty(LinuxDnsManifestStore.KEY_METODO, LinuxDnsBackend.NETPLAN.getRotulo());
+        props.setProperty(LinuxDnsManifestStore.KEY_MODO, LinuxDnsManifestStore.MODO_APLICADO);
+        props.setProperty(LinuxDnsManifestStore.KEY_ARQUIVO_NETPLAN, LinuxSystemPaths.NETPLAN_GUAILAR);
+        manifestStore.salvar(props);
+    }
+
     private ConfiguracaoDns interpretarPkexec(String metodo, LinuxCommandResult r, boolean revertendo) {
         if (r.sucesso()) {
             return null;
@@ -460,26 +497,6 @@ public class ConfiguradorDnsLinuxService {
         return ConfiguracaoDns.erro(metodo,
             "A operação elevada falhou antes de concluir; o manifesto não foi salvo. "
                 + "Se algo mudou na rede, anote o horário e peça ajuda. " + detalhe);
-    }
-
-    private List<String> montarYamlNetplan(ServidorDns servidor) {
-        List<String> linhas = new ArrayList<>();
-        linhas.add("# Configurado por GuiaLar Digital");
-        linhas.add("network:");
-        linhas.add("  version: 2");
-        linhas.add("  ethernets:");
-        linhas.add("    all:");
-        linhas.add("      match:");
-        linhas.add("        name: en*");
-        linhas.add("      dhcp4: true");
-        linhas.add("      dhcp6: true");
-        linhas.add("      nameservers:");
-        linhas.add("        addresses:");
-        linhas.add("          - " + servidor.getPrimario());
-        linhas.add("          - " + servidor.getSecundario());
-        linhas.add("          - " + servidor.getPrimarioIpv6());
-        linhas.add("          - " + servidor.getSecundarioIpv6());
-        return linhas;
     }
 
     private List<String> montarResolvedDropin(ServidorDns servidor) {

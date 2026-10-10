@@ -41,15 +41,19 @@ import java.awt.BorderLayout;
 import java.awt.Color;
 import java.awt.Component;
 import java.awt.Dimension;
+import java.awt.FlowLayout;
 import java.awt.Font;
 import java.awt.GridLayout;
 import java.awt.Toolkit;
 import java.awt.datatransfer.StringSelection;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Scanner;
+import java.util.prefs.Preferences;
 
 /**
  * Interface gráfica (Swing) do GuiaLar Digital.
@@ -60,11 +64,28 @@ import java.util.Scanner;
  */
 public class GuiaLarGui {
 
-    private static final Color COR_FUNDO = new Color(0xF4, 0xF6, 0xF8);
-    private static final Color COR_HEADER = new Color(0x0B, 0x5F, 0x63);
-    private static final Color COR_PRIMARIA = new Color(0x0E, 0x7A, 0x80);
     private static final Color COR_TEXTO_CLARO = Color.WHITE;
+    private static final String PREF_TEMA = "tema";
+    private static final float FONTE_CORPO = 15f;
+    private static final float FONTE_TITULO_CARTAO = 16f;
+    private static final float FONTE_TITULO_APP = 28f;
+    private static final float FONTE_SUBTITULO = 16f;
+    private static final float FONTE_STATUS = 22f;
+    private static final float FONTE_RODAPE = 14f;
+    private static final float FONTE_BOTAO_PRIMARIO = 15f;
+    private static final float FONTE_MONO = 14f;
 
+    private static final String[] CHAVES_UI_TEMA_ESCURO = {
+        "Panel.background", "OptionPane.background", "ScrollPane.background", "Viewport.background",
+        "Label.foreground", "OptionPane.messageForeground", "Button.foreground", "TextArea.foreground",
+        "Button.background", "Button.select", "Button.focus"
+    };
+
+    private static Tema temaInicialLinhaComando;
+    private static boolean temaSessaoSeguirSistema;
+    private static Map<String, Object> uiDefaultsAntesDoEscuro;
+
+    private Tema tema;
     private final DetectorSistemaService detectorSistema;
     private final DetectorDistroService detectorDistro;
     private final DetectorNavegadorService detectorNavegador;
@@ -108,6 +129,17 @@ public class GuiaLarGui {
     }
 
     public static void iniciar() {
+        iniciar(null);
+    }
+
+    /** @param temaForcado tema da linha de comando ({@code null} = preferência salva ou sistema) */
+    public static void iniciar(Tema temaForcado) {
+        iniciar(temaForcado, false);
+    }
+
+    public static void iniciar(Tema temaForcado, boolean seguirSistemaNestaSessao) {
+        temaInicialLinhaComando = temaForcado;
+        temaSessaoSeguirSistema = seguirSistemaNestaSessao;
         SwingUtilities.invokeLater(() -> {
             try {
                 new GuiaLarGui().construir();
@@ -121,6 +153,7 @@ public class GuiaLarGui {
     }
 
     private void construir() {
+        tema = resolverTemaInicial();
         aplicarLookAndFeel();
 
         tipoSistema = detectorSistema.detectar();
@@ -138,13 +171,7 @@ public class GuiaLarGui {
         frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
         frame.setMinimumSize(new Dimension(900, 680));
 
-        JPanel raiz = new JPanel(new BorderLayout());
-        raiz.setBackground(COR_FUNDO);
-        raiz.add(criarCabecalho(), BorderLayout.NORTH);
-        raiz.add(criarCorpo(), BorderLayout.CENTER);
-        raiz.add(criarRodape(), BorderLayout.SOUTH);
-
-        frame.setContentPane(raiz);
+        frame.setContentPane(criarRaiz());
         frame.pack();
         frame.setLocationRelativeTo(null);
         frame.setVisible(true);
@@ -159,47 +186,146 @@ public class GuiaLarGui {
         }
     }
 
-    private void aplicarLookAndFeel() {
+    private JPanel criarRaiz() {
+        JPanel raiz = new JPanel(new BorderLayout());
+        raiz.setBackground(tema.fundo());
+        raiz.add(criarCabecalho(), BorderLayout.NORTH);
+        raiz.add(criarCorpo(), BorderLayout.CENTER);
+        raiz.add(criarRodape(), BorderLayout.SOUTH);
+        return raiz;
+    }
+
+    private Tema resolverTemaInicial() {
+        if (temaInicialLinhaComando != null) {
+            return temaInicialLinhaComando;
+        }
+        if (temaSessaoSeguirSistema) {
+            return DeteccaoTemaSistema.detectar();
+        }
+        return lerPreferenciaTema();
+    }
+
+    private Tema lerPreferenciaTema() {
         try {
-            UIManager.setLookAndFeel(UIManager.getSystemLookAndFeelClassName());
+            String valor = Preferences.userNodeForPackage(GuiaLarGui.class).get(PREF_TEMA, "auto");
+            if ("auto".equalsIgnoreCase(valor)) {
+                return DeteccaoTemaSistema.detectar();
+            }
+            return Optional.ofNullable(Tema.de(valor)).orElse(DeteccaoTemaSistema.detectar());
+        } catch (Exception e) {
+            return DeteccaoTemaSistema.detectar();
+        }
+    }
+
+    private void salvarPreferenciaTema(Tema escolhido) {
+        try {
+            Preferences.userNodeForPackage(GuiaLarGui.class)
+                .put(PREF_TEMA, escolhido.isEscuro() ? "escuro" : "claro");
         } catch (Exception ignored) {
         }
+    }
+
+    private void aplicarLookAndFeel() {
+        try {
+            if (tema.isEscuro()) {
+                if (uiDefaultsAntesDoEscuro == null) {
+                    uiDefaultsAntesDoEscuro = new HashMap<>();
+                    for (String chave : CHAVES_UI_TEMA_ESCURO) {
+                        uiDefaultsAntesDoEscuro.put(chave, UIManager.get(chave));
+                    }
+                }
+                UIManager.setLookAndFeel(javax.swing.plaf.metal.MetalLookAndFeel.class.getName());
+                aplicarCoresDialogosEBotoes();
+            } else {
+                UIManager.setLookAndFeel(UIManager.getSystemLookAndFeelClassName());
+                if (uiDefaultsAntesDoEscuro != null) {
+                    for (var e : uiDefaultsAntesDoEscuro.entrySet()) {
+                        UIManager.put(e.getKey(), e.getValue());
+                    }
+                }
+            }
+        } catch (Exception ignored) {
+        }
+    }
+
+    private void aplicarCoresDialogosEBotoes() {
+        Color botao = new Color(0x2C, 0x36, 0x40);
+        for (String chave : new String[] {"Panel.background", "OptionPane.background",
+                "ScrollPane.background", "Viewport.background"}) {
+            UIManager.put(chave, tema.cartao());
+        }
+        for (String chave : new String[] {"Label.foreground", "OptionPane.messageForeground",
+                "Button.foreground", "TextArea.foreground"}) {
+            UIManager.put(chave, tema.texto());
+        }
+        UIManager.put("Button.background", botao);
+        UIManager.put("Button.select", tema.borda());
+        UIManager.put("Button.focus", tema.primaria());
+    }
+
+    private void alternarTema() {
+        String logAtual = areaLog == null ? "" : areaLog.getText();
+        boolean detalhesVisiveis = detalhesTecnicos != null && detalhesTecnicos.isVisible();
+        tema = tema.alternar();
+        salvarPreferenciaTema(tema);
+        aplicarLookAndFeel();
+        frame.setContentPane(criarRaiz());
+        if (detalhesTecnicos != null) {
+            detalhesTecnicos.setVisible(detalhesVisiveis);
+        }
+        if (areaLog != null) {
+            areaLog.setText(logAtual);
+            areaLog.setCaretPosition(areaLog.getDocument().getLength());
+        }
+        SwingUtilities.updateComponentTreeUI(frame);
+        frame.revalidate();
+        frame.repaint();
     }
 
     private JPanel criarCabecalho() {
         JPanel header = new JPanel();
         header.setLayout(new BoxLayout(header, BoxLayout.Y_AXIS));
-        header.setBackground(COR_HEADER);
+        header.setBackground(tema.cabecalho());
         header.setBorder(new EmptyBorder(18, 24, 18, 24));
 
         JLabel titulo = new JLabel("GuiaLar");
         titulo.setForeground(COR_TEXTO_CLARO);
-        titulo.setFont(titulo.getFont().deriveFont(Font.BOLD, 26f));
+        titulo.setFont(titulo.getFont().deriveFont(Font.BOLD, FONTE_TITULO_APP));
         titulo.setAlignmentX(Component.LEFT_ALIGNMENT);
 
         JLabel subtitulo = new JLabel(
             "Proteja a navegação da sua família");
-        subtitulo.setForeground(new Color(0xD6, 0xEE, 0xEF));
-        subtitulo.setFont(subtitulo.getFont().deriveFont(Font.PLAIN, 14f));
+        subtitulo.setForeground(tema.cabecalhoSub());
+        subtitulo.setFont(subtitulo.getFont().deriveFont(Font.PLAIN, FONTE_SUBTITULO));
         subtitulo.setAlignmentX(Component.LEFT_ALIGNMENT);
 
         header.add(titulo);
         header.add(Box.createVerticalStrut(4));
         header.add(subtitulo);
-        return header;
+
+        JButton botaoTema = new JButton(tema.isEscuro() ? "Tema claro" : "Tema escuro");
+        botaoTema.addActionListener(e -> alternarTema());
+        JPanel topo = new JPanel(new BorderLayout());
+        topo.setBackground(tema.cabecalho());
+        JPanel lateral = new JPanel(new FlowLayout(FlowLayout.RIGHT, 16, 16));
+        lateral.setBackground(tema.cabecalho());
+        lateral.add(botaoTema);
+        topo.add(header, BorderLayout.CENTER);
+        topo.add(lateral, BorderLayout.EAST);
+        return topo;
     }
 
     private JPanel criarCorpo() {
         JPanel corpo = new JPanel();
         corpo.setLayout(new BoxLayout(corpo, BoxLayout.Y_AXIS));
-        corpo.setBackground(COR_FUNDO);
+        corpo.setBackground(tema.fundo());
         corpo.setBorder(new EmptyBorder(16, 20, 8, 20));
 
         JPanel status = criarCartao("Como está a proteção");
         statusAmigavel = linha("");
-        statusAmigavel.setFont(statusAmigavel.getFont().deriveFont(Font.BOLD, 20f));
+        statusAmigavel.setFont(statusAmigavel.getFont().deriveFont(Font.BOLD, FONTE_STATUS));
         detalheAmigavel = linha("");
-        detalheAmigavel.setFont(detalheAmigavel.getFont().deriveFont(Font.PLAIN, 14f));
+        detalheAmigavel.setFont(detalheAmigavel.getFont().deriveFont(Font.PLAIN, FONTE_CORPO));
         status.add(statusAmigavel);
         status.add(detalheAmigavel);
         status.setMaximumSize(new Dimension(Integer.MAX_VALUE, 130));
@@ -207,7 +333,7 @@ public class GuiaLarGui {
         corpo.add(Box.createVerticalStrut(14));
 
         JPanel tarefas = new JPanel(new GridLayout(1, 3, 12, 0));
-        tarefas.setBackground(COR_FUNDO);
+        tarefas.setBackground(tema.fundo());
         tarefas.setAlignmentX(Component.LEFT_ALIGNMENT);
         tarefas.add(criarCartaoTarefa("1. Tentar ativar proteção", "Filtra sites perigosos e inadequados. Pode pedir autorização do responsável pelo computador."));
         tarefas.add(criarCartaoTarefa("2. Proteger navegadores", "Veja instruções simples para bloquear anúncios no Edge, Chrome e outros navegadores."));
@@ -222,16 +348,12 @@ public class GuiaLarGui {
         corpo.add(detalhes);
         detalhesTecnicos = new JPanel();
         detalhesTecnicos.setLayout(new BoxLayout(detalhesTecnicos, BoxLayout.Y_AXIS));
-        detalhesTecnicos.setBackground(COR_FUNDO);
+        detalhesTecnicos.setBackground(tema.fundo());
+        detalhesTecnicos.setAlignmentX(Component.LEFT_ALIGNMENT);
         detalhesTecnicos.setVisible(false);
-        detalhesTecnicos.add(criarCartaoSistema());
-        detalhesTecnicos.add(Box.createVerticalStrut(10));
-        detalhesTecnicos.add(criarCartaoDns());
-        detalhesTecnicos.add(Box.createVerticalStrut(10));
-        detalhesTecnicos.add(criarCartaoNavegadores());
-        detalhesTecnicos.add(Box.createVerticalStrut(10));
         JPanel tecnicos = new JPanel(new GridLayout(1, 3, 10, 0));
-        tecnicos.setBackground(COR_FUNDO);
+        tecnicos.setBackground(tema.fundo());
+        tecnicos.setAlignmentX(Component.LEFT_ALIGNMENT);
         tecnicos.add(criarCartaoSistema());
         tecnicos.add(criarCartaoDns());
         tecnicos.add(criarCartaoNavegadores());
@@ -243,7 +365,7 @@ public class GuiaLarGui {
         corpo.add(detalhesTecnicos);
         corpo.add(Box.createVerticalStrut(8));
         JLabel ajuda = linha("Você pode usar o GuiaLar sem mudar nada. Em computadores da faculdade ou do trabalho, peça ajuda ao suporte local.");
-        ajuda.setForeground(new Color(0x5A, 0x63, 0x6B));
+        ajuda.setForeground(tema.secundario());
         corpo.add(ajuda);
         atualizarResumoAmigavel();
         return corpo;
@@ -252,7 +374,7 @@ public class GuiaLarGui {
     private JPanel criarCartaoTarefa(String titulo, String descricao) {
         JPanel p = criarCartao(titulo);
         JLabel d = linha("<html><body style='width: 205px'>" + descricao + "</body></html>");
-        d.setFont(d.getFont().deriveFont(Font.PLAIN, 14f));
+        d.setFont(d.getFont().deriveFont(Font.PLAIN, FONTE_CORPO));
         p.add(d);
         return p;
     }
@@ -290,34 +412,34 @@ public class GuiaLarGui {
         if (estado == StatusDns.APLICADO) {
             statusAmigavel.setText("Protegido");
             detalheAmigavel.setText("A verificação confirmou que sites perigosos estão bloqueados nesta rede.");
-            statusAmigavel.setForeground(new Color(0x1B, 0x7A, 0x2E));
+            statusAmigavel.setForeground(tema.ok());
         } else if (estado == StatusDns.LEITURA_BLOQUEADA) {
             statusAmigavel.setText("A proteção ainda não foi confirmada");
             detalheAmigavel.setText("A rede não permitiu consultar essa configuração. Isso é comum em computadores da faculdade ou do trabalho. Nada foi alterado.");
-            statusAmigavel.setForeground(new Color(0x8A, 0x5A, 0x00));
+            statusAmigavel.setForeground(tema.atencao());
         } else if (estado == StatusDns.AGUARDANDO_APLICACAO) {
             statusAmigavel.setText("Aguardando você aplicar");
             detalheAmigavel.setText("Copie o trecho para o configuration.nix, rode sudo nixos-rebuild switch e clique em Verificar de novo.");
-            statusAmigavel.setForeground(new Color(0x8A, 0x5A, 0x00));
+            statusAmigavel.setForeground(tema.atencao());
         } else {
             statusAmigavel.setText("A proteção da rede não está ativa pelo GuiaLar");
             detalheAmigavel.setText("Você ainda pode seguir os passos para proteger seus navegadores. Nenhuma alteração será feita sem sua autorização.");
-            statusAmigavel.setForeground(new Color(0x8A, 0x5A, 0x00));
+            statusAmigavel.setForeground(tema.atencao());
         }
     }
 
     private JPanel criarCartao(String tituloCartao) {
         JPanel cartao = new JPanel();
         cartao.setLayout(new BoxLayout(cartao, BoxLayout.Y_AXIS));
-        cartao.setBackground(Color.WHITE);
+        cartao.setBackground(tema.cartao());
         cartao.setBorder(BorderFactory.createCompoundBorder(
-            BorderFactory.createLineBorder(new Color(0xE0, 0xE4, 0xE8)),
+            BorderFactory.createLineBorder(tema.borda()),
             new EmptyBorder(12, 14, 14, 14)));
         cartao.setAlignmentX(Component.LEFT_ALIGNMENT);
 
         JLabel titulo = new JLabel(tituloCartao);
-        titulo.setFont(titulo.getFont().deriveFont(Font.BOLD, 13f));
-        titulo.setForeground(COR_HEADER);
+        titulo.setFont(titulo.getFont().deriveFont(Font.BOLD, FONTE_TITULO_CARTAO));
+        titulo.setForeground(tema.titulo());
         titulo.setAlignmentX(Component.LEFT_ALIGNMENT);
         cartao.add(titulo);
         cartao.add(Box.createVerticalStrut(8));
@@ -326,7 +448,8 @@ public class GuiaLarGui {
 
     private JLabel linha(String texto) {
         JLabel l = new JLabel(texto);
-        l.setFont(l.getFont().deriveFont(Font.PLAIN, 12.5f));
+        l.setFont(l.getFont().deriveFont(Font.PLAIN, FONTE_CORPO));
+        l.setForeground(tema.texto());
         l.setAlignmentX(Component.LEFT_ALIGNMENT);
         return l;
     }
@@ -341,8 +464,8 @@ public class GuiaLarGui {
             cartao.add(linha("Pode pedir UAC: " + (diagnostico.isPodeElevar() ? "sim" : "não")));
             cartao.add(Box.createVerticalStrut(6));
             JLabel status = linha("Status: Windows suportado (smoke test)");
-            status.setForeground(new Color(0x1B, 0x7A, 0x2E));
-            status.setFont(status.getFont().deriveFont(Font.BOLD, 12.5f));
+            status.setForeground(tema.ok());
+            status.setFont(status.getFont().deriveFont(Font.BOLD, FONTE_CORPO));
             cartao.add(status);
         } else {
             boolean suportada = distro != null && distro.isSuportada();
@@ -354,8 +477,8 @@ public class GuiaLarGui {
                 + (distro == null ? "?" : distro.getGerenciadorRede())));
             cartao.add(Box.createVerticalStrut(6));
             JLabel status = linha(suportada ? "Status: suportada (MVP Linux)" : "Status: NÃO suportada");
-            status.setForeground(suportada ? new Color(0x1B, 0x7A, 0x2E) : new Color(0xB3, 0x26, 0x1A));
-            status.setFont(status.getFont().deriveFont(Font.BOLD, 12.5f));
+            status.setForeground(suportada ? tema.ok() : tema.erro());
+            status.setFont(status.getFont().deriveFont(Font.BOLD, FONTE_CORPO));
             cartao.add(status);
         }
         return cartao;
@@ -373,9 +496,9 @@ public class GuiaLarGui {
             cartao.add(Box.createVerticalStrut(6));
             JLabel st = linha("Estado GuiaLar: " + diagnostico.getStatusDns().getRotuloPt());
             Color cor = diagnostico.getStatusDns() == StatusDns.APLICADO
-                ? new Color(0x1B, 0x7A, 0x2E) : new Color(0x8A, 0x5A, 0x00);
+                ? tema.ok() : tema.atencao();
             st.setForeground(cor);
-            st.setFont(st.getFont().deriveFont(Font.BOLD, 12.5f));
+            st.setFont(st.getFont().deriveFont(Font.BOLD, FONTE_CORPO));
             cartao.add(st);
         }
         return cartao;
@@ -404,8 +527,9 @@ public class GuiaLarGui {
         plano.setEditable(false);
         plano.setLineWrap(true);
         plano.setWrapStyleWord(true);
-        plano.setFont(new Font("Dialog", Font.PLAIN, 12));
-        plano.setBackground(new Color(0xF9, 0xFB, 0xFC));
+        plano.setFont(new Font("Dialog", Font.PLAIN, 12).deriveFont(FONTE_CORPO));
+        plano.setBackground(tema.planoFundo());
+        plano.setForeground(tema.texto());
         plano.setBorder(new EmptyBorder(6, 6, 6, 6));
         JScrollPane sp = new JScrollPane(plano);
         sp.setAlignmentX(Component.LEFT_ALIGNMENT);
@@ -419,9 +543,9 @@ public class GuiaLarGui {
         JPanel cartao = criarCartao("Execução");
         areaLog = new JTextArea();
         areaLog.setEditable(false);
-        areaLog.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
-        areaLog.setBackground(new Color(0x1E, 0x24, 0x2B));
-        areaLog.setForeground(new Color(0xE6, 0xE6, 0xE6));
+        areaLog.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12).deriveFont(FONTE_MONO));
+        areaLog.setBackground(tema.logFundo());
+        areaLog.setForeground(tema.logTexto());
         areaLog.setBorder(new EmptyBorder(8, 8, 8, 8));
         JScrollPane sp = new JScrollPane(areaLog);
         sp.setAlignmentX(Component.LEFT_ALIGNMENT);
@@ -432,7 +556,7 @@ public class GuiaLarGui {
 
     private JPanel criarRodape() {
         JPanel rodape = new JPanel(new BorderLayout());
-        rodape.setBackground(COR_FUNDO);
+        rodape.setBackground(tema.fundo());
         rodape.setBorder(new EmptyBorder(6, 20, 16, 20));
 
         String avisoTxt = tipoSistema.isWindows()
@@ -441,11 +565,11 @@ public class GuiaLarGui {
         JLabel aviso = new JLabel(tipoSistema.isWindows()
             ? "Você decide antes de qualquer mudança. Em PCs gerenciados, peça ajuda ao suporte."
             : avisoTxt);
-        aviso.setFont(aviso.getFont().deriveFont(Font.PLAIN, 11.5f));
-        aviso.setForeground(new Color(0x5A, 0x63, 0x6B));
+        aviso.setFont(aviso.getFont().deriveFont(Font.PLAIN, FONTE_RODAPE));
+        aviso.setForeground(tema.secundario());
 
         JPanel botoes = new JPanel();
-        botoes.setBackground(COR_FUNDO);
+        botoes.setBackground(tema.fundo());
 
         botaoSair = new JButton("Sair");
         botaoSair.addActionListener(e -> frame.dispose());
@@ -467,9 +591,9 @@ public class GuiaLarGui {
 
         botaoExecutar = new JButton(tipoSistema.isWindows()
             ? "Tentar ativar proteção" : "Ativar proteção");
-        botaoExecutar.setBackground(COR_PRIMARIA);
+        botaoExecutar.setBackground(tema.primaria());
         botaoExecutar.setForeground(COR_TEXTO_CLARO);
-        botaoExecutar.setFont(botaoExecutar.getFont().deriveFont(Font.BOLD, 13f));
+        botaoExecutar.setFont(botaoExecutar.getFont().deriveFont(Font.BOLD, FONTE_BOTAO_PRIMARIO));
         botaoExecutar.setOpaque(true);
         botaoExecutar.setBorderPainted(false);
         botaoExecutar.setFocusPainted(false);
