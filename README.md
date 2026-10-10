@@ -36,8 +36,9 @@ O GuiaLar Digital é uma aplicação **desktop Java** (não web) que automatiza 
 ### Escopo do Projeto:
 
 **Linux (MVP completo):**
-- ✅ Debian, Fedora e Arch Linux
-- ✅ DNS via NetworkManager / systemd-resolved / Netplan + extensões
+- ✅ Debian, Fedora, Arch Linux e **NixOS** (com fluxo especial quando `/etc` é gerenciado pelo Nix)
+- ✅ DNS via **NetworkManager** (prioridade quando o NM está ativo, inclusive Wi‑Fi no Ubuntu), systemd-resolved, Netplan ou resolv.conf
+- ✅ Interface e manifesto em **`~/.guialar/`**; só a escrita de DNS usa **pkexec** (polkit), não é preciso `sudo java …` para abrir a GUI
 
 **Windows:**
 - ✅ Detecção de SO, elevação UAC, DNS atual, navegadores (Edge/Chrome/Firefox/Brave)
@@ -84,7 +85,7 @@ O GuiaLar Digital é uma aplicação **desktop Java** (não web) que automatiza 
 - **Java 17** ou superior
 - **Apache Ant 1.10+** (sistema de build)
 - **Sistema operacional:** Linux (Debian/Fedora/Arch) ou Windows 10/11
-- **Privilégios:** só necessários para **aplicar** DNS (sudo/pkexec no Linux; UAC no Windows). Diagnóstico roda sem admin.
+- **Privilégios:** só na hora de **aplicar/desfazer** DNS (pkexec no Linux; UAC no Windows). Diagnóstico e GUI rodam como usuário normal.
 
 ### Instalação e Compilação
 
@@ -125,9 +126,11 @@ ant clean           # Remove arquivos compilados
 ant compile         # Compila o código-fonte
 ant jar             # Cria o JAR executável (padrão)
 ant test-windows    # Testes do adapter Windows (PowerShell mockado; roda no Linux)
+ant test-linux      # Testes Linux (nmcli/pkexec/NixOS mockados)
+ant test            # Windows + Linux
 ant dist            # Distribuição completa
 ant dist-windows    # Pacote para copiar ao PC Windows do laboratório
-ant run             # CLI (Linux: sudo para DNS)
+ant run             # CLI (Linux: pkexec só ao aplicar DNS)
 ant run-gui         # Interface gráfica (Swing)
 ant run-diagnostico # Diagnóstico somente leitura
 ant rebuild         # Limpa e reconstrói tudo
@@ -198,8 +201,8 @@ ações e um painel de log da execução em tempo real.
 # Compila e abre a interface gráfica
 ant run-gui
 
-# Ou diretamente pelo JAR (com privilégios para alterar o DNS):
-sudo java -jar build/jar/guialar-digital.jar --gui
+# Ou diretamente pelo JAR (usuário normal; pkexec só ao ativar a proteção):
+java -jar build/jar/guialar-digital.jar --gui
 ```
 
 Seleção de modo ao executar o JAR:
@@ -221,8 +224,8 @@ Seleção de modo ao executar o JAR:
 # Compilar
 ant jar
 
-# Executar (requer sudo)
-sudo java -jar build/jar/guialar-digital.jar
+# Executar (usuário normal; pkexec na etapa de DNS)
+java -jar build/jar/guialar-digital.jar
 ```
 
 O programa irá:
@@ -469,17 +472,20 @@ src/main/java/br/uniube/pi/guialar/
 ### Diferenças Técnicas por OS (Documentadas)
 
 #### ✅ Linux (MVP - Implementado)
+- **Elevação:** GUI/CLI como usuário; escrita de DNS e desfazer via **pkexec**; manifesto em `~/.guialar/dns-manifest.properties`
+- **Ordem de backends:** NetworkManager ativo (Wi‑Fi e ethernet) → Netplan (se NM inativo) → systemd-resolved → resolv.conf
 - **DNS:** NetworkManager (nmcli), systemd-resolved (resolvectl), Netplan, resolv.conf
-  - **NetworkManager**: Modifica conexão ativa, backup em `~/.guialar/backups/`
-  - **systemd-resolved**: Drop-in `/etc/systemd/resolved.conf.d/99-guialar.conf`
+  - **NetworkManager**: Conexão ativa, `ignore-auto-dns`, IPv4+IPv6, backup em `~/.guialar/backups/`
+  - **systemd-resolved**: Drop-in `/etc/systemd/resolved.conf.d/99-guialar.conf` (desfazer remove esse arquivo e reinicia o serviço)
   - **Netplan**: YAML em `/etc/netplan/99-guialar-dns.yaml` (Ubuntu Server)
+  - **NixOS**: Se NM ativo e sem DNS global conflitante, usa NM; senão mostra trecho `networking.nameservers` para `configuration.nix` (status **aguardando você aplicar** até o smoke test passar)
   - **resolv.conf**: Verifica symlink stub antes de editar, inclui IPv6
   - **Conexão ativa**: Filtra VPN/docker, prioriza ethernet > wifi
 - **Browsers:** PATH `/usr/bin/`, `.desktop` files, perfis `~/.mozilla/`, `~/.config/`
   - **Detecção**: which, perfis, .desktop, Flatpak, Snap
   - **Brave Origin**: `~/.config/BraveSoftware/Brave-Origin`
 - **Extensões:** `policies.json` (Firefox), managed policies (Chromium)
-- **Distros:** Debian, Ubuntu, Fedora, Arch
+- **Distros:** Debian, Ubuntu, Fedora, Arch, NixOS
 - **Verificação**: Via stub (resolvectl query / dig @127.0.0.53)
 - **Reversão**: Busca backup mais recente e restaura automaticamente
 
@@ -689,7 +695,7 @@ docker run guialar-test
 
 # Fase 2: VM ou container systemd
 # (criar VM com distro-alvo via virt-manager/VirtualBox)
-sudo java -jar build/jar/guialar-digital.jar
+java -jar build/jar/guialar-digital.jar
 
 # Fase 3: Validação
 dig @1.1.1.3 malware.testcategory.com  # deve retornar 0.0.0.0

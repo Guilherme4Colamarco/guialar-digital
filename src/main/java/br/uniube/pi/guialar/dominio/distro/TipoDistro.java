@@ -8,6 +8,7 @@ public enum TipoDistro {
     DEBIAN("Debian", "debian"),
     FEDORA("Fedora", "fedora"),
     ARCH("Arch Linux", "arch"),
+    NIXOS("NixOS", "nixos"),
     DESCONHECIDA("Desconhecida", "unknown");
 
     private final String nomeExibicao;

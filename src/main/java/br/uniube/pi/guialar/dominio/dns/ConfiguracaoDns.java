@@ -8,12 +8,21 @@ public class ConfiguracaoDns {
     private boolean aplicado;
     private String metodoConfiguracao;
     private String mensagem;
+    private boolean aguardandoUsuario;
+    private String textoParaCopiar;
 
     public ConfiguracaoDns(ServidorDns servidor, boolean aplicado, String metodoConfiguracao, String mensagem) {
+        this(servidor, aplicado, metodoConfiguracao, mensagem, false, null);
+    }
+
+    public ConfiguracaoDns(ServidorDns servidor, boolean aplicado, String metodoConfiguracao, String mensagem,
+                           boolean aguardandoUsuario, String textoParaCopiar) {
         this.servidor = servidor;
         this.aplicado = aplicado;
         this.metodoConfiguracao = metodoConfiguracao;
         this.mensagem = mensagem;
+        this.aguardandoUsuario = aguardandoUsuario;
+        this.textoParaCopiar = textoParaCopiar;
     }
 
     public ServidorDns getServidor() {
@@ -30,6 +39,14 @@ public class ConfiguracaoDns {
 
     public String getMensagem() {
         return mensagem;
+    }
+
+    public boolean isAguardandoUsuario() {
+        return aguardandoUsuario;
+    }
+
+    public String getTextoParaCopiar() {
+        return textoParaCopiar;
     }
 
     public static ConfiguracaoDns sucesso(ServidorDns servidor, String metodo) {
@@ -69,6 +86,17 @@ public class ConfiguracaoDns {
     /**
      * Sucesso com aviso adicional (ex.: manifesto não salvo).
      */
+    public static ConfiguracaoDns aguardandoAplicacaoUsuario(String metodo, String textoCopiar, String mensagem) {
+        return new ConfiguracaoDns(
+            null,
+            false,
+            metodo,
+            mensagem,
+            true,
+            textoCopiar
+        );
+    }
+
     public static ConfiguracaoDns sucessoComAviso(ServidorDns servidor, String metodo, String aviso) {
         return new ConfiguracaoDns(
             servidor,

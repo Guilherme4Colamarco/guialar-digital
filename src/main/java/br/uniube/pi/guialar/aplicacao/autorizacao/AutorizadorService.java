@@ -34,10 +34,10 @@ public class AutorizadorService {
         }
 
         if (plano.isRequerPrivilegios()) {
-            if (!verificarPrivilegios()) {
-                System.err.println("\n❌ Este programa precisa ser executado com privilégios administrativos.");
-                System.err.println("   Execute novamente com: sudo java -jar guialar-digital.jar");
-                System.err.println("   Ou: sudo ./mvnw spring-boot:run");
+            if (!podeElevarDns()) {
+                System.err.println("\n❌ Não foi possível obter autorização para alterar o DNS.");
+                System.err.println("   Instale o pkexec (pacote policykit-1) ou execute em ambiente com polkit.");
+                System.err.println("   A interface gráfica pedirá a senha do administrador só na hora de aplicar o DNS.");
                 return false;
             }
         }
@@ -68,29 +68,33 @@ public class AutorizadorService {
     }
 
     /**
-     * Verifica se o programa está sendo executado com privilégios administrativos.
+     * Root já elevado ou pkexec disponível para elevar só a etapa de DNS.
      */
-    private boolean verificarPrivilegios() {
-        String usuario = System.getProperty("user.name");
-        
-        if ("root".equals(usuario)) {
+    private boolean podeElevarDns() {
+        if ("root".equals(System.getProperty("user.name"))) {
             return true;
         }
-
         try {
             Process process = new ProcessBuilder("id", "-u")
                 .redirectErrorStream(true)
                 .start();
-
             Scanner scanner = new Scanner(process.getInputStream());
-            if (scanner.hasNextInt()) {
-                int uid = scanner.nextInt();
-                return uid == 0;
+            if (scanner.hasNextInt() && scanner.nextInt() == 0) {
+                return true;
             }
-        } catch (Exception e) {
-            // Ignora erro
+        } catch (Exception ignored) {
         }
+        return comandoExiste("pkexec");
+    }
 
-        return false;
+    private boolean comandoExiste(String comando) {
+        try {
+            Process process = new ProcessBuilder("which", comando)
+                .redirectErrorStream(true)
+                .start();
+            return process.waitFor() == 0;
+        } catch (Exception e) {
+            return false;
+        }
     }
 }

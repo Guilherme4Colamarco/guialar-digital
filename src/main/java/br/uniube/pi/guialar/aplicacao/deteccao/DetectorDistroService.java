@@ -41,6 +41,15 @@ public class DetectorDistroService {
         List<String> linhas = Files.readAllLines(osRelease);
         String conteudo = String.join("\n", linhas).toLowerCase();
 
+        for (String linha : linhas) {
+            if (linha.startsWith("ID=")) {
+                String id = linha.substring(3).replaceAll("\"", "").trim().toLowerCase();
+                if ("nixos".equals(id)) {
+                    return TipoDistro.NIXOS;
+                }
+            }
+        }
+
         if (conteudo.contains("debian") || conteudo.contains("ubuntu")) {
             return TipoDistro.DEBIAN;
         } else if (conteudo.contains("fedora")) {
@@ -85,7 +94,7 @@ public class DetectorDistroService {
     }
 
     private String detectarGerenciadorRede(TipoDistro tipo) {
-        if (comandoExiste("nmcli")) {
+        if (comandoExiste("nmcli") && networkManagerRodando()) {
             return "NetworkManager";
         } else if (comandoExiste("systemctl") && servicoAtivo("systemd-resolved")) {
             return "systemd-resolved";
@@ -102,6 +111,24 @@ public class DetectorDistroService {
                 .start();
             int exitCode = process.waitFor();
             return exitCode == 0;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private boolean networkManagerRodando() {
+        if (servicoAtivo("NetworkManager")) {
+            return true;
+        }
+        try {
+            Process process = new ProcessBuilder("nmcli", "-t", "-f", "RUNNING", "general")
+                .redirectErrorStream(true)
+                .start();
+            try (var reader = new java.io.BufferedReader(
+                    new java.io.InputStreamReader(process.getInputStream()))) {
+                String linha = reader.readLine();
+                return linha != null && linha.trim().equalsIgnoreCase("running");
+            }
         } catch (Exception e) {
             return false;
         }

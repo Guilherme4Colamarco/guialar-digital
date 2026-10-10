@@ -7,8 +7,10 @@ import br.uniube.pi.guialar.aplicacao.adaptadores.windows.WindowsElevationProbe;
 import br.uniube.pi.guialar.aplicacao.adaptadores.windows.WindowsPaths;
 import br.uniube.pi.guialar.aplicacao.adaptadores.windows.PowerShellExecutor;
 import br.uniube.pi.guialar.aplicacao.adaptadores.windows.ProcessPowerShellExecutor;
+import br.uniube.pi.guialar.aplicacao.adaptadores.linux.LinuxGuiaLarPaths;
 import br.uniube.pi.guialar.aplicacao.deteccao.DetectorNavegadorService;
 import br.uniube.pi.guialar.aplicacao.deteccao.DetectorSistemaService;
+import br.uniube.pi.guialar.aplicacao.verificacao.LinuxProtecaoStatusService;
 import br.uniube.pi.guialar.dominio.diagnostico.DiagnosticoAmbiente;
 import br.uniube.pi.guialar.dominio.diagnostico.StatusDns;
 import br.uniube.pi.guialar.dominio.dns.ServidorDns;
@@ -128,9 +130,17 @@ public class DiagnosticoAmbienteService {
         List<String> oQueFunciona = List.of(
             "Detecção de distribuição e navegadores",
             "Diagnóstico sem root",
-            "Aplicação de DNS apenas com privilégios (pkexec/sudo)"
+            "Aplicação de DNS com um único pkexec por operação"
         );
         List<Navegador> navegadores = detectorNavegador.detectar();
+        LinuxProtecaoStatusService protecao = new LinuxProtecaoStatusService();
+        LinuxProtecaoStatusService.Avaliacao avaliacao = protecao.avaliarSomenteManifesto();
+        String caminhoDados;
+        try {
+            caminhoDados = LinuxGuiaLarPaths.diretorioDados().toString();
+        } catch (Exception e) {
+            caminhoDados = "~/.guialar (indisponível: " + e.getMessage() + ")";
+        }
         return DiagnosticoAmbiente.builder()
             .tipoSistema(tipo)
             .nomeSistema(System.getProperty("os.name", "Linux"))
@@ -138,12 +148,41 @@ public class DiagnosticoAmbienteService {
             .arquitetura(System.getProperty("os.arch", "N/A"))
             .processoElevado("root".equals(System.getProperty("user.name")))
             .podeElevar(true)
-            .statusDns(StatusDns.DESCONHECIDO)
-            .notaDns("No Linux use a configuração via NetworkManager/resolved (ver CLI completa).")
+            .statusDns(avaliacao.status())
+            .notaDns(avaliacao.nota())
             .navegadores(navegadores)
             .notasConectividade(testarConectividadeBasica())
             .oQueFunciona(oQueFunciona)
-            .caminhoDadosUsuario(System.getProperty("user.home") + "/.guialar")
+            .caminhoDadosUsuario(caminhoDados)
+            .build();
+    }
+
+    /**
+     * Diagnóstico Linux com smoke test de DNS (para o botão Verificar de novo).
+     */
+    public DiagnosticoAmbiente diagnosticarLinuxComVerificacao(TipoSistema tipo) {
+        List<Navegador> navegadores = detectorNavegador.detectar();
+        LinuxProtecaoStatusService protecao = new LinuxProtecaoStatusService();
+        LinuxProtecaoStatusService.Avaliacao avaliacao = protecao.avaliarComVerificacao();
+        String caminhoDados;
+        try {
+            caminhoDados = LinuxGuiaLarPaths.diretorioDados().toString();
+        } catch (Exception e) {
+            caminhoDados = "~/.guialar";
+        }
+        return DiagnosticoAmbiente.builder()
+            .tipoSistema(tipo)
+            .nomeSistema(System.getProperty("os.name", "Linux"))
+            .versaoSistema(System.getProperty("os.version", "N/A"))
+            .arquitetura(System.getProperty("os.arch", "N/A"))
+            .processoElevado("root".equals(System.getProperty("user.name")))
+            .podeElevar(true)
+            .statusDns(avaliacao.status())
+            .notaDns(avaliacao.nota())
+            .navegadores(navegadores)
+            .notasConectividade(testarConectividadeBasica())
+            .oQueFunciona(List.of("Verificação de bloqueio via stub do sistema"))
+            .caminhoDadosUsuario(caminhoDados)
             .build();
     }
 

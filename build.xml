@@ -16,6 +16,7 @@
     
     <property name="main.class" value="br.uniube.pi.guialar.GuiaLarApplication"/>
     <property name="test.windows.class" value="br.uniube.pi.guialar.test.WindowsAdapterSmokeTest"/>
+    <property name="test.linux.class" value="br.uniube.pi.guialar.test.LinuxDnsLogicTest"/>
     <property name="jar.name" value="guialar-digital.jar"/>
     <property name="version" value="0.2.0"/>
 
@@ -83,8 +84,15 @@
         </java>
     </target>
 
+    <target name="test-linux" depends="compile" description="Testes Linux (mocks)">
+        <echo message="Executando LinuxDnsLogicTest..."/>
+        <java classname="${test.linux.class}" fork="true" failonerror="true">
+            <classpath refid="run.classpath"/>
+        </java>
+    </target>
+
     <!-- Target: test - alias para a suíte atual -->
-    <target name="test" depends="test-windows" description="Executa testes automatizados"/>
+    <target name="test" depends="test-windows,test-linux" description="Executa testes automatizados"/>
 
     <!-- Target: dist - Cria distribuição completa -->
     <target name="dist" depends="jar" description="Cria distribuição completa">
@@ -134,7 +142,7 @@ Expectativa em PC trancado:
     <!-- Target: run - Executa a aplicação (requer sudo no Linux) -->
     <target name="run" depends="jar" description="Executa a aplicação">
         <echo message="ATENÇÃO: No Linux, alterar DNS requer privilégios administrativos!"/>
-        <echo message="Execute com: sudo ant run"/>
+        <echo message="Execute: ant run (DNS no Linux pede pkexec na hora de aplicar)"/>
         <echo message=""/>
         <java jar="${jar.dir}/${jar.name}" fork="true">
             <arg value="--cli"/>
@@ -183,7 +191,7 @@ Expectativa em PC trancado:
         <echo message="  ant test / test-windows - Testes do adapter Windows (mocks)"/>
         <echo message="  ant dist           - Distribuição completa"/>
         <echo message="  ant dist-windows   - Pacote para copiar ao PC Windows do lab"/>
-        <echo message="  ant run            - CLI (Linux: sudo para DNS)"/>
+        <echo message="  ant run            - CLI (Linux: pkexec ao aplicar DNS)"/>
         <echo message="  ant run-gui        - Interface gráfica"/>
         <echo message="  ant run-diagnostico - Diagnóstico sem privilégios"/>
         <echo message="  ant rebuild        - Limpa e reconstrói tudo"/>
