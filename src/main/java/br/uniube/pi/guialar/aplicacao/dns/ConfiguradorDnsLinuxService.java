@@ -23,6 +23,7 @@ import br.uniube.pi.guialar.dominio.dns.ServidorDns;
 import br.uniube.pi.guialar.dominio.verificacao.ResultadoVerificacao;
 
 import java.io.IOException;
+import java.nio.file.AccessDeniedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -85,15 +86,17 @@ public class ConfiguradorDnsLinuxService {
             return configurarNixOs(servidor);
         }
 
-        LinuxDnsBackend backend = selector.selecionar(distro);
-        ConfiguracaoDns aplicado = switch (backend) {
+        return finalizarComVerificacao(aplicarBackend(selector.selecionar(distro), servidor, distro), servidor);
+    }
+
+    private ConfiguracaoDns aplicarBackend(LinuxDnsBackend backend, ServidorDns servidor, InfoDistro distro) {
+        return switch (backend) {
             case NETWORK_MANAGER -> configurarNetworkManager(servidor);
-            case NETPLAN -> configurarNetplan(servidor);
+            case NETPLAN -> configurarNetplan(servidor, distro);
             case SYSTEMD_RESOLVED -> configurarSystemdResolved(servidor);
             case RESOLV_CONF -> configurarResolvConf(servidor);
             case NIXOS_SNIPPET -> ConfiguracaoDns.erro("NixOS", "ramo inesperado");
         };
-        return finalizarComVerificacao(aplicado, servidor);
     }
 
     private ConfiguracaoDns finalizarComVerificacao(ConfiguracaoDns aplicado, ServidorDns servidor) {
@@ -252,15 +255,32 @@ public class ConfiguradorDnsLinuxService {
         return sb.toString();
     }
 
-    private ConfiguracaoDns configurarNetplan(ServidorDns servidor) {
+    private ConfiguracaoDns configurarNetplan(ServidorDns servidor, InfoDistro distro) {
         try {
-            Path netplanDir = Path.of(LinuxSystemPaths.NETPLAN_GUAILAR).getParent();
+            Path netplanDir = selector.getNetplanDir();
             String nomeArquivo = Path.of(LinuxSystemPaths.NETPLAN_GUAILAR).getFileName().toString();
+            List<String> textos = new ArrayList<>();
+            List<Path> protegidos = new ArrayList<>();
+            for (Path yaml : LinuxNetplanSupport.listarYamlsExistentes(netplanDir, nomeArquivo)) {
+                try {
+                    textos.add(lerArquivoNetplan(yaml));
+                } catch (AccessDeniedException e) {
+                    protegidos.add(yaml);
+                }
+            }
+            if (!protegidos.isEmpty()) {
+                LinuxCommandResult lido = runner.executarScriptPrivilegiado(
+                    LinuxNetplanSupport.scriptLerArquivos(protegidos));
+                ConfiguracaoDns falha = interpretarPkexec("Netplan", lido, false);
+                if (falha != null) {
+                    return falha;
+                }
+                textos.addAll(LinuxNetplanSupport.separarSaidaLeitura(lido.stdout(), protegidos.size()));
+            }
             Map<String, Map<String, LinuxNetplanSupport.InterfaceNetplan>> secoes =
-                LinuxNetplanSupport.lerInterfacesDoDiretorio(netplanDir, nomeArquivo);
+                LinuxNetplanSupport.lerInterfaces(textos);
             if (secoes.isEmpty()) {
-                return ConfiguracaoDns.naoAplicado("Netplan",
-                    "Nenhuma interface ethernet/wifi encontrada em " + netplanDir + ". Nada foi alterado.");
+                return aplicarBackend(selector.selecionarSemNetplan(distro), servidor, distro);
             }
             List<String> comDnsProprio = LinuxNetplanSupport.separarComDnsProprio(secoes);
             String aviso = comDnsProprio.isEmpty() ? null
@@ -471,6 +491,10 @@ public class ConfiguradorDnsLinuxService {
         props.setProperty(LinuxDnsManifestStore.KEY_METODO, metodo);
         props.setProperty(LinuxDnsManifestStore.KEY_MODO, LinuxDnsManifestStore.MODO_APLICADO);
         manifestStore.salvar(props);
+    }
+
+    protected String lerArquivoNetplan(Path yaml) throws IOException {
+        return Files.readString(yaml);
     }
 
     private void salvarManifestoNetplan() throws IOException {

@@ -25,6 +25,8 @@ import br.uniube.pi.guialar.dominio.dns.ConfiguracaoDns;
 import br.uniube.pi.guialar.dominio.dns.ServidorDns;
 import br.uniube.pi.guialar.dominio.verificacao.ResultadoVerificacao;
 
+import java.io.IOException;
+import java.nio.file.AccessDeniedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
@@ -56,6 +58,10 @@ public class LinuxDnsLogicTest {
         testManifestoAdulteradoNaoExecutaPkexec();
         testRevertNmUsaUuidComValoresEntreAspas();
         testValidatorRejeitaInjecaoIgnoreAutoDns();
+        testNetplanYamlProtegidoLidoViaPkexec();
+        testNetplanSemInterfacesUsaResolved();
+        testSelectorIgnoraNetplanSemYaml();
+        testSaidaLeituraNetplanIncompleta();
 
         System.out.println();
         if (falhas == 0) {
@@ -395,6 +401,92 @@ public class LinuxDnsLogicTest {
         Path p = Files.createTempFile("manifest-", ".properties");
         Files.delete(p);
         return p;
+    }
+
+    private static ConfiguradorDnsLinuxService svcNetplan(FakeLinuxCommandRunner runner, Path netplan,
+                                                          boolean yamlsProtegidos) throws Exception {
+        runner.setComandoDisponivel("nmcli", false);
+        Path osRelease = Files.createTempFile("os-ubuntu-", ".txt");
+        Files.writeString(osRelease, "ID=ubuntu\n");
+        LinuxDnsBackendSelector selector = new LinuxDnsBackendSelector(runner, osRelease, netplan);
+        return new ConfiguradorDnsLinuxService(runner, selector, new NixOsDnsSupport(runner, selector),
+                new LinuxDnsManifestStore(manifestTemp())) {
+            @Override
+            protected String lerArquivoNetplan(Path yaml) throws IOException {
+                if (yamlsProtegidos) {
+                    throw new AccessDeniedException(yaml.toString());
+                }
+                return super.lerArquivoNetplan(yaml);
+            }
+        };
+    }
+
+    private static void testNetplanYamlProtegidoLidoViaPkexec() throws Exception {
+        String yaml = """
+            network:
+              version: 2
+              ethernets:
+                enp1s0:
+                  dhcp4: true
+            """;
+        Path netplan = Files.createTempDirectory("netplan-600-");
+        Files.writeString(netplan.resolve("50-cloud-init.yaml"), yaml);
+        FakeLinuxCommandRunner runner = new FakeLinuxCommandRunner();
+        runner.responder("#GUIALAR-ARQUIVO", new LinuxCommandResult(0, "#GUIALAR-ARQUIVO 0\n" + yaml, "", true));
+
+        svcNetplan(runner, netplan, true).configurar(new InfoDistro(TipoDistro.DEBIAN, "Ubuntu", "24.04", "netplan"));
+
+        List<String> scripts = runner.getScriptsPrivilegiados();
+        assertEq("leitura + escrita", 2, scripts.size());
+        assertTrue("1º script só lê", scripts.get(0).contains("cat -- ") && !scripts.get(0).contains("netplan apply"));
+        assertTrue("2º usa interface lida como root", scripts.size() > 1 && scripts.get(1).contains("\"enp1s0\":"));
+        assertTrue("2º valida antes", scripts.size() > 1 && scripts.get(1).contains("netplan generate"));
+        ok("testNetplanYamlProtegidoLidoViaPkexec");
+    }
+
+    private static void testNetplanSemInterfacesUsaResolved() throws Exception {
+        Path netplan = Files.createTempDirectory("netplan-nm-");
+        Files.writeString(netplan.resolve("01-network-manager-all.yaml"),
+            "network:\n  version: 2\n  renderer: NetworkManager\n");
+        FakeLinuxCommandRunner runner = new FakeLinuxCommandRunner();
+        runner.responder("systemctl is-active systemd-resolved", new LinuxCommandResult(0, "active", "", false));
+
+        svcNetplan(runner, netplan, false).configurar(new InfoDistro(TipoDistro.DEBIAN, "Ubuntu", "24.04", "netplan"));
+
+        List<String> scripts = runner.getScriptsPrivilegiados();
+        assertEq("um script", 1, scripts.size());
+        assertTrue("caiu para systemd-resolved", scripts.get(0).contains(LinuxSystemPaths.DROPIN_RESOLVED));
+        assertTrue("não grava Netplan", !scripts.get(0).contains("netplan"));
+        ok("testNetplanSemInterfacesUsaResolved");
+    }
+
+    private static void testSelectorIgnoraNetplanSemYaml() throws Exception {
+        FakeLinuxCommandRunner runner = new FakeLinuxCommandRunner();
+        runner.setComandoDisponivel("nmcli", false);
+        runner.responder("systemctl is-active systemd-resolved", new LinuxCommandResult(0, "active", "", false));
+        Path osRelease = Files.createTempFile("os-deb-", ".txt");
+        Files.writeString(osRelease, "ID=debian\n");
+        Path vazio = Files.createTempDirectory("netplan-vazio-");
+        LinuxDnsBackendSelector selector = new LinuxDnsBackendSelector(runner, osRelease, vazio);
+        InfoDistro debian = new InfoDistro(TipoDistro.DEBIAN, "Debian", "12", "systemd-resolved");
+        assertEq("diretório vazio não é Netplan", LinuxDnsBackend.SYSTEMD_RESOLVED, selector.selecionar(debian));
+        Files.writeString(vazio.resolve("00-installer-config.yaml"), "network: {}\n");
+        assertEq("com YAML é Netplan", LinuxDnsBackend.NETPLAN, selector.selecionar(debian));
+        ok("testSelectorIgnoraNetplanSemYaml");
+    }
+
+    private static void testSaidaLeituraNetplanIncompleta() throws Exception {
+        String script = LinuxNetplanSupport.scriptLerArquivos(List.of(Path.of("/etc/netplan/a b.yaml")));
+        assertTrue("caminho entre aspas", script.contains("cat -- '/etc/netplan/a b.yaml'"));
+        assertEq("dois arquivos", List.of("x: 1\n\n", "y: 2\n"),
+            LinuxNetplanSupport.separarSaidaLeitura("#GUIALAR-ARQUIVO 0\nx: 1\n\n#GUIALAR-ARQUIVO 1\ny: 2", 2));
+        try {
+            LinuxNetplanSupport.separarSaidaLeitura("#GUIALAR-ARQUIVO 0\nx: 1\n", 2);
+            assertTrue("deveria falhar", false);
+        } catch (IOException esperado) {
+            assertTrue("mensagem clara", esperado.getMessage().contains("incompleta"));
+        }
+        ok("testSaidaLeituraNetplanIncompleta");
     }
 
     private static ConfiguradorDnsLinuxService svc(FakeLinuxCommandRunner runner, Path manifest) throws Exception {

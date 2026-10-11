@@ -7,6 +7,7 @@ import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -20,6 +21,8 @@ public final class LinuxNetplanSupport {
 
     private static final Pattern SECAO_NETPLAN = Pattern.compile("^(\\s*)(ethernets|wifis):\\s*(#.*)?$");
     private static final Pattern CHAVE_YAML = Pattern.compile("^(\\s*)([^\\s#:][^:]*?)\\s*:\\s*(.*)$");
+
+    private static final String MARCADOR_ARQUIVO = "#GUIALAR-ARQUIVO ";
 
     private LinuxNetplanSupport() {
     }
@@ -47,13 +50,39 @@ public final class LinuxNetplanSupport {
         return yamls;
     }
 
-    public static Map<String, Map<String, InterfaceNetplan>> lerInterfacesDoDiretorio(
-            Path netplanDir, String arquivoGuialar) throws IOException {
+    public static Map<String, Map<String, InterfaceNetplan>> lerInterfaces(Collection<String> yamls) {
         Map<String, Map<String, InterfaceNetplan>> secoes = new LinkedHashMap<>();
-        for (Path yaml : listarYamlsExistentes(netplanDir, arquivoGuialar)) {
-            mesclar(secoes, extrairInterfacesNetplan(Files.readString(yaml)));
+        for (String yaml : yamls) {
+            mesclar(secoes, extrairInterfacesNetplan(yaml));
         }
         return secoes;
+    }
+
+    /** Script para pkexec que imprime os YAMLs que o usuário comum não consegue ler (ex.: 600 root). */
+    public static String scriptLerArquivos(List<Path> arquivos) {
+        StringBuilder sb = new StringBuilder("set -e\n");
+        for (int i = 0; i < arquivos.size(); i++) {
+            sb.append("printf '%s\\n' '").append(MARCADOR_ARQUIVO).append(i).append("'\n");
+            sb.append("cat -- ").append(LinuxShellEscape.shSingleQuote(arquivos.get(i).toString())).append('\n');
+            sb.append("echo\n");
+        }
+        return sb.toString();
+    }
+
+    public static List<String> separarSaidaLeitura(String stdout, int esperados) throws IOException {
+        List<StringBuilder> partes = new ArrayList<>();
+        for (String linha : (stdout == null ? "" : stdout).split("\\R", -1)) {
+            if (linha.equals(MARCADOR_ARQUIVO + partes.size())) {
+                partes.add(new StringBuilder());
+            } else if (!partes.isEmpty()) {
+                partes.get(partes.size() - 1).append(linha).append('\n');
+            }
+        }
+        if (partes.size() != esperados) {
+            throw new IOException("leitura dos arquivos do Netplan incompleta (" + partes.size()
+                + " de " + esperados + ")");
+        }
+        return partes.stream().map(StringBuilder::toString).toList();
     }
 
     public static List<String> separarComDnsProprio(Map<String, Map<String, InterfaceNetplan>> secoes) {

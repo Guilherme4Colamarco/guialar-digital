@@ -3,7 +3,7 @@ package br.uniube.pi.guialar.aplicacao.adaptadores.linux;
 import br.uniube.pi.guialar.dominio.distro.InfoDistro;
 import br.uniube.pi.guialar.dominio.distro.TipoDistro;
 
-import java.nio.file.Files;
+import java.io.IOException;
 import java.nio.file.Path;
 
 /**
@@ -59,8 +59,17 @@ public class LinuxDnsBackendSelector {
         }
     }
 
+    public Path getNetplanDir() {
+        return netplanDir;
+    }
+
     public boolean existeNetplan() {
-        return Files.isDirectory(netplanDir);
+        try {
+            String nossoArquivo = Path.of(LinuxSystemPaths.NETPLAN_GUAILAR).getFileName().toString();
+            return !LinuxNetplanSupport.listarYamlsExistentes(netplanDir, nossoArquivo).isEmpty();
+        } catch (IOException e) {
+            return false;
+        }
     }
 
     /**
@@ -73,6 +82,11 @@ public class LinuxDnsBackendSelector {
         if (distro.getTipo() == TipoDistro.DEBIAN && existeNetplan()) {
             return LinuxDnsBackend.NETPLAN;
         }
+        return selecionarSemNetplan(distro);
+    }
+
+    /** Próximo backend quando o Netplan não tem interfaces para receber o DNS. */
+    public LinuxDnsBackend selecionarSemNetplan(InfoDistro distro) {
         if ("systemd-resolved".equals(distro.getGerenciadorRede())
                 || servicoResolvedAtivo()) {
             return LinuxDnsBackend.SYSTEMD_RESOLVED;
