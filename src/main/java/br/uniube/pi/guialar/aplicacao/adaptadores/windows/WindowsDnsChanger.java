@@ -181,6 +181,13 @@ public class WindowsDnsChanger implements DnsChanger {
                         + ". Nada a desfazer (ou DNS nunca foi aplicado por este app).");
             }
 
+            String erroManifesto = WindowsDnsManifestValidator.validar(manifesto);
+            if (erroManifesto != null) {
+                return ConfiguracaoDns.naoAplicado(METODO,
+                    "Manifesto inválido ou adulterado: " + erroManifesto
+                        + ". Nada foi alterado.");
+            }
+
             boolean jaElevado = elevation.isProcessoElevado();
             PowerShellResult r = executor.executar(scriptReverter(manifesto), !jaElevado);
             if (r.isElevacaoNegada()) {
@@ -296,8 +303,8 @@ public class WindowsDnsChanger implements DnsChanger {
             List<String> estaticos = new ArrayList<>();
             if (!a.eraDhcp()) {
                 estaticos.addAll(a.ipv4Anterior());
+                estaticos.addAll(a.ipv6Anterior());
             }
-            estaticos.addAll(a.ipv6Anterior());
             if (!estaticos.isEmpty()) {
                 String ips = estaticos.stream()
                     .map(ip -> "'" + ip.replace("'", "''") + "'")

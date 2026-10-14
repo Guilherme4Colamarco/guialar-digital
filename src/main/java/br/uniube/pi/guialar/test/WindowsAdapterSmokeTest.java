@@ -4,6 +4,7 @@ import br.uniube.pi.guialar.aplicacao.adaptadores.windows.MockPowerShellExecutor
 import br.uniube.pi.guialar.aplicacao.adaptadores.windows.PowerShellResult;
 import br.uniube.pi.guialar.aplicacao.adaptadores.windows.WindowsBrowserDetector;
 import br.uniube.pi.guialar.aplicacao.adaptadores.windows.WindowsDnsChanger;
+import br.uniube.pi.guialar.aplicacao.adaptadores.windows.WindowsDnsManifestValidator;
 import br.uniube.pi.guialar.aplicacao.adaptadores.windows.WindowsDnsManifestStore;
 import br.uniube.pi.guialar.aplicacao.adaptadores.windows.WindowsUrlOpener;
 import br.uniube.pi.guialar.dominio.dns.ConfiguracaoDns;
@@ -35,6 +36,8 @@ public class WindowsAdapterSmokeTest {
         testGuiasNavegador();
         testScriptContemSetDns();
         testScriptsPreservamPoliticaDhcpEIpv6();
+        testDhcpComIpv6AnteriorSoReset();
+        testManifestoAdulteradoRejeitado();
 
         System.out.println();
         if (falhas == 0) {
@@ -262,6 +265,33 @@ public class WindowsAdapterSmokeTest {
         assertTrue("DHCP: só reset", desfazerDhcp.contains("-ResetServerAddresses")
             && !desfazerDhcp.contains("-ServerAddresses @("));
         ok("testScriptsPreservamPoliticaDhcpEIpv6");
+    }
+
+    private static void testDhcpComIpv6AnteriorSoReset() {
+        var dhcp = new WindowsDnsManifestStore.EstadoAdaptador("Wi-Fi", 12,
+            List.of("192.168.0.1"), List.of("2001:4860:4860::8888"), true);
+        String desfazer = WindowsDnsChanger.scriptReverter(WindowsDnsManifestStore.ManifestoDns.criar(
+            WindowsDnsChanger.METODO, "1.1.1.3", java.util.Map.of("Wi-Fi", dhcp)));
+        assertTrue("DHCP com IPv6 anterior: só reset, sem IPv6 estático",
+            desfazer.contains("-ResetServerAddresses")
+                && !desfazer.contains("-ServerAddresses @(")
+                && !desfazer.contains("2001:4860"));
+        ok("testDhcpComIpv6AnteriorSoReset");
+    }
+
+    private static void testManifestoAdulteradoRejeitado() {
+        var injetado = new WindowsDnsManifestStore.EstadoAdaptador(
+            "Wi-Fi\nWrite-Host hacked", 12, List.of("8.8.8.8"), List.of(), false);
+        var manifesto = WindowsDnsManifestStore.ManifestoDns.criar(
+            WindowsDnsChanger.METODO, "1.1.1.3", java.util.Map.of("x", injetado));
+        assertTrue("alias com newline rejeitado",
+            WindowsDnsManifestValidator.validar(manifesto) != null);
+        var ipRuim = new WindowsDnsManifestStore.EstadoAdaptador(
+            "Wi-Fi", 12, List.of("not-an-ip"), List.of(), false);
+        var m2 = WindowsDnsManifestStore.ManifestoDns.criar(
+            WindowsDnsChanger.METODO, "1.1.1.3", java.util.Map.of("Wi-Fi", ipRuim));
+        assertTrue("ipv4 inválido rejeitado", WindowsDnsManifestValidator.validar(m2) != null);
+        ok("testManifestoAdulteradoRejeitado");
     }
 
     // --- asserts ---

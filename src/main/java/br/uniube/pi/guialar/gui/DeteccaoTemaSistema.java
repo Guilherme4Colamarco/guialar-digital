@@ -1,6 +1,7 @@
 package br.uniube.pi.guialar.gui;
 
 import java.io.BufferedReader;
+import java.io.IOException;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.TimeUnit;
@@ -12,8 +13,12 @@ import java.util.regex.Pattern;
  */
 public final class DeteccaoTemaSistema {
 
-    private static final Pattern PORTAL_VARIANT = Pattern.compile("variant\\s+uint32\\s+(\\d+)");
+    private static final int TIMEOUT_TOTAL_SEC = 2;
+    private static final Pattern PORTAL_VARIANT = Pattern.compile(
+        "(?:variant\\s+uint32\\s+|<<uint32\\s+)(\\d+)", Pattern.CASE_INSENSITIVE);
     private static final Pattern GSETTINGS = Pattern.compile("'([^']*)'");
+    private static final Pattern REG_APPS_LIGHT = Pattern.compile(
+        "AppsUseLightTheme\\s+REG_DWORD\\s+0x([0-9a-fA-F]+)", Pattern.CASE_INSENSITIVE);
 
     private DeteccaoTemaSistema() {
     }
@@ -35,7 +40,7 @@ public final class DeteccaoTemaSistema {
     }
 
     private static Tema detectarPortalFreedesktop() {
-        String out = executarComando(3, "gdbus", "call", "--session",
+        String out = executarComando("gdbus", "call", "--session",
             "--dest", "org.freedesktop.portal.Desktop",
             "--object-path", "/org/freedesktop/portal/desktop",
             "--method", "org.freedesktop.portal.Settings.Read",
@@ -58,7 +63,7 @@ public final class DeteccaoTemaSistema {
     }
 
     private static Tema detectarGsettingsColorScheme() {
-        String out = executarComando(3, "gsettings", "get",
+        String out = executarComando("gsettings", "get",
             "org.gnome.desktop.interface", "color-scheme");
         if (out == null) {
             return null;
@@ -78,54 +83,48 @@ public final class DeteccaoTemaSistema {
     }
 
     private static boolean detectarWindows() {
-        try {
-            Process p = new ProcessBuilder("reg", "query",
-                "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
-                "/v", "AppsUseLightTheme")
-                .redirectErrorStream(true)
-                .start();
-            String out = lerSaida(p, 3);
-            if (out == null) {
-                return false;
-            }
-            if (out.contains("0x0")) {
-                return true;
-            }
-            return out.trim().endsWith("0x0");
-        } catch (Exception e) {
+        String out = executarComando("reg", "query",
+            "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+            "/v", "AppsUseLightTheme");
+        if (out == null) {
             return false;
         }
+        Matcher m = REG_APPS_LIGHT.matcher(out);
+        if (!m.find()) {
+            return false;
+        }
+        return Integer.parseInt(m.group(1), 16) == 0;
     }
 
-    private static String executarComando(int timeoutSec, String... cmd) {
+    private static String executarComando(String... cmd) {
         try {
             Process p = new ProcessBuilder(cmd).redirectErrorStream(true).start();
-            return lerSaida(p, timeoutSec);
-        } catch (Exception e) {
-            return null;
-        }
-    }
-
-    private static String lerSaida(Process p, int timeoutSec) {
-        try {
-            if (!p.waitFor(timeoutSec, TimeUnit.SECONDS)) {
+            StringBuilder sb = new StringBuilder();
+            Thread leitor = new Thread(() -> lerStream(p, sb), "guialar-tema-detect");
+            leitor.setDaemon(true);
+            leitor.start();
+            if (!p.waitFor(TIMEOUT_TOTAL_SEC, TimeUnit.SECONDS)) {
                 p.destroyForcibly();
                 return null;
             }
+            leitor.join(400);
             if (p.exitValue() != 0) {
                 return null;
             }
-            try (BufferedReader br = new BufferedReader(
-                new InputStreamReader(p.getInputStream(), StandardCharsets.UTF_8))) {
-                StringBuilder sb = new StringBuilder();
-                String line;
-                while ((line = br.readLine()) != null) {
-                    sb.append(line).append('\n');
-                }
-                return sb.toString();
-            }
+            return sb.toString();
         } catch (Exception e) {
             return null;
+        }
+    }
+
+    private static void lerStream(Process p, StringBuilder sb) {
+        try (BufferedReader br = new BufferedReader(
+            new InputStreamReader(p.getInputStream(), StandardCharsets.UTF_8))) {
+            String line;
+            while ((line = br.readLine()) != null) {
+                sb.append(line).append('\n');
+            }
+        } catch (IOException ignored) {
         }
     }
 }

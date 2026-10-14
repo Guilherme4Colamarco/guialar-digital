@@ -7,7 +7,7 @@ import br.uniube.pi.guialar.aplicacao.adaptadores.linux.LinuxDnsBackendSelector;
 import br.uniube.pi.guialar.aplicacao.adaptadores.linux.LinuxDnsManifestStore;
 import br.uniube.pi.guialar.aplicacao.adaptadores.linux.LinuxNmConexaoEstado;
 import br.uniube.pi.guialar.aplicacao.adaptadores.linux.LinuxNmManifestCodec;
-import br.uniube.pi.guialar.aplicacao.adaptadores.linux.LinuxNetplanSupport;
+import br.uniube.pi.guialar.aplicacao.adaptadores.linux.LinuxNetplanPrivilegedScript;
 import br.uniube.pi.guialar.aplicacao.adaptadores.linux.LinuxNmManifestValidator;
 import br.uniube.pi.guialar.aplicacao.adaptadores.linux.LinuxNmcliTerseParser;
 import br.uniube.pi.guialar.aplicacao.adaptadores.linux.LinuxPkexecMensagens;
@@ -254,49 +254,46 @@ public class ConfiguradorDnsLinuxService {
 
     private ConfiguracaoDns configurarNetplan(ServidorDns servidor) {
         try {
-            Path netplanDir = Path.of(LinuxSystemPaths.NETPLAN_GUAILAR).getParent();
-            String nomeArquivo = Path.of(LinuxSystemPaths.NETPLAN_GUAILAR).getFileName().toString();
-            Map<String, Map<String, LinuxNetplanSupport.InterfaceNetplan>> secoes =
-                LinuxNetplanSupport.lerInterfacesDoDiretorio(netplanDir, nomeArquivo);
-            if (secoes.isEmpty()) {
-                return ConfiguracaoDns.naoAplicado("Netplan",
-                    "Nenhuma interface ethernet/wifi encontrada em " + netplanDir + ". Nada foi alterado.");
-            }
-            List<String> comDnsProprio = LinuxNetplanSupport.separarComDnsProprio(secoes);
-            String aviso = comDnsProprio.isEmpty() ? null
-                : "Interfaces com DNS fixo nos YAMLs de " + netplanDir + " não foram alteradas: "
-                    + String.join(", ", comDnsProprio)
-                    + " (o GuiaLar não edita esses arquivos).";
-            if (secoes.isEmpty()) {
-                return ConfiguracaoDns.naoAplicado("Netplan",
-                    (aviso != null ? aviso + " " : "") + "Nada foi alterado.");
-            }
-
-            String conteudo = LinuxNetplanSupport.gerarYamlGuialar(secoes, servidor);
-            String script = "set -e\n"
-                + "GUAILAR_NETPLAN=" + LinuxShellEscape.shSingleQuote(LinuxSystemPaths.NETPLAN_GUAILAR) + "\n"
-                + "trap 'rm -f \"$GUAILAR_NETPLAN\"; netplan apply 2>/dev/null || true' ERR\n"
-                + "mkdir -p /etc/netplan\n"
-                + "cat > \"$GUAILAR_NETPLAN\" << '" + HEREDOC_TAG + "'\n"
-                + conteudo
-                + HEREDOC_TAG + "\n"
-                + "chmod 600 \"$GUAILAR_NETPLAN\" 2>/dev/null || true\n"
-                + "netplan generate\n"
-                + "netplan apply\n"
-                + "trap - ERR\n";
+            String script = LinuxNetplanPrivilegedScript.buildApplyScript(servidor);
             LinuxCommandResult elevado = runner.executarScriptPrivilegiado(script);
+            if (LinuxNetplanPrivilegedScript.parseStatus(elevado.stdout())
+                .filter("NO_INTERFACES"::equals).isPresent()) {
+                String avisoParcial = LinuxNetplanPrivilegedScript.parseAviso(elevado.stdout()).orElse(null);
+                String msg = "Nenhuma interface ethernet/wifi aplicável em /etc/netplan. Nada foi alterado.";
+                if (avisoParcial != null) {
+                    msg = "Interfaces com DNS fixo nos YAMLs de /etc/netplan não foram alteradas: "
+                        + avisoParcial + ". Nada foi alterado.";
+                }
+                return ConfiguracaoDns.naoAplicado("Netplan", msg);
+            }
             ConfiguracaoDns falha = interpretarPkexec("Netplan", elevado, false);
             if (falha != null) {
                 return falha;
             }
             salvarManifestoNetplan();
+            String aviso = LinuxNetplanPrivilegedScript.parseAviso(elevado.stdout()).orElse(null);
             if (aviso != null) {
-                return ConfiguracaoDns.sucessoComAviso(servidor, "Netplan", aviso);
+                String texto = "Interfaces com DNS fixo nos YAMLs de /etc/netplan não foram alteradas: "
+                    + aviso + " (o GuiaLar não edita esses arquivos).";
+                ConfiguracaoDns comAviso = ConfiguracaoDns.sucessoComAviso(servidor, "Netplan", texto);
+                return finalizarComVerificacaoParcialNetplan(comAviso, servidor);
             }
-            return ConfiguracaoDns.sucesso(servidor, "Netplan");
+            return finalizarComVerificacao(ConfiguracaoDns.sucesso(servidor, "Netplan"), servidor);
         } catch (Exception e) {
             return ConfiguracaoDns.erro("Netplan", e.getMessage());
         }
+    }
+
+    /**
+     * Netplan parcial: DNS só em parte das interfaces — não afirmar proteção plena sem verificação.
+     */
+    private ConfiguracaoDns finalizarComVerificacaoParcialNetplan(ConfiguracaoDns aplicado, ServidorDns servidor) {
+        List<ResultadoVerificacao> resultados = verificacaoDns.verificar();
+        if (VerificacaoDnsService.protecaoConfirmada(resultados)) {
+            return aplicado;
+        }
+        return ConfiguracaoDns.sucessoComAviso(servidor, aplicado.getMetodoConfiguracao(),
+            aplicado.getMensagem() + " A verificação ainda não confirmou o filtro em todas as interfaces.");
     }
 
     private ConfiguracaoDns configurarSystemdResolved(ServidorDns servidor) {
@@ -420,12 +417,7 @@ public class ConfiguradorDnsLinuxService {
     }
 
     private ConfiguracaoDns reverterNetplan() throws Exception {
-        String script = """
-            set -e
-            rm -f %s
-            netplan generate
-            netplan apply
-            """.formatted(LinuxSystemPaths.NETPLAN_GUAILAR);
+        String script = LinuxNetplanPrivilegedScript.buildRevertScript();
         LinuxCommandResult elevado = runner.executarScriptPrivilegiado(script);
         ConfiguracaoDns falha = interpretarPkexec("Netplan", elevado, true);
         if (falha != null) {

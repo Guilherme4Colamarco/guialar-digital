@@ -6,6 +6,7 @@ import br.uniube.pi.guialar.aplicacao.adaptadores.linux.LinuxDnsBackend;
 import br.uniube.pi.guialar.aplicacao.adaptadores.linux.LinuxDnsBackendSelector;
 import br.uniube.pi.guialar.aplicacao.adaptadores.linux.LinuxDnsFamiliesDetector;
 import br.uniube.pi.guialar.aplicacao.adaptadores.linux.LinuxDnsManifestStore;
+import br.uniube.pi.guialar.aplicacao.adaptadores.linux.LinuxNetplanPrivilegedScript;
 import br.uniube.pi.guialar.aplicacao.adaptadores.linux.LinuxNetplanSupport;
 import br.uniube.pi.guialar.aplicacao.adaptadores.linux.LinuxNmConexaoEstado;
 import br.uniube.pi.guialar.aplicacao.adaptadores.linux.LinuxNmManifestCodec;
@@ -53,6 +54,9 @@ public class LinuxDnsLogicTest {
         testExtrairInterfacesNetplan();
         testGerarYamlNetplan();
         testSepararComDnsProprioNetplan();
+        testNetplanScriptBackupApplyRevert();
+        testNetplanNaoAplicadoSemInterfaces();
+        testNetplanScriptFalhaGenerateRestaura();
         testManifestoAdulteradoNaoExecutaPkexec();
         testRevertNmUsaUuidComValoresEntreAspas();
         testValidatorRejeitaInjecaoIgnoreAutoDns();
@@ -389,6 +393,55 @@ public class LinuxDnsLogicTest {
         assertEq("removida eth1", List.of("eth1"), removidas);
         assertTrue("so eth0", secoes.get("ethernets").containsKey("eth0"));
         ok("testSepararComDnsProprioNetplan");
+    }
+
+    private static void testNetplanScriptBackupApplyRevert() {
+        String apply = LinuxNetplanPrivilegedScript.buildApplyScript(ServidorDns.getPadrao());
+        assertTrue("apply faz backup", apply.contains(LinuxSystemPaths.NETPLAN_GUAILAR_BACKUP));
+        assertTrue("apply restaura no trap", apply.contains("restaurar_guialar"));
+        assertTrue("apply valida generate", apply.contains("netplan generate"));
+        assertTrue("apply lê YAML como root", apply.contains("python3"));
+        String revert = LinuxNetplanPrivilegedScript.buildRevertScript();
+        assertTrue("revert faz backup antes de remover", revert.contains("cp -a \"$GUAILAR\" \"$BACKUP\""));
+        assertTrue("revert usa caminho fixo", revert.contains(LinuxSystemPaths.NETPLAN_GUAILAR));
+        ok("testNetplanScriptBackupApplyRevert");
+    }
+
+    private static void testNetplanNaoAplicadoSemInterfaces() throws Exception {
+        FakeLinuxCommandRunner runner = new FakeLinuxCommandRunner();
+        runner.setResultadoScriptPadrao(new LinuxCommandResult(0,
+            "GUAILAR_STATUS=NO_INTERFACES\n", "", true));
+        Path manifest = manifestTemp();
+        ConfiguradorDnsLinuxService svc = svcNetplan(runner, manifest);
+        InfoDistro debian = new InfoDistro(TipoDistro.DEBIAN, "Debian", "12", "Netplan");
+        ConfiguracaoDns r = svc.configurar(debian);
+        assertTrue("não aplicado", !r.isAplicado());
+        assertTrue("sem manifesto", !Files.exists(manifest));
+        ok("testNetplanNaoAplicadoSemInterfaces");
+    }
+
+    private static void testNetplanScriptFalhaGenerateRestaura() throws Exception {
+        FakeLinuxCommandRunner runner = new FakeLinuxCommandRunner();
+        runner.setResultadoScriptPadrao(new LinuxCommandResult(1, "", "generate failed", true));
+        Path manifest = manifestTemp();
+        ConfiguradorDnsLinuxService svc = svcNetplan(runner, manifest);
+        InfoDistro debian = new InfoDistro(TipoDistro.DEBIAN, "Debian", "12", "Netplan");
+        ConfiguracaoDns r = svc.configurar(debian);
+        assertTrue("falhou", !r.isAplicado());
+        assertTrue("script contém restauração", !runner.getScriptsPrivilegiados().isEmpty()
+            && runner.getScriptsPrivilegiados().get(0).contains("restaurar_guialar"));
+        ok("testNetplanScriptFalhaGenerateRestaura");
+    }
+
+    private static ConfiguradorDnsLinuxService svcNetplan(FakeLinuxCommandRunner runner, Path manifest)
+            throws Exception {
+        Path osRelease = Files.createTempFile("os-deb-", ".txt");
+        Files.writeString(osRelease, "ID=debian\n");
+        Path netplan = Files.createTempDirectory("np-");
+        LinuxDnsBackendSelector selector = new LinuxDnsBackendSelector(runner, osRelease, netplan);
+        runner.setComandoDisponivel("nmcli", false);
+        return new ConfiguradorDnsLinuxService(runner, selector,
+            new NixOsDnsSupport(runner, selector), new LinuxDnsManifestStore(manifest));
     }
 
     private static Path manifestTemp() throws Exception {

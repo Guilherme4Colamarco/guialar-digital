@@ -142,7 +142,7 @@ public class GuiaLarGui {
         temaSessaoSeguirSistema = seguirSistemaNestaSessao;
         SwingUtilities.invokeLater(() -> {
             try {
-                new GuiaLarGui().construir();
+                new GuiaLarGui().iniciarConstrucao();
             } catch (Exception ex) {
                 ex.printStackTrace();
                 JOptionPane.showMessageDialog(null,
@@ -152,8 +152,46 @@ public class GuiaLarGui {
         });
     }
 
-    private void construir() {
-        tema = resolverTemaInicial();
+    private void iniciarConstrucao() {
+        if (temaInicialLinhaComando != null) {
+            tema = temaInicialLinhaComando;
+            construirComTema();
+            return;
+        }
+        new SwingWorker<Tema, Void>() {
+            @Override
+            protected Tema doInBackground() {
+                if (temaSessaoSeguirSistema) {
+                    return DeteccaoTemaSistema.detectar();
+                }
+                return lerPreferenciaTemaForaDaEdt();
+            }
+
+            @Override
+            protected void done() {
+                try {
+                    tema = get();
+                } catch (Exception e) {
+                    tema = Tema.CLARO;
+                }
+                construirComTema();
+            }
+        }.execute();
+    }
+
+    private Tema lerPreferenciaTemaForaDaEdt() {
+        try {
+            String valor = Preferences.userNodeForPackage(GuiaLarGui.class).get(PREF_TEMA, "auto");
+            if ("auto".equalsIgnoreCase(valor)) {
+                return DeteccaoTemaSistema.detectar();
+            }
+            return Optional.ofNullable(Tema.de(valor)).orElse(DeteccaoTemaSistema.detectar());
+        } catch (Exception e) {
+            return DeteccaoTemaSistema.detectar();
+        }
+    }
+
+    private void construirComTema() {
         aplicarLookAndFeel();
 
         tipoSistema = detectorSistema.detectar();
@@ -195,28 +233,6 @@ public class GuiaLarGui {
         return raiz;
     }
 
-    private Tema resolverTemaInicial() {
-        if (temaInicialLinhaComando != null) {
-            return temaInicialLinhaComando;
-        }
-        if (temaSessaoSeguirSistema) {
-            return DeteccaoTemaSistema.detectar();
-        }
-        return lerPreferenciaTema();
-    }
-
-    private Tema lerPreferenciaTema() {
-        try {
-            String valor = Preferences.userNodeForPackage(GuiaLarGui.class).get(PREF_TEMA, "auto");
-            if ("auto".equalsIgnoreCase(valor)) {
-                return DeteccaoTemaSistema.detectar();
-            }
-            return Optional.ofNullable(Tema.de(valor)).orElse(DeteccaoTemaSistema.detectar());
-        } catch (Exception e) {
-            return DeteccaoTemaSistema.detectar();
-        }
-    }
-
     private void salvarPreferenciaTema(Tema escolhido) {
         try {
             Preferences.userNodeForPackage(GuiaLarGui.class)
@@ -225,15 +241,21 @@ public class GuiaLarGui {
         }
     }
 
+    private void garantirDefaultsSistemaCapturados() throws Exception {
+        if (uiDefaultsAntesDoEscuro != null) {
+            return;
+        }
+        UIManager.setLookAndFeel(UIManager.getSystemLookAndFeelClassName());
+        uiDefaultsAntesDoEscuro = new HashMap<>();
+        for (String chave : CHAVES_UI_TEMA_ESCURO) {
+            uiDefaultsAntesDoEscuro.put(chave, UIManager.get(chave));
+        }
+    }
+
     private void aplicarLookAndFeel() {
         try {
             if (tema.isEscuro()) {
-                if (uiDefaultsAntesDoEscuro == null) {
-                    uiDefaultsAntesDoEscuro = new HashMap<>();
-                    for (String chave : CHAVES_UI_TEMA_ESCURO) {
-                        uiDefaultsAntesDoEscuro.put(chave, UIManager.get(chave));
-                    }
-                }
+                garantirDefaultsSistemaCapturados();
                 UIManager.setLookAndFeel(javax.swing.plaf.metal.MetalLookAndFeel.class.getName());
                 aplicarCoresDialogosEBotoes();
             } else {
