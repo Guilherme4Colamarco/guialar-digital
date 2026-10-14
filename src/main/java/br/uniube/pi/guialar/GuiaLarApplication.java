@@ -34,7 +34,8 @@ public class GuiaLarApplication {
         configurarConsoleUtf8();
 
         if (deveUsarGui(args)) {
-            GuiaLarGui.iniciar();
+            TemaGui temaGui = resolverTemaGui(args);
+            GuiaLarGui.iniciar(temaGui.tema, temaGui.seguirSistema);
             return;
         }
 
@@ -65,6 +66,22 @@ public class GuiaLarApplication {
      * - Sem flags: usa a GUI quando há ambiente gráfico disponível,
      *   caindo para a CLI em ambientes headless (servidores, CI, containers).
      */
+    private record TemaGui(br.uniube.pi.guialar.gui.Tema tema, boolean seguirSistema) {
+    }
+
+    private static TemaGui resolverTemaGui(String[] args) {
+        for (String a : args) {
+            if (a.startsWith("--tema=")) {
+                String valor = a.substring("--tema=".length());
+                if ("auto".equalsIgnoreCase(valor)) {
+                    return new TemaGui(null, true);
+                }
+                return new TemaGui(br.uniube.pi.guialar.gui.Tema.de(valor), false);
+            }
+        }
+        return new TemaGui(null, false);
+    }
+
     private static boolean deveUsarGui(String[] args) {
         boolean forcarCli = Arrays.asList(args).contains("--cli");
         boolean forcarGui = Arrays.asList(args).contains("--gui");

@@ -7,6 +7,7 @@ import br.uniube.pi.guialar.aplicacao.adaptadores.linux.LinuxDnsBackendSelector;
 import br.uniube.pi.guialar.aplicacao.adaptadores.linux.LinuxDnsManifestStore;
 import br.uniube.pi.guialar.aplicacao.adaptadores.linux.LinuxNmConexaoEstado;
 import br.uniube.pi.guialar.aplicacao.adaptadores.linux.LinuxNmManifestCodec;
+import br.uniube.pi.guialar.aplicacao.adaptadores.linux.LinuxNetplanPrivilegedScript;
 import br.uniube.pi.guialar.aplicacao.adaptadores.linux.LinuxNmManifestValidator;
 import br.uniube.pi.guialar.aplicacao.adaptadores.linux.LinuxNmcliTerseParser;
 import br.uniube.pi.guialar.aplicacao.adaptadores.linux.LinuxPkexecMensagens;
@@ -253,22 +254,46 @@ public class ConfiguradorDnsLinuxService {
 
     private ConfiguracaoDns configurarNetplan(ServidorDns servidor) {
         try {
-            String conteudo = String.join("\n", montarYamlNetplan(servidor)) + "\n";
-            String script = "set -e\nmkdir -p /etc/netplan\n"
-                + "cat > " + LinuxSystemPaths.NETPLAN_GUAILAR + " << '" + HEREDOC_TAG + "'\n"
-                + conteudo
-                + HEREDOC_TAG + "\n"
-                + "netplan apply\n";
+            String script = LinuxNetplanPrivilegedScript.buildApplyScript(servidor);
             LinuxCommandResult elevado = runner.executarScriptPrivilegiado(script);
+            if (LinuxNetplanPrivilegedScript.parseStatus(elevado.stdout())
+                .filter("NO_INTERFACES"::equals).isPresent()) {
+                String avisoParcial = LinuxNetplanPrivilegedScript.parseAviso(elevado.stdout()).orElse(null);
+                String msg = "Nenhuma interface ethernet/wifi aplicável em /etc/netplan. Nada foi alterado.";
+                if (avisoParcial != null) {
+                    msg = "Interfaces com DNS fixo nos YAMLs de /etc/netplan não foram alteradas: "
+                        + avisoParcial + ". Nada foi alterado.";
+                }
+                return ConfiguracaoDns.naoAplicado("Netplan", msg);
+            }
             ConfiguracaoDns falha = interpretarPkexec("Netplan", elevado, false);
             if (falha != null) {
                 return falha;
             }
-            salvarManifestoSimples(LinuxDnsBackend.NETPLAN.getRotulo());
-            return ConfiguracaoDns.sucesso(servidor, "Netplan");
+            salvarManifestoNetplan();
+            String aviso = LinuxNetplanPrivilegedScript.parseAviso(elevado.stdout()).orElse(null);
+            if (aviso != null) {
+                String texto = "Interfaces com DNS fixo nos YAMLs de /etc/netplan não foram alteradas: "
+                    + aviso + " (o GuiaLar não edita esses arquivos).";
+                ConfiguracaoDns comAviso = ConfiguracaoDns.sucessoComAviso(servidor, "Netplan", texto);
+                return finalizarComVerificacaoParcialNetplan(comAviso, servidor);
+            }
+            return finalizarComVerificacao(ConfiguracaoDns.sucesso(servidor, "Netplan"), servidor);
         } catch (Exception e) {
             return ConfiguracaoDns.erro("Netplan", e.getMessage());
         }
+    }
+
+    /**
+     * Netplan parcial: DNS só em parte das interfaces — não afirmar proteção plena sem verificação.
+     */
+    private ConfiguracaoDns finalizarComVerificacaoParcialNetplan(ConfiguracaoDns aplicado, ServidorDns servidor) {
+        List<ResultadoVerificacao> resultados = verificacaoDns.verificar();
+        if (VerificacaoDnsService.protecaoConfirmada(resultados)) {
+            return aplicado;
+        }
+        return ConfiguracaoDns.sucessoComAviso(servidor, aplicado.getMetodoConfiguracao(),
+            aplicado.getMensagem() + " A verificação ainda não confirmou o filtro em todas as interfaces.");
     }
 
     private ConfiguracaoDns configurarSystemdResolved(ServidorDns servidor) {
@@ -392,11 +417,7 @@ public class ConfiguradorDnsLinuxService {
     }
 
     private ConfiguracaoDns reverterNetplan() throws Exception {
-        String script = """
-            set -e
-            rm -f %s
-            netplan apply
-            """.formatted(LinuxSystemPaths.NETPLAN_GUAILAR);
+        String script = LinuxNetplanPrivilegedScript.buildRevertScript();
         LinuxCommandResult elevado = runner.executarScriptPrivilegiado(script);
         ConfiguracaoDns falha = interpretarPkexec("Netplan", elevado, true);
         if (falha != null) {
@@ -444,6 +465,14 @@ public class ConfiguradorDnsLinuxService {
         manifestStore.salvar(props);
     }
 
+    private void salvarManifestoNetplan() throws IOException {
+        Properties props = new Properties();
+        props.setProperty(LinuxDnsManifestStore.KEY_METODO, LinuxDnsBackend.NETPLAN.getRotulo());
+        props.setProperty(LinuxDnsManifestStore.KEY_MODO, LinuxDnsManifestStore.MODO_APLICADO);
+        props.setProperty(LinuxDnsManifestStore.KEY_ARQUIVO_NETPLAN, LinuxSystemPaths.NETPLAN_GUAILAR);
+        manifestStore.salvar(props);
+    }
+
     private ConfiguracaoDns interpretarPkexec(String metodo, LinuxCommandResult r, boolean revertendo) {
         if (r.sucesso()) {
             return null;
@@ -460,26 +489,6 @@ public class ConfiguradorDnsLinuxService {
         return ConfiguracaoDns.erro(metodo,
             "A operação elevada falhou antes de concluir; o manifesto não foi salvo. "
                 + "Se algo mudou na rede, anote o horário e peça ajuda. " + detalhe);
-    }
-
-    private List<String> montarYamlNetplan(ServidorDns servidor) {
-        List<String> linhas = new ArrayList<>();
-        linhas.add("# Configurado por GuiaLar Digital");
-        linhas.add("network:");
-        linhas.add("  version: 2");
-        linhas.add("  ethernets:");
-        linhas.add("    all:");
-        linhas.add("      match:");
-        linhas.add("        name: en*");
-        linhas.add("      dhcp4: true");
-        linhas.add("      dhcp6: true");
-        linhas.add("      nameservers:");
-        linhas.add("        addresses:");
-        linhas.add("          - " + servidor.getPrimario());
-        linhas.add("          - " + servidor.getSecundario());
-        linhas.add("          - " + servidor.getPrimarioIpv6());
-        linhas.add("          - " + servidor.getSecundarioIpv6());
-        return linhas;
     }
 
     private List<String> montarResolvedDropin(ServidorDns servidor) {

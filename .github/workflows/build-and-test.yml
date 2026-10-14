@@ -34,8 +34,8 @@ jobs:
     - name: Compilar com Ant
       run: ant clean jar
 
-    - name: Testes Windows (mocks PowerShell)
-      run: ant test-windows
+    - name: Testes (Windows mocks + DNS Linux)
+      run: ant test
 
     - name: Pacote Windows lab
       run: ant dist-windows

@@ -181,6 +181,13 @@ public class WindowsDnsChanger implements DnsChanger {
                         + ". Nada a desfazer (ou DNS nunca foi aplicado por este app).");
             }
 
+            String erroManifesto = WindowsDnsManifestValidator.validar(manifesto);
+            if (erroManifesto != null) {
+                return ConfiguracaoDns.naoAplicado(METODO,
+                    "Manifesto inválido ou adulterado: " + erroManifesto
+                        + ". Nada foi alterado.");
+            }
+
             boolean jaElevado = elevation.isProcessoElevado();
             PowerShellResult r = executor.executar(scriptReverter(manifesto), !jaElevado);
             if (r.isElevacaoNegada()) {
@@ -264,8 +271,7 @@ public class WindowsDnsChanger implements DnsChanger {
         for (WindowsDnsManifestStore.EstadoAdaptador a : adaptadores) {
             sb.append(String.format("""
                 try {
-                  Set-DnsClientServerAddress -InterfaceIndex %d -ServerAddresses @('%s','%s')
-                  Set-DnsClientServerAddress -InterfaceIndex %d -AddressFamily IPv6 -ServerAddresses @('%s','%s')
+                  Set-DnsClientServerAddress -InterfaceIndex %d -ServerAddresses @('%s','%s','%s','%s')
                   $ok++
                 } catch {
                   Write-Error $_.Exception.Message
@@ -274,7 +280,6 @@ public class WindowsDnsChanger implements DnsChanger {
                 """,
                 a.interfaceIndex(),
                 servidor.getPrimario(), servidor.getSecundario(),
-                a.interfaceIndex(),
                 servidor.getPrimarioIpv6(), servidor.getSecundarioIpv6()));
         }
         sb.append("Write-Output \"APPLIED=$ok\"\n");
@@ -286,17 +291,23 @@ public class WindowsDnsChanger implements DnsChanger {
         StringBuilder sb = new StringBuilder();
         sb.append("$ErrorActionPreference = 'Stop'\n");
         for (WindowsDnsManifestStore.EstadoAdaptador a : manifesto.adaptadores().values()) {
-            if (a.eraDhcp() || a.ipv4Anterior().isEmpty()) {
-                sb.append(String.format("""
-                    try {
-                      Set-DnsClientServerAddress -InterfaceIndex %d -ResetServerAddresses
-                    } catch {
-                      Set-DnsClientServerAddress -InterfaceAlias '%s' -ResetServerAddresses
-                    }
-                    """, a.interfaceIndex(), a.alias().replace("'", "''")));
-            } else {
-                String ips = a.ipv4Anterior().stream()
-                    .map(ip -> "'" + ip + "'")
+            String alias = a.alias().replace("'", "''");
+            sb.append(String.format("""
+                try {
+                  Set-DnsClientServerAddress -InterfaceIndex %d -ResetServerAddresses
+                } catch {
+                  Set-DnsClientServerAddress -InterfaceAlias '%s' -ResetServerAddresses
+                }
+                """, a.interfaceIndex(), alias));
+
+            List<String> estaticos = new ArrayList<>();
+            if (!a.eraDhcp()) {
+                estaticos.addAll(a.ipv4Anterior());
+                estaticos.addAll(a.ipv6Anterior());
+            }
+            if (!estaticos.isEmpty()) {
+                String ips = estaticos.stream()
+                    .map(ip -> "'" + ip.replace("'", "''") + "'")
                     .reduce((x, y) -> x + "," + y)
                     .orElse("");
                 sb.append(String.format("""
@@ -305,16 +316,7 @@ public class WindowsDnsChanger implements DnsChanger {
                     } catch {
                       Set-DnsClientServerAddress -InterfaceAlias '%s' -ServerAddresses @(%s)
                     }
-                    """, a.interfaceIndex(), ips, a.alias().replace("'", "''"), ips));
-            }
-            if (!a.ipv6Anterior().isEmpty()) {
-                String ips6 = a.ipv6Anterior().stream()
-                    .map(ip -> "'" + ip + "'")
-                    .reduce((x, y) -> x + "," + y)
-                    .orElse("");
-                sb.append(String.format("""
-                    Set-DnsClientServerAddress -InterfaceIndex %d -AddressFamily IPv6 -ServerAddresses @(%s)
-                    """, a.interfaceIndex(), ips6));
+                    """, a.interfaceIndex(), ips, alias, ips));
             }
         }
         sb.append("Write-Output 'REVERTED'\n");
