@@ -57,6 +57,7 @@ public class LinuxDnsLogicTest {
         testNetplanScriptBackupApplyRevert();
         testNetplanNaoAplicadoSemInterfaces();
         testNetplanScriptFalhaGenerateRestaura();
+        testNetplanScriptExecutaDeVerdade();
         testManifestoAdulteradoNaoExecutaPkexec();
         testRevertNmUsaUuidComValoresEntreAspas();
         testValidatorRejeitaInjecaoIgnoreAutoDns();
@@ -418,6 +419,72 @@ public class LinuxDnsLogicTest {
         assertTrue("não aplicado", !r.isAplicado());
         assertTrue("sem manifesto", !Files.exists(manifest));
         ok("testNetplanNaoAplicadoSemInterfaces");
+    }
+
+    /** Roda o script gerado em bash de verdade (pasta temporária + netplan falso). Pula sem bash/python3. */
+    private static void testNetplanScriptExecutaDeVerdade() throws Exception {
+        if (!comandoNoPath("bash") || !comandoNoPath("python3")) {
+            ok("testNetplanScriptExecutaDeVerdade (pulado: sem bash/python3)");
+            return;
+        }
+        String script = LinuxNetplanPrivilegedScript.buildApplyScript(ServidorDns.getPadrao());
+        assertTrue("script embute o Python", script.contains("import os, re, sys"));
+
+        Path dir = Files.createTempDirectory("netplan-exec-");
+        Path netplan = Files.createDirectories(dir.resolve("netplan"));
+        Path bin = Files.createDirectories(dir.resolve("bin"));
+        Path log = dir.resolve("calls.log");
+        Path fake = bin.resolve("netplan");
+        Files.writeString(fake, "#!/bin/sh\necho \"$@\" >> '" + log + "'\n[ \"$1\" = generate ] && [ -f '"
+            + dir.resolve("falhar") + "' ] && exit 1\nexit 0\n");
+        fake.toFile().setExecutable(true);
+        Files.writeString(netplan.resolve("50-cloud-init.yaml"),
+            "network:\n  version: 2\n  ethernets:\n    enp1s0:\n      dhcp4: true\n");
+
+        // 1) aplica: grava o drop-in só com a interface e valida antes de aplicar
+        String saida = executarBash(script.replace("/etc/netplan", netplan.toString()), bin);
+        Path nosso = netplan.resolve("99-guialar-dns.yaml");
+        assertTrue("apply gerou o 99-guialar", Files.exists(nosso));
+        assertTrue("status OK", saida.contains("GUAILAR_STATUS=OK"));
+        String yaml = Files.exists(nosso) ? Files.readString(nosso) : "";
+        assertTrue("usa a interface existente", yaml.contains("\"enp1s0\":"));
+        assertTrue("DHCP não fura o filtro", yaml.contains("dhcp4-overrides"));
+        assertEq("generate antes de apply", List.of("generate", "apply"), Files.readAllLines(log));
+
+        // 2) netplan generate falha: o arquivo criado é removido
+        Files.delete(nosso);
+        Files.writeString(dir.resolve("falhar"), "x");
+        executarBash(script.replace("/etc/netplan", netplan.toString()), bin);
+        assertTrue("rollback remove o drop-in", !Files.exists(nosso));
+        Files.delete(dir.resolve("falhar"));
+
+        // 3) YAML sem interfaces: nada é escrito
+        Files.writeString(netplan.resolve("50-cloud-init.yaml"), "network:\n  version: 2\n  renderer: NetworkManager\n");
+        String semIf = executarBash(script.replace("/etc/netplan", netplan.toString()), bin);
+        assertTrue("sem interfaces: status", semIf.contains("GUAILAR_STATUS=NO_INTERFACES"));
+        assertTrue("sem interfaces: nada escrito", !Files.exists(nosso));
+        ok("testNetplanScriptExecutaDeVerdade");
+    }
+
+    private static boolean comandoNoPath(String cmd) {
+        for (String dir : System.getenv().getOrDefault("PATH", "").split(java.io.File.pathSeparator)) {
+            if (!dir.isEmpty() && Files.isExecutable(Path.of(dir, cmd))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static String executarBash(String script, Path binExtra) throws Exception {
+        ProcessBuilder pb = new ProcessBuilder("bash", "-s").redirectErrorStream(true);
+        pb.environment().put("PATH", binExtra + java.io.File.pathSeparator + System.getenv("PATH"));
+        Process p = pb.start();
+        try (var out = p.getOutputStream()) {
+            out.write(script.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        }
+        String saida = new String(p.getInputStream().readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+        p.waitFor();
+        return saida;
     }
 
     private static void testNetplanScriptFalhaGenerateRestaura() throws Exception {

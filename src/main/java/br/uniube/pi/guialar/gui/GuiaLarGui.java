@@ -288,10 +288,17 @@ public class GuiaLarGui {
     private void alternarTema() {
         String logAtual = areaLog == null ? "" : areaLog.getText();
         boolean detalhesVisiveis = detalhesTecnicos != null && detalhesTecnicos.isVisible();
+        boolean executarHabilitado = botaoExecutar == null || botaoExecutar.isEnabled();
+        boolean desfazerHabilitado = botaoDesfazer == null || botaoDesfazer.isEnabled();
+        boolean diagnosticoHabilitado = botaoDiagnostico == null || botaoDiagnostico.isEnabled();
         tema = tema.alternar();
         salvarPreferenciaTema(tema);
         aplicarLookAndFeel();
         frame.setContentPane(criarRaiz());
+        // Uma ação em andamento continua bloqueando os botões recriados.
+        botaoExecutar.setEnabled(executarHabilitado);
+        botaoDesfazer.setEnabled(desfazerHabilitado);
+        botaoDiagnostico.setEnabled(diagnosticoHabilitado);
         if (detalhesTecnicos != null) {
             detalhesTecnicos.setVisible(detalhesVisiveis);
         }

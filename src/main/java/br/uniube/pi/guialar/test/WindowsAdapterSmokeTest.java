@@ -38,6 +38,7 @@ public class WindowsAdapterSmokeTest {
         testScriptsPreservamPoliticaDhcpEIpv6();
         testDhcpComIpv6AnteriorSoReset();
         testManifestoAdulteradoRejeitado();
+        testAliasComAcentoAceito();
 
         System.out.println();
         if (falhas == 0) {
@@ -292,6 +293,26 @@ public class WindowsAdapterSmokeTest {
             WindowsDnsChanger.METODO, "1.1.1.3", java.util.Map.of("Wi-Fi", ipRuim));
         assertTrue("ipv4 inválido rejeitado", WindowsDnsManifestValidator.validar(m2) != null);
         ok("testManifestoAdulteradoRejeitado");
+    }
+
+    private static void testAliasComAcentoAceito() {
+        for (String alias : List.of("Conexão Local", "Conexão de Rede Sem Fio", "Rede Doméstica", "Ethernet (Realtek PCIe)")) {
+            var a = new WindowsDnsManifestStore.EstadoAdaptador(alias, 12, List.of("8.8.8.8"), List.of(), false);
+            var m = WindowsDnsManifestStore.ManifestoDns.criar(
+                WindowsDnsChanger.METODO, "1.1.1.3", java.util.Map.of(alias, a));
+            assertEq("alias aceito: " + alias, null, WindowsDnsManifestValidator.validar(m));
+        }
+        for (String ruim : List.of("Wi-Fi'; calc; '", "Wi-Fi*", "Wi-Fi$(x)")) {
+            var a = new WindowsDnsManifestStore.EstadoAdaptador(ruim, 12, List.of("8.8.8.8"), List.of(), false);
+            var m = WindowsDnsManifestStore.ManifestoDns.criar(
+                WindowsDnsChanger.METODO, "1.1.1.3", java.util.Map.of("x", a));
+            assertTrue("alias perigoso rejeitado: " + ruim, WindowsDnsManifestValidator.validar(m) != null);
+        }
+        var host = new WindowsDnsManifestStore.EstadoAdaptador("Wi-Fi", 12, List.of(), List.of("localhost"), false);
+        var m = WindowsDnsManifestStore.ManifestoDns.criar(
+            WindowsDnsChanger.METODO, "1.1.1.3", java.util.Map.of("Wi-Fi", host));
+        assertTrue("nome no lugar de IPv6 rejeitado", WindowsDnsManifestValidator.validar(m) != null);
+        ok("testAliasComAcentoAceito");
     }
 
     // --- asserts ---

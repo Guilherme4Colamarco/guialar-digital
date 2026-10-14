@@ -9,8 +9,9 @@ import java.util.regex.Pattern;
  */
 public final class WindowsDnsManifestValidator {
 
+    // Letras/números Unicode: adaptadores em português ("Conexão Local") têm acento.
     private static final Pattern ALIAS_PERMITIDO =
-        Pattern.compile("^[\\w .()\\-]{1,128}$");
+        Pattern.compile("^[\\p{L}\\p{M}\\p{N}_ .()\\-]{1,128}$");
     private static final int INDEX_MIN = 1;
     private static final int INDEX_MAX = 256;
 
@@ -82,7 +83,8 @@ public final class WindowsDnsManifestValidator {
     }
 
     private static boolean ipv6Valido(String ip) {
-        if (!textoSeguro(ip)) {
+        // Exige ':' para só aceitar literal IPv6; sem isso getByName faria consulta DNS de um nome.
+        if (!textoSeguro(ip) || ip.indexOf(':') < 0) {
             return false;
         }
         try {
