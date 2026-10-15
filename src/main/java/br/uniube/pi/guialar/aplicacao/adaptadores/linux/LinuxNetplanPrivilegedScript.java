@@ -31,7 +31,10 @@ public final class LinuxNetplanPrivilegedScript {
               netplan apply 2>/dev/null || true
             }
             trap restaurar_guialar ERR
-            PYTHON_OUT=$(python3 <<'GUAILAR_PY' 2>&1) || true
+            PYTHON_OUT=$(python3 - <<'GUAILAR_PY' 2>&1
+            %s
+            GUAILAR_PY
+            ) || true
             echo "$PYTHON_OUT"
             if echo "$PYTHON_OUT" | grep -q 'GUAILAR_STATUS=NO_INTERFACES'; then
               trap - ERR
@@ -171,7 +174,7 @@ def adicionar(secoes, secao, iface, dhcp4, dhcp6, nameservers):
 secoes = {}
 if os.path.isdir(NETPLAN_DIR):
     for nome in sorted(os.listdir(NETPLAN_DIR)):
-        if not nome.endswith('.yaml') or nome == ARQUIVO_GUIALAR:
+        if not nome.endswith('.yaml') or nome == ARQUIVO_GUAILAR:
             continue
         path = os.path.join(NETPLAN_DIR, nome)
         try:
