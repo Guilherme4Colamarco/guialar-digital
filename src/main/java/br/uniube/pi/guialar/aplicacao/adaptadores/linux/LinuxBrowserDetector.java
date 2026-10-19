@@ -36,17 +36,12 @@ public class LinuxBrowserDetector implements BrowserDetector {
         navegadores.addAll(detectarFirefox());
         navegadores.addAll(detectarChromium());
 
-        // Deduplicate por nome
+        // Um navegador por pasta de perfil: Firefox e Firefox ESR usam ~/.mozilla/firefox,
+        // e a extensão é configurada no perfil, não no executável.
         List<Navegador> unicos = new ArrayList<>();
         for (Navegador nav : navegadores) {
-            boolean jaExiste = false;
-            for (Navegador unico : unicos) {
-                if (unico.getNome().equals(nav.getNome()) &&
-                    unico.getCaminhoPerfil().equals(nav.getCaminhoPerfil())) {
-                    jaExiste = true;
-                    break;
-                }
-            }
+            boolean jaExiste = unicos.stream()
+                .anyMatch(u -> u.getCaminhoPerfil().equals(nav.getCaminhoPerfil()));
             if (!jaExiste) {
                 unicos.add(nav);
             }
@@ -91,14 +86,18 @@ public class LinuxBrowserDetector implements BrowserDetector {
                 detectado = true;
             }
 
+            // Métodos 4 e 5 só sabem o ID do próprio Firefox; sem isso, um Firefox
+            // em Snap (padrão do Ubuntu) fazia ESR, LibreWolf e Waterfox aparecerem.
+            boolean ehFirefox = executavel.equals("firefox");
+
             // Método 4: Flatpak
-            if (!detectado && flatpakInstalado("firefox")) {
+            if (!detectado && ehFirefox && flatpakInstalado("org.mozilla.firefox")) {
                 caminhoPerfil = HOME + "/.var/app/org.mozilla.firefox/.mozilla/firefox";
                 detectado = true;
             }
 
             // Método 5: Snap
-            if (!detectado && snapInstalado("firefox")) {
+            if (!detectado && ehFirefox && snapInstalado("firefox")) {
                 caminhoPerfil = HOME + "/snap/firefox/common/.mozilla/firefox";
                 detectado = true;
             }
