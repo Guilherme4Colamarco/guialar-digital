@@ -105,6 +105,14 @@
         <echo message="Distribuição criada em: ${dist.dir}"/>
     </target>
 
+    <!-- Target: package-linux - .deb (all), .rpm (noarch) e AppImage em dist/linux/ -->
+    <target name="package-linux" depends="jar" description="Pacotes Linux (.deb .rpm .AppImage)">
+        <exec executable="bash" failonerror="true">
+            <arg value="scripts/package-linux.sh"/>
+            <env key="VERSION" value="${version}"/>
+        </exec>
+    </target>
+
     <!-- Target: dist-windows - pacote fácil de copiar para PC de laboratório -->
     <target name="dist-windows" depends="jar,test-windows" description="Pacote para smoke test em Windows">
         <echo message="Criando pacote Windows (lab)..."/>
@@ -191,6 +199,7 @@ Expectativa em PC trancado:
         <echo message="  ant test / test-windows - Testes do adapter Windows (mocks)"/>
         <echo message="  ant dist           - Distribuição completa"/>
         <echo message="  ant dist-windows   - Pacote para copiar ao PC Windows do lab"/>
+        <echo message="  ant package-linux  - Gera .deb .rpm .AppImage em dist/linux/"/>
         <echo message="  ant run            - CLI (Linux: pkexec ao aplicar DNS)"/>
         <echo message="  ant run-gui        - Interface gráfica"/>
         <echo message="  ant run-diagnostico - Diagnóstico sem privilégios"/>

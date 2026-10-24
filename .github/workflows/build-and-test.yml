@@ -40,20 +40,51 @@ jobs:
     - name: Pacote Windows lab
       run: ant dist-windows
 
-    - name: Verificar JAR criado
+    - name: Ferramentas de empacotamento Linux
+      env:
+        APPIMAGETOOL_URL: https://github.com/AppImage/appimagetool/releases/download/1.9.0/appimagetool-x86_64.AppImage
+        APPIMAGETOOL_SHA256: 46fdd785094c7f6e545b61afcfb0f3d98d8eab243f644b4b17698c01d06083d1
+      run: |
+        sudo apt-get install -y rpm desktop-file-utils
+        curl -sSfL -o /tmp/appimagetool "$APPIMAGETOOL_URL"
+        echo "$APPIMAGETOOL_SHA256  /tmp/appimagetool" | sha256sum -c -
+        sudo install -m 755 /tmp/appimagetool /usr/local/bin/appimagetool
+
+    - name: Pacotes Linux (.deb .rpm .AppImage)
+      env:
+        APPIMAGE_EXTRACT_AND_RUN: 1
+      run: ant package-linux
+
+    - name: Verificar artefatos
       run: |
         ls -lh build/jar/guialar-digital.jar
         test -f build/jar/guialar-digital.jar
         test -f dist/windows/guialar-digital.jar
         test -f dist/windows/smoke-diagnostico-windows.bat
+        test -f dist/linux/guialar-digital_*_all.deb
+        test -f dist/linux/guialar-digital-*-1.noarch.rpm
+        test -f dist/linux/guialar-digital-*-x86_64.AppImage
 
-    - name: Upload do JAR
+    - name: Instalar o .deb e rodar o diagnóstico
+      env:
+        APPIMAGE_EXTRACT_AND_RUN: 1
+      run: |
+        sudo apt-get install -y ./dist/linux/guialar-digital_*_all.deb
+        guialar-digital --cli --diagnostico
+        ./dist/linux/guialar-digital-*-x86_64.AppImage --cli --diagnostico
+        sudo apt-get remove -y guialar-digital
+        test ! -e /usr/bin/guialar-digital
+
+    - name: Upload dos artefatos
       uses: actions/upload-artifact@v4
       with:
         name: guialar-digital-jar
         path: |
           build/jar/guialar-digital.jar
           dist/windows/
+          dist/linux/*.deb
+          dist/linux/*.rpm
+          dist/linux/*.AppImage
         retention-days: 7
 
   smoke-test-debian:

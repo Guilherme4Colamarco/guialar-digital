@@ -125,6 +125,7 @@ ant help            # Mostra ajuda sobre os comandos
 ant clean           # Remove arquivos compilados
 ant compile         # Compila o código-fonte
 ant jar             # Cria o JAR executável (padrão)
+ant package-linux   # Gera .deb, .rpm e .AppImage em dist/linux/ (precisa de dpkg-deb; rpmbuild e appimagetool são opcionais)
 ant test-windows    # Testes do adapter Windows (PowerShell mockado; roda no Linux)
 ant test-linux      # Testes Linux (nmcli/pkexec/NixOS mockados)
 ant test            # Windows + Linux
