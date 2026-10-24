@@ -104,7 +104,7 @@ public class DiagnosticoAmbiente {
         sb.append("Sistema: ").append(nomeSistema).append(" ").append(versaoSistema).append('\n');
         sb.append("Arquitetura: ").append(arquitetura).append('\n');
         sb.append("Processo elevado (admin): ").append(processoElevado ? "sim" : "não").append('\n');
-        sb.append("Pode solicitar elevação (UAC): ").append(podeElevar ? "sim (quando aplicar DNS)" : "não / bloqueado").append('\n');
+        sb.append("Pode pedir permissão de administrador: ").append(podeElevar ? "sim (quando aplicar DNS)" : "não / bloqueado").append('\n');
         sb.append("Status DNS GuiaLar: ").append(statusDns.getRotuloPt()).append('\n');
         if (notaDns != null && !notaDns.isBlank()) {
             sb.append("DNS atual: ").append(notaDns).append('\n');

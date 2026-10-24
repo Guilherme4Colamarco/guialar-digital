@@ -26,12 +26,16 @@ domínio/
 
 aplicacao/
   ├── deteccao/     → Detecção SO/distro/navegadores
-  ├── dns/          → Configuradores (Linux + Windows esboço)
+  ├── dns/          → Configuradores (Linux via pkexec, Windows via PowerShell/UAC)
   ├── extensao/     → Instalador uBlock Origin/Lite
   └── autorizacao/  → Sistema de autorização
 
+gui/
+  └── GuiaLarGui    → Interface gráfica (tema claro/escuro)
+
 cli/
-  └── GuiaLarCli    → Interface linha de comando
+  ├── GuiaLarCli        → Linha de comando (Linux)
+  └── GuiaLarWindowsCli → Linha de comando (Windows)
 ```
 
 ---
@@ -68,12 +72,13 @@ cli/
 
 ---
 
-## 🔧 Windows (Esboço Inicial)
+## ✅ Windows
 
-✅ Detecção básica de Windows  
-✅ Instruções manuais PowerShell (Set-DnsClientServerAddress)  
-✅ Notas sobre DoH no Edge/Chrome  
-⚠️ Implementação automática não completa (escopo fechado pelo usuário)
+✅ Diagnóstico sem precisar de administrador  
+✅ Aplica o DNS via PowerShell (`Set-DnsClientServerAddress`), pedindo UAC  
+✅ Manifesto em `%LOCALAPPDATA%\GuiaLar\` para desfazer (IPv4, IPv6 e DHCP)  
+✅ Guias de navegador (Edge/Chrome/Firefox) e DoH  
+⚠️ Testado com mocks; falta teste em PC real com Windows em português
 
 ---
 
@@ -184,7 +189,7 @@ ls ~/.config/google-chrome/
 ✅ Navegadores Firefox/Chromium  
 ✅ uBlock Origin / uBlock Origin Lite  
 ✅ Plano transparente + autorização polkit  
-✅ Windows esboço (não bloqueia Linux)  
+✅ Windows: diagnóstico, DNS via PowerShell/UAC e desfazer  
 
 ### Fora do Escopo (Conforme Decisão):
 ❌ macOS  
@@ -217,13 +222,17 @@ ls ~/.config/google-chrome/
 
 ## ✨ Próximos Passos Sugeridos (Fora desta Entrega)
 
-1. Testar em Fedora e Arch (atualmente testado em Ubuntu/Debian)
-2. Implementar detecção de navegadores via .desktop files
-3. Adicionar suporte a Flatpak/Snap
-4. Expandir esboço Windows (automação PowerShell)
-5. Adicionar testes unitários
-6. Melhorar detecção de DoH habilitado nos navegadores
-7. Criar script de desinstalação/limpeza
+1. Testar em máquinas reais: Ubuntu Server (Netplan + pkexec), Fedora, Arch e Windows em português
+2. Firefox: gravar o `policies.json` onde o Firefox lê (`/etc/firefox/policies/`, via pkexec)
+3. Opção uBlockDNS (PR #12): retomar depois da entrega, com as correções de segurança da revisão
+4. Melhorar detecção de DoH habilitado nos navegadores
+5. Unificar Linux e Windows atrás de uma mesma interface de DNS
+
+### Limitações conhecidas
+
+- **Extensão no Firefox (Linux):** o `policies.json` é gravado na pasta de perfil do usuário,
+  onde o Firefox não lê políticas. Na prática, o uBlock Origin precisa ser instalado pela loja.
+- **VPN, Docker e DoH do navegador** podem ignorar o DNS do sistema (ver README).
 
 ---
 

@@ -83,7 +83,10 @@ public class GuiaLarCli {
 
     private void imprimirCabecalho() {
         System.out.println("╔════════════════════════════════════════════════════════════════╗");
-        System.out.println("║              GuiaLar Digital - MVP Linux v0.1.0                ║");
+        String versao = GuiaLarCli.class.getPackage().getImplementationVersion();
+        String titulo = "GuiaLar Digital - Linux v" + (versao != null ? versao : "dev");
+        int sobra = 64 - titulo.length();
+        System.out.println("║" + " ".repeat(sobra / 2) + titulo + " ".repeat(sobra - sobra / 2) + "║");
         System.out.println("║    Assistente para DNS seguro e adblockers em Linux            ║");
         System.out.println("╚════════════════════════════════════════════════════════════════╝");
         System.out.println();

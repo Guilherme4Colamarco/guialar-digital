@@ -144,24 +144,20 @@ public class GuiaLarApplication {
             return;
         }
 
-        DetectorDistroService detectorDistro = new DetectorDistroService();
-        DetectorNavegadorService detectorNavegador = new DetectorNavegadorService();
-        ConfiguradorDnsService configuradorDns = new ConfiguradorDnsService();
-        InstaladorExtensaoService instaladorExtensao = new InstaladorExtensaoService();
-        AutorizadorService autorizador = new AutorizadorService();
-        VerificacaoDnsService verificacaoDns = new VerificacaoDnsService();
-
-        GuiaLarCli cli = new GuiaLarCli(
-            detectorDistro,
-            detectorNavegador,
-            configuradorDns,
-            instaladorExtensao,
-            autorizador,
-            verificacaoDns
-        );
-
         try {
+            GuiaLarCli cli = new GuiaLarCli(
+                new DetectorDistroService(),
+                new DetectorNavegadorService(),
+                new ConfiguradorDnsService(),
+                new InstaladorExtensaoService(),
+                new AutorizadorService(),
+                new VerificacaoDnsService()
+            );
             cli.run(args);
+        } catch (IllegalStateException e) {
+            // Ex.: rodando como root (sudo java). Mensagem já explica o que fazer.
+            System.err.println("\n❌ " + e.getMessage());
+            System.exit(1);
         } catch (Exception e) {
             System.err.println("\n❌ Erro fatal: " + e.getMessage());
             e.printStackTrace();
