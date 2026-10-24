@@ -1,106 +1,148 @@
 package br.uniube.pi.guialar.dominio.dns;
 
+import java.util.Arrays;
+import java.util.Locale;
+
 /**
- * Servidores DNS seguros disponíveis.
- * 
- * PADRÃO MVP: Cloudflare 1.1.1.1 for Families (Malware e Adulto)
- * - Bloqueia malware
- * - Bloqueia conteúdo adulto/18+
- * 
- * IPs IPv4:
- * - Primário: 1.1.1.3
- * - Secundário: 1.0.0.3
- * 
- * IPs IPv6:
- * - Primário: 2606:4700:4700::1113
- * - Secundário: 2606:4700:4700::1003
- * 
- * DNS-over-HTTPS (DoH) endpoint para navegadores:
- * - URL: https://family.cloudflare-dns.com/dns-query
- * - IMPORTANTE: NÃO use o DoH genérico (dns.cloudflare.com) - não bloqueia!
- * 
- * URLs de teste:
- * - malware.testcategory.com (deve retornar 0.0.0.0 se bloqueado)
- * - nudity.testcategory.com (deve retornar 0.0.0.0 se bloqueado)
- * 
- * Documentação: https://developers.cloudflare.com/1.1.1.1/setup/
- * 
- * LIMITAÇÕES CONHECIDAS:
- * - VPN: Conexões VPN podem sobrescrever o DNS do sistema
- * - Docker: Containers podem usar DNS próprio
- * - DoH no navegador: DNS-over-HTTPS configurado no navegador IGNORA COMPLETAMENTE
- *   o DNS do sistema. Configure o navegador para usar family.cloudflare-dns.com
+ * Opções de DNS do GuiaLar Digital.
+ *
+ * <ul>
+ *   <li>{@link #CLOUDFLARE_FAMILIES_MALWARE_ADULT} — IPs públicos no DNS do sistema
+ *       (malware + adulto), sem conta.</li>
+ *   <li>{@link #UBLOCKDNS} — uBlockDNS (ublockdns.com): bloqueio de anúncios/rastreadores
+ *       no DNS para <b>todos os apps</b> via cliente local (Linux/Windows). Exige perfil
+ *       na dashboard. Projeto independente — não é o uBlock Origin.</li>
+ * </ul>
  */
 public enum ServidorDns {
-    /**
-     * Cloudflare 1.1.1.1 for Families - Bloqueia Malware e Conteúdo Adulto
-     * Este é o DNS padrão do GuiaLar Digital MVP.
-     * 
-     * Proteção:
-     * - Bloqueia sites de malware
-     * - Bloqueia sites adultos (18+)
-     * - Não coleta histórico de navegação
-     */
     CLOUDFLARE_FAMILIES_MALWARE_ADULT(
+        "families",
         "Cloudflare for Families (Malware + Adulto)",
         "1.1.1.3",
         "1.0.0.3",
         "2606:4700:4700::1113",
         "2606:4700:4700::1003",
-        "Bloqueia malware e conteúdo adulto (18+)"
+        "Bloqueia malware e conteúdo adulto (18+) em todos os apps via DNS do sistema",
+        "https://family.cloudflare-dns.com/dns-query",
+        new String[]{"malware.testcategory.com", "nudity.testcategory.com"},
+        false,
+        false
+    ),
+
+    /**
+     * uBlockDNS: cliente local + DoH com perfil. Não use estes IPs sem o serviço instalado.
+     */
+    UBLOCKDNS(
+        "ublockdns",
+        "uBlockDNS (todos os apps neste computador)",
+        "127.0.0.1",
+        "127.0.0.1",
+        "::1",
+        "::1",
+        "Anúncios/rastreadores no DNS do sistema (cliente ublockdns.com — Linux e Windows)",
+        "https://ublockdns.com",
+        new String[]{"ads.adtidy.org", "doubleclick.net"},
+        true,
+        true
     );
 
+    private final String idCli;
     private final String nome;
     private final String primario;
     private final String secundario;
     private final String primarioIpv6;
     private final String secundarioIpv6;
     private final String descricao;
-    
-    // Constantes de teste e configuração
-    public static final String DOH_ENDPOINT = "https://family.cloudflare-dns.com/dns-query";
+    private final String dohEndpoint;
+    private final String[] dominiosTesteBloqueio;
+    private final boolean nxdomainComoBloqueio;
+    private final boolean requerClienteExterno;
+
+    /** @deprecated Prefer {@link #getDohEndpoint()} por servidor. */
+    public static final String DOH_ENDPOINT = CLOUDFLARE_FAMILIES_MALWARE_ADULT.dohEndpoint;
     public static final String URL_TESTE_MALWARE = "malware.testcategory.com";
     public static final String URL_TESTE_NUDITY = "nudity.testcategory.com";
+    public static final String UBLOCKDNS_SITE = "https://ublockdns.com";
+    public static final String UBLOCKDNS_SETUP = "https://ublockdns.com/";
 
-    ServidorDns(String nome, String primario, String secundario, 
-                String primarioIpv6, String secundarioIpv6, String descricao) {
+    ServidorDns(String idCli, String nome, String primario, String secundario,
+                String primarioIpv6, String secundarioIpv6, String descricao,
+                String dohEndpoint, String[] dominiosTesteBloqueio,
+                boolean nxdomainComoBloqueio, boolean requerClienteExterno) {
+        this.idCli = idCli;
         this.nome = nome;
         this.primario = primario;
         this.secundario = secundario;
         this.primarioIpv6 = primarioIpv6;
         this.secundarioIpv6 = secundarioIpv6;
         this.descricao = descricao;
+        this.dohEndpoint = dohEndpoint;
+        this.dominiosTesteBloqueio = dominiosTesteBloqueio;
+        this.nxdomainComoBloqueio = nxdomainComoBloqueio;
+        this.requerClienteExterno = requerClienteExterno;
     }
 
-    public String getNome() {
-        return nome;
+    public String getIdCli() { return idCli; }
+    public String getNome() { return nome; }
+    public String getPrimario() { return primario; }
+    public String getSecundario() { return secundario; }
+    public String getPrimarioIpv6() { return primarioIpv6; }
+    public String getSecundarioIpv6() { return secundarioIpv6; }
+    public String getDescricao() { return descricao; }
+    public String getDohEndpoint() { return dohEndpoint; }
+
+    public String[] getDominiosTesteBloqueio() {
+        return Arrays.copyOf(dominiosTesteBloqueio, dominiosTesteBloqueio.length);
     }
 
-    public String getPrimario() {
-        return primario;
+    public boolean isNxdomainComoBloqueio() { return nxdomainComoBloqueio; }
+
+    /** True = não aplicar IPs direto; usar assistente de instalação do cliente. */
+    public boolean isRequerClienteExterno() { return requerClienteExterno; }
+
+    public boolean apareceEm(String texto) {
+        if (texto == null || texto.isBlank() || this == UBLOCKDNS) {
+            return false;
+        }
+        return texto.contains(primario)
+            || texto.contains(secundario)
+            || texto.contains(primarioIpv6)
+            || texto.contains(secundarioIpv6);
     }
 
-    public String getSecundario() {
-        return secundario;
-    }
-
-    public String getPrimarioIpv6() {
-        return primarioIpv6;
-    }
-
-    public String getSecundarioIpv6() {
-        return secundarioIpv6;
-    }
-
-    public String getDescricao() {
-        return descricao;
+    public static ServidorDns getPadrao() {
+        return CLOUDFLARE_FAMILIES_MALWARE_ADULT;
     }
 
     /**
-     * Retorna o servidor DNS padrão do GuiaLar Digital.
-     * MVP: Sempre Cloudflare 1.1.1.3 / 1.0.0.3 (Families Malware + Adulto)
+     * {@code --dns=families|ublockdns|ublock|adguard}.
+     * {@code adguard} permanece como alias legado → uBlockDNS.
      */
-    public static ServidorDns getPadrao() {
-        return CLOUDFLARE_FAMILIES_MALWARE_ADULT;
+    public static ServidorDns deArgumento(String valor) {
+        if (valor == null || valor.isBlank()) {
+            return getPadrao();
+        }
+        String v = valor.trim().toLowerCase(Locale.ROOT);
+        return switch (v) {
+            case "families", "family", "cloudflare", "cf" -> CLOUDFLARE_FAMILIES_MALWARE_ADULT;
+            case "ublockdns", "ublock", "ublock-dns", "adguard", "ads", "anuncios", "anúncios"
+                -> UBLOCKDNS;
+            default -> throw new IllegalArgumentException(
+                "DNS desconhecido: " + valor + " (use families ou ublockdns)");
+        };
+    }
+
+    public static ServidorDns detectarNoTexto(String texto) {
+        if (texto == null || texto.isBlank()) {
+            return null;
+        }
+        if (CLOUDFLARE_FAMILIES_MALWARE_ADULT.apareceEm(texto)) {
+            return CLOUDFLARE_FAMILIES_MALWARE_ADULT;
+        }
+        return null;
+    }
+
+    public static boolean textoContemQualquerAlvo(String texto) {
+        return detectarNoTexto(texto) != null;
     }
 }

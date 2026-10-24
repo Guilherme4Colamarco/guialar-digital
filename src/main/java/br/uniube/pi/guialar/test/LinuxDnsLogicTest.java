@@ -41,6 +41,8 @@ public class LinuxDnsLogicTest {
         testNmPreferidoSobreNetplan();
         testParserEscapadoDoisPontos();
         testFamiliesNaoConfunde11130();
+        testServidorDnsUblockAliases();
+        testConfigurarUblockNaoUsaPkexecDns();
         testUmPkexecPorAplicarNm();
         testScriptContemIpv6EIgnoreAutoDns();
         testResolvedRestartNoScript();
@@ -100,6 +102,28 @@ public class LinuxDnsLogicTest {
         assertTrue("nao detecta 11130", !LinuxDnsFamiliesDetector.textoContemFamilies("nameserver 1.1.1.30"));
         assertTrue("detecta 113", LinuxDnsFamiliesDetector.textoContemFamilies("DNS=1.1.1.3"));
         ok("testFamiliesNaoConfunde11130");
+    }
+
+    private static void testServidorDnsUblockAliases() {
+        assertEq("ublock", ServidorDns.UBLOCKDNS, ServidorDns.deArgumento("ublockdns"));
+        assertEq("ublock alias", ServidorDns.UBLOCKDNS, ServidorDns.deArgumento("ublock"));
+        assertEq("families", ServidorDns.CLOUDFLARE_FAMILIES_MALWARE_ADULT,
+            ServidorDns.deArgumento("families"));
+        assertTrue("ublock requer cliente", ServidorDns.UBLOCKDNS.isRequerClienteExterno());
+        assertTrue("families nao requer cliente",
+            !ServidorDns.CLOUDFLARE_FAMILIES_MALWARE_ADULT.isRequerClienteExterno());
+        ok("testServidorDnsUblockAliases");
+    }
+
+    private static void testConfigurarUblockNaoUsaPkexecDns() throws Exception {
+        FakeLinuxCommandRunner runner = runnerComNmAtivo();
+        ConfiguradorDnsLinuxService svc = svc(runner, manifestTemp());
+        InfoDistro debian = new InfoDistro(TipoDistro.DEBIAN, "Debian", "12", "NetworkManager");
+        ConfiguracaoDns r = svc.configurar(debian, ServidorDns.UBLOCKDNS);
+        assertTrue("nao aplicado via IPs", !r.isAplicado());
+        assertTrue("mensagem ublock", r.getMensagem() != null && r.getMensagem().toLowerCase().contains("ublock"));
+        assertEq("sem pkexec", 0, runner.getScriptsPrivilegiados().size());
+        ok("testConfigurarUblockNaoUsaPkexecDns");
     }
 
     private static void testUmPkexecPorAplicarNm() throws Exception {

@@ -9,6 +9,7 @@ import br.uniube.pi.guialar.aplicacao.adaptadores.linux.LinuxDnsManifestStore;
 import br.uniube.pi.guialar.aplicacao.dns.ConfiguradorDnsLinuxService;
 import br.uniube.pi.guialar.aplicacao.dns.ConfiguradorDnsService;
 import br.uniube.pi.guialar.aplicacao.dns.ConfiguradorDnsWindowsService;
+import br.uniube.pi.guialar.aplicacao.dns.UblockDnsAssistenteService;
 import br.uniube.pi.guialar.aplicacao.extensao.InstaladorExtensaoService;
 import br.uniube.pi.guialar.aplicacao.verificacao.LinuxProtecaoStatusService;
 import br.uniube.pi.guialar.aplicacao.verificacao.VerificacaoDnsService;
@@ -25,11 +26,13 @@ import br.uniube.pi.guialar.dominio.verificacao.ResultadoVerificacao;
 import javax.swing.BorderFactory;
 import javax.swing.Box;
 import javax.swing.BoxLayout;
+import javax.swing.ButtonGroup;
 import javax.swing.JButton;
 import javax.swing.JFrame;
 import javax.swing.JLabel;
 import javax.swing.JOptionPane;
 import javax.swing.JPanel;
+import javax.swing.JRadioButton;
 import javax.swing.JScrollPane;
 import javax.swing.JTextArea;
 import javax.swing.SwingUtilities;
@@ -92,6 +95,7 @@ public class GuiaLarGui {
     private final ConfiguradorDnsService configuradorDns;
     private final ConfiguradorDnsLinuxService configuradorDnsLinux;
     private final ConfiguradorDnsWindowsService configuradorDnsWindows;
+    private final UblockDnsAssistenteService ublockDnsAssistente;
     private final InstaladorExtensaoService instaladorExtensao;
     private final VerificacaoDnsService verificacaoDns;
     private final DiagnosticoAmbienteService diagnosticoService;
@@ -114,6 +118,8 @@ public class GuiaLarGui {
     private InfoDistro distro;
     private DiagnosticoAmbiente diagnostico;
     private List<Navegador> navegadores = new ArrayList<>();
+    private ServidorDns servidorSelecionado = ServidorDns.getPadrao();
+    private JPanel cartaoDns;
 
     public GuiaLarGui() {
         this.detectorSistema = new DetectorSistemaService();
@@ -122,6 +128,7 @@ public class GuiaLarGui {
         this.configuradorDnsLinux = new ConfiguradorDnsLinuxService();
         this.configuradorDns = new ConfiguradorDnsService(configuradorDnsLinux);
         this.configuradorDnsWindows = new ConfiguradorDnsWindowsService();
+        this.ublockDnsAssistente = new UblockDnsAssistenteService();
         this.instaladorExtensao = new InstaladorExtensaoService();
         this.verificacaoDns = new VerificacaoDnsService();
         this.diagnosticoService = new DiagnosticoAmbienteService();
@@ -514,23 +521,59 @@ public class GuiaLarGui {
     }
 
     private JPanel criarCartaoDns() {
-        ServidorDns s = ServidorDns.getPadrao();
-        JPanel cartao = criarCartao("DNS Cloudflare Families");
-        cartao.add(linha("IPv4: " + s.getPrimario() + " / " + s.getSecundario()));
-        cartao.add(linha("IPv6: " + s.getPrimarioIpv6()));
-        cartao.add(linha("        " + s.getSecundarioIpv6()));
-        cartao.add(Box.createVerticalStrut(6));
-        cartao.add(linha("Proteção: malware + adulto (18+)"));
+        cartaoDns = criarCartao("DNS do sistema (escolha uma opção)");
+        ButtonGroup grupo = new ButtonGroup();
+        for (ServidorDns s : ServidorDns.values()) {
+            JRadioButton rb = new JRadioButton(s.getNome());
+            rb.setSelected(s == servidorSelecionado);
+            rb.setBackground(tema.cartao());
+            rb.setForeground(tema.texto());
+            rb.setFont(rb.getFont().deriveFont(Font.PLAIN, FONTE_CORPO));
+            rb.setAlignmentX(Component.LEFT_ALIGNMENT);
+            rb.addActionListener(e -> {
+                servidorSelecionado = s;
+                atualizarDetalheDnsNoCartao();
+                if (detalhesTecnicos != null) {
+                    // plano depende do DNS escolhido
+                }
+            });
+            grupo.add(rb);
+            cartaoDns.add(rb);
+            cartaoDns.add(linha("    " + s.getDescricao()));
+        }
+        cartaoDns.add(Box.createVerticalStrut(8));
+        cartaoDns.add(linhaDetalheDns());
         if (diagnostico != null) {
-            cartao.add(Box.createVerticalStrut(6));
+            cartaoDns.add(Box.createVerticalStrut(6));
             JLabel st = linha("Estado GuiaLar: " + diagnostico.getStatusDns().getRotuloPt());
             Color cor = diagnostico.getStatusDns() == StatusDns.APLICADO
                 ? tema.ok() : tema.atencao();
             st.setForeground(cor);
             st.setFont(st.getFont().deriveFont(Font.BOLD, FONTE_CORPO));
-            cartao.add(st);
+            cartaoDns.add(st);
         }
-        return cartao;
+        return cartaoDns;
+    }
+
+    private JLabel linhaDetalheDns() {
+        ServidorDns s = servidorSelecionado;
+        JLabel l = linha("IPv4 " + s.getPrimario() + " / " + s.getSecundario()
+            + " · DoH: " + s.getDohEndpoint());
+        l.setName("detalheDns");
+        return l;
+    }
+
+    private void atualizarDetalheDnsNoCartao() {
+        if (cartaoDns == null) {
+            return;
+        }
+        for (Component c : cartaoDns.getComponents()) {
+            if (c instanceof JLabel jl && "detalheDns".equals(jl.getName())) {
+                ServidorDns s = servidorSelecionado;
+                jl.setText("IPv4 " + s.getPrimario() + " / " + s.getSecundario()
+                    + " · DoH: " + s.getDohEndpoint());
+            }
+        }
     }
 
     private JPanel criarCartaoNavegadores() {
@@ -653,7 +696,7 @@ public class GuiaLarGui {
             return sb.toString();
         }
         StringBuilder sb = new StringBuilder();
-        ServidorDns s = ServidorDns.getPadrao();
+        ServidorDns s = servidorSelecionado != null ? servidorSelecionado : ServidorDns.getPadrao();
         int i = 1;
         sb.append(i++).append(". Configurar DNS do sistema para ").append(s.getNome())
           .append(" (IPv4: ").append(s.getPrimario()).append(" / ").append(s.getSecundario())
@@ -666,8 +709,12 @@ public class GuiaLarGui {
             sb.append(i++).append(". Configurar ").append(extensao)
               .append(" no ").append(nav.getNome()).append("\n");
         }
+        if (s == ServidorDns.UBLOCKDNS) {
+            sb.append(i++).append(". Instalar uBlockDNS (todos os apps) via ublockdns.com — "
+                + "complementa a extensão uBlock Origin na página\n");
+        }
         sb.append(i++).append(". Verificar o DNS com smoke test\n");
-        sb.append(i++).append(". Pós-instalação: DoH → ").append(ServidorDns.DOH_ENDPOINT).append("\n");
+        sb.append(i++).append(". Pós-instalação: DoH → ").append(s.getDohEndpoint()).append("\n");
         sb.append(i).append(". Privacidade: nenhum histórico de navegação é coletado.");
         return sb.toString();
     }
@@ -766,6 +813,11 @@ public class GuiaLarGui {
     }
 
     private void onExecutar() {
+        ServidorDns alvo = servidorSelecionado != null ? servidorSelecionado : ServidorDns.getPadrao();
+        if (alvo.isRequerClienteExterno()) {
+            onExecutarUblockDns();
+            return;
+        }
         if (tipoSistema.isWindows()) {
             onExecutarWindows();
             return;
@@ -773,10 +825,65 @@ public class GuiaLarGui {
         onExecutarLinux();
     }
 
+    private void onExecutarUblockDns() {
+        ublockDnsAssistente.abrirDashboard();
+        JOptionPane.showMessageDialog(frame, ublockDnsAssistente.textoAjudaGui(),
+            "uBlockDNS Setup", JOptionPane.INFORMATION_MESSAGE);
+        String profileId = JOptionPane.showInputDialog(frame,
+            "Cole o Profile ID do Setup (Linux/Windows → All apps on this computer):",
+            "uBlockDNS", JOptionPane.QUESTION_MESSAGE);
+        if (profileId == null || profileId.isBlank()) {
+            log("uBlockDNS: cancelado (sem Profile ID).");
+            log("Comando sugerido: "
+                + ublockDnsAssistente.comandoInstalacaoSugerido(tipoSistema, null));
+            return;
+        }
+        int ok = JOptionPane.showConfirmDialog(frame,
+            "Instalar/ativar uBlockDNS para TODOS os apps neste computador?\n\n"
+                + ublockDnsAssistente.comandoInstalacaoSugerido(tipoSistema, profileId.trim())
+                + "\n\nPode pedir senha de administrador.",
+            "Autorizar uBlockDNS", JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
+        if (ok != JOptionPane.YES_OPTION) {
+            log("uBlockDNS: instalação cancelada.");
+            return;
+        }
+        botaoExecutar.setEnabled(false);
+        botaoExecutar.setText("Instalando uBlockDNS...");
+        new SwingWorker<ConfiguracaoDns, Void>() {
+            @Override
+            protected ConfiguracaoDns doInBackground() {
+                return ublockDnsAssistente.instalar(tipoSistema, profileId.trim());
+            }
+
+            @Override
+            protected void done() {
+                try {
+                    ConfiguracaoDns r = get();
+                    log(r.isAplicado() ? "✓ " + r.getMensagem() : "○ " + r.getMensagem());
+                    log(ublockDnsAssistente.statusResumo());
+                    if (!r.isAplicado()) {
+                        JOptionPane.showMessageDialog(frame, r.getMensagem(),
+                            "uBlockDNS", JOptionPane.WARNING_MESSAGE);
+                    }
+                } catch (Exception ex) {
+                    log("Falha uBlockDNS: " + ex.getMessage());
+                } finally {
+                    botaoExecutar.setText(tipoSistema != null && tipoSistema.isWindows()
+                        ? "Tentar ativar proteção" : "Ativar proteção");
+                    botaoExecutar.setEnabled(true);
+                    onDiagnostico();
+                }
+            }
+        }.execute();
+    }
+
     private void onExecutarWindows() {
         StringBuilder msg = new StringBuilder();
         msg.append("Será solicitada elevação UAC apenas para alterar o DNS.\n\n");
-        msg.append("Alvo: Cloudflare Families (1.1.1.3 / 1.0.0.3).\n");
+        ServidorDns alvo = servidorSelecionado != null ? servidorSelecionado : ServidorDns.getPadrao();
+        msg.append("Alvo: ").append(alvo.getNome())
+            .append(" (").append(alvo.getPrimario()).append(" / ").append(alvo.getSecundario()).append(").\n");
+        msg.append("Aplica DNS do Windows para todos os apps neste computador.\n");
         msg.append("Um manifesto será salvo em %LOCALAPPDATA%\\GuiaLar\\ para Desfazer.\n\n");
         msg.append("Em PC de laboratório sem admin, o resultado esperado é\n");
         msg.append("\"DNS não aplicado\" — sem alterar o sistema.\n\n");
@@ -794,7 +901,7 @@ public class GuiaLarGui {
         new SwingWorker<ConfiguracaoDns, Void>() {
             @Override
             protected ConfiguracaoDns doInBackground() {
-                return configuradorDnsWindows.configurar();
+                return configuradorDnsWindows.configurar(alvo);
             }
 
             @Override
@@ -803,7 +910,7 @@ public class GuiaLarGui {
                     ConfiguracaoDns r = get();
                     if (r.isAplicado()) {
                         log("✓ " + r.getMensagem());
-                        log("Ainda configure DoH nos navegadores: " + ServidorDns.DOH_ENDPOINT);
+                        log("Ainda configure DoH nos navegadores: " + alvo.getDohEndpoint());
                     } else {
                         log("○ " + r.getMensagem());
                         log("Status: " + StatusDns.NAO_APLICADO.getRotuloPt()
@@ -873,8 +980,11 @@ public class GuiaLarGui {
                 System.setErr(ponte);
                 ConfiguracaoDns resultado = null;
                 try {
-                    System.out.println("[ETAPA 1/3] Configurando DNS seguro (pkexec só nesta etapa)...");
-                    resultado = configuradorDns.configurar(distro);
+                    ServidorDns alvo = servidorSelecionado != null
+                        ? servidorSelecionado : ServidorDns.getPadrao();
+                    System.out.println("[ETAPA 1/3] Configurando DNS " + alvo.getNome()
+                        + " (pkexec só nesta etapa)...");
+                    resultado = configuradorDns.configurar(distro, alvo);
                     if (resultado.isAguardandoUsuario()) {
                         System.out.println("  AGUARDANDO: " + resultado.getMensagem());
                     } else if (resultado.isAplicado()) {
@@ -903,7 +1013,7 @@ public class GuiaLarGui {
 
                     System.out.println("\n──────────────────────────────────────────────");
                     System.out.println("AÇÃO CRÍTICA: configure o DoH dos navegadores para:");
-                    System.out.println("  " + ServidorDns.DOH_ENDPOINT);
+                    System.out.println("  " + alvo.getDohEndpoint());
                 } catch (Exception ex) {
                     System.out.println("Erro durante a execução: " + ex.getMessage());
                 } finally {

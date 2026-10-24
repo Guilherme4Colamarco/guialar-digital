@@ -57,14 +57,15 @@ O GuiaLar Digital é uma aplicação **desktop Java** (não web) que automatiza 
 
 ### Funcionalidades do MVP Linux:
 
-1. **Mudar DNS do sistema** para Cloudflare 1.1.1.1 for Families
-   - **IPv4:** 1.1.1.3 (primário) / 1.0.0.3 (secundário)
-   - **IPv6:** 2606:4700:4700::1113 / 2606:4700:4700::1003
-   - Bloqueia malware e conteúdo adulto (18+)
+1. **Mudar DNS do sistema (todos os apps neste computador)** — escolha na GUI/CLI:
+   - **Cloudflare for Families** (padrão): 1.1.1.3 / 1.0.0.3 — malware + adulto (18+)
+   - **uBlockDNS** ([ublockdns.com](https://ublockdns.com)): anúncios/rastreadores via cliente
+     local (Linux e Windows → *All apps on this computer*). Exige Profile ID na dashboard.
+     Projeto independente — não é o uBlock Origin. CLI: `--dns=ublockdns`
 
 2. **Detectar navegadores instalados** e identificar base Firefox ou Chromium
 
-3. **Instalar adblocker** automaticamente:
+3. **Instalar adblocker** automaticamente (complementa o DNS):
    - uBlock Origin para navegadores base Firefox
    - uBlock Origin Lite para navegadores base Chromium
 
@@ -98,7 +99,8 @@ O GuiaLar Digital é uma aplicação **desktop Java** (não web) que automatiza 
 2. **Compile o projeto com Ant:**
    ```bash
    ant jar
-   ```
+   ant package-linux   # gera .deb .rpm .AppImage em dist/linux/
+```
 
    Ou para limpar e recompilar tudo:
    ```bash
@@ -125,6 +127,7 @@ ant help            # Mostra ajuda sobre os comandos
 ant clean           # Remove arquivos compilados
 ant compile         # Compila o código-fonte
 ant jar             # Cria o JAR executável (padrão)
+ant package-linux   # Gera .deb .rpm .AppImage em dist/linux/
 ant test-windows    # Testes do adapter Windows (PowerShell mockado; roda no Linux)
 ant test-linux      # Testes Linux (nmcli/pkexec/NixOS mockados)
 ant test            # Windows + Linux

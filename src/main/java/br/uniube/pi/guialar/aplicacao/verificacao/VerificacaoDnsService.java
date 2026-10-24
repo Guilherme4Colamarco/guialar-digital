@@ -9,153 +9,107 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Serviço para verificação pós-DNS (smoke test).
+ * Smoke test pós-DNS via stub local (resolvectl / dig @127.0.0.53 / Java).
  *
- * Testa se o DNS Cloudflare Families está funcionando corretamente:
- * - malware.testcategory.com deve retornar 0.0.0.0 (bloqueado)
- * - nudity.testcategory.com deve retornar 0.0.0.0 (bloqueado)
- * - example.com deve funcionar normalmente
- *
- * Testa via STUB LOCAL (resolvectl query ou dig @127.0.0.53) para provar
- * que o SISTEMA está usando o DNS Families, não testando diretamente contra 1.1.1.3.
- *
- * Funciona em Docker e VM.
+ * Cloudflare Families: malware/nudity → 0.0.0.0
+ * AdGuard: domínios de anúncio → NXDOMAIN ou 0.0.0.0
  */
 public class VerificacaoDnsService {
 
     private static final String IP_BLOQUEADO = "0.0.0.0";
-    private static final String IP_BLOQUEADO_IPv6 = "::";
-    private static final String DOMINIO_MALWARE = ServidorDns.URL_TESTE_MALWARE;
+    private static final String IP_BLOQUEADO_IPV6 = "::";
     private static final String DOMINIO_NORMAL = "example.com";
 
-    /**
-     * Executa verificação completa do DNS.
-     * Testa via STUB do sistema, não diretamente contra 1.1.1.3
-     *
-     * @return Lista de resultados da verificação
-     */
-    /**
-     * Proteção confirmada: domínio de malware bloqueado e example.com permitido (IPv4 via stub).
-     */
     public static boolean protecaoConfirmada(List<ResultadoVerificacao> resultados) {
+        return protecaoConfirmada(resultados, ServidorDns.getPadrao());
+    }
+
+    public static boolean protecaoConfirmada(List<ResultadoVerificacao> resultados, ServidorDns servidor) {
         if (resultados == null || resultados.isEmpty()) {
             return false;
         }
-        boolean malwareOk = false;
+        ServidorDns alvo = servidor != null ? servidor : ServidorDns.getPadrao();
+        String primeiroBloqueio = alvo.getDominiosTesteBloqueio()[0];
+        boolean bloqueioOk = false;
         boolean exampleOk = false;
         for (ResultadoVerificacao r : resultados) {
             if (!r.isSucesso()) {
                 continue;
             }
-            if (DOMINIO_MALWARE.equals(r.getUrl()) && "IPv4".equals(r.getMetodo()) && r.isBloqueado()) {
-                malwareOk = true;
+            if (primeiroBloqueio.equals(r.getUrl()) && "IPv4".equals(r.getMetodo()) && r.isBloqueado()) {
+                bloqueioOk = true;
             }
             if (DOMINIO_NORMAL.equals(r.getUrl()) && "IPv4".equals(r.getMetodo()) && !r.isBloqueado()) {
                 exampleOk = true;
             }
         }
-        return malwareOk && exampleOk;
+        return bloqueioOk && exampleOk;
     }
 
     public List<ResultadoVerificacao> verificar() {
+        return verificar(ServidorDns.getPadrao());
+    }
+
+    public List<ResultadoVerificacao> verificar(ServidorDns servidor) {
+        ServidorDns alvo = servidor != null ? servidor : ServidorDns.getPadrao();
         List<ResultadoVerificacao> resultados = new ArrayList<>();
 
-        System.out.println("🔍 Verificando DNS Cloudflare Families VIA STUB DO SISTEMA...");
-        System.out.println("   (não testando diretamente contra 1.1.1.3, mas via stub local)");
+        System.out.println("🔍 Verificando DNS " + alvo.getNome() + " VIA STUB DO SISTEMA...");
+        System.out.println("   (não testando diretamente contra " + alvo.getPrimario() + ")");
         System.out.println("─────────────────────────────────────────────────────────────────");
         System.out.println();
 
-        // Testar malware (IPv4)
-        resultados.add(testarBloqueioViaStub(
-            ServidorDns.URL_TESTE_MALWARE,
-            "IPv4",
-            true
-        ));
+        for (String dominio : alvo.getDominiosTesteBloqueio()) {
+            resultados.add(testarBloqueioViaStub(dominio, "IPv4", true, alvo.isNxdomainComoBloqueio()));
+            resultados.add(testarBloqueioViaStub(dominio, "IPv6", true, alvo.isNxdomainComoBloqueio()));
+        }
 
-        // Testar malware (IPv6)
-        resultados.add(testarBloqueioViaStub(
-            ServidorDns.URL_TESTE_MALWARE,
-            "IPv6",
-            true
-        ));
-
-        // Testar nudity (IPv4)
-        resultados.add(testarBloqueioViaStub(
-            ServidorDns.URL_TESTE_NUDITY,
-            "IPv4",
-            true
-        ));
-
-        // Testar nudity (IPv6)
-        resultados.add(testarBloqueioViaStub(
-            ServidorDns.URL_TESTE_NUDITY,
-            "IPv6",
-            true
-        ));
-
-        // Testar site normal (IPv4)
-        resultados.add(testarBloqueioViaStub(
-            "example.com",
-            "IPv4",
-            false
-        ));
-
-        // Testar site normal (IPv6)
-        resultados.add(testarBloqueioViaStub(
-            "example.com",
-            "IPv6",
-            false
-        ));
+        resultados.add(testarBloqueioViaStub(DOMINIO_NORMAL, "IPv4", false, false));
+        resultados.add(testarBloqueioViaStub(DOMINIO_NORMAL, "IPv6", false, false));
 
         return resultados;
     }
 
-    /**
-     * Testa bloqueio VIA STUB do sistema (resolvectl query ou dig @127.0.0.53).
-     * Isso prova que o SISTEMA está usando o DNS Families.
-     */
-    private ResultadoVerificacao testarBloqueioViaStub(String url, String tipoIp, boolean deveSerBloqueado) {
+    private ResultadoVerificacao testarBloqueioViaStub(
+            String url, String tipoIp, boolean deveSerBloqueado, boolean nxdomainComoBloqueio) {
         System.out.print("  Testando " + url + " (" + tipoIp + ") via stub... ");
 
         try {
-            // 1. Tentar com resolvectl query (prova que o sistema usa o DNS configurado)
             String ip = testarComResolvectl(url, tipoIp);
-
-            // 2. Se não funcionar, tentar dig @127.0.0.53 (stub do systemd-resolved)
             if (ip == null) {
                 ip = testarComDigStub(url, tipoIp);
             }
-
-            // 3. Se nada funcionar, tentar lookup Java nativo (usa o resolver do sistema)
             if (ip == null) {
                 ip = testarComJava(url);
             }
 
             if (ip == null) {
+                if (deveSerBloqueado && nxdomainComoBloqueio) {
+                    System.out.println("✅ Bloqueado (NXDOMAIN/sem resposta)");
+                    return ResultadoVerificacao.bloqueioConfirmado(url, "NXDOMAIN", tipoIp);
+                }
                 System.out.println("⚠️ Não foi possível resolver via stub");
                 return ResultadoVerificacao.erro(url, tipoIp, "Nenhum método de resolução via stub disponível");
             }
 
-            // Verificar se o resultado é esperado
-            boolean bloqueado = ip.equals(IP_BLOQUEADO) || ip.equals(IP_BLOQUEADO_IPv6);
+            boolean bloqueado = ip.equals(IP_BLOQUEADO)
+                || ip.equals(IP_BLOQUEADO_IPV6)
+                || "NXDOMAIN".equalsIgnoreCase(ip);
 
             if (deveSerBloqueado) {
                 if (bloqueado) {
                     System.out.println("✅ Bloqueado (" + ip + ")");
                     return ResultadoVerificacao.bloqueioConfirmado(url, ip, tipoIp);
-                } else {
-                    System.out.println("❌ NÃO bloqueado (" + ip + ")");
-                    return ResultadoVerificacao.naoFuncionou(url, ip, tipoIp);
                 }
-            } else {
-                if (!bloqueado) {
-                    System.out.println("✅ Permitido (" + ip + ")");
-                    return ResultadoVerificacao.permitido(url, ip, tipoIp);
-                } else {
-                    System.out.println("❌ Bloqueado incorretamente (" + ip + ")");
-                    return ResultadoVerificacao.naoFuncionou(url, ip, tipoIp);
-                }
+                System.out.println("❌ NÃO bloqueado (" + ip + ")");
+                return ResultadoVerificacao.naoFuncionou(url, ip, tipoIp);
             }
+            if (!bloqueado) {
+                System.out.println("✅ Permitido (" + ip + ")");
+                return ResultadoVerificacao.permitido(url, ip, tipoIp);
+            }
+            System.out.println("❌ Bloqueado incorretamente (" + ip + ")");
+            return ResultadoVerificacao.naoFuncionou(url, ip, tipoIp);
 
         } catch (Exception e) {
             System.out.println("⚠️ Erro: " + e.getMessage());
@@ -163,15 +117,9 @@ public class VerificacaoDnsService {
         }
     }
 
-    /**
-     * Testa usando dig via STUB (127.0.0.53 do systemd-resolved).
-     * Isso prova que o sistema está usando o DNS configurado.
-     */
     private String testarComDigStub(String url, String tipoIp) {
         try {
             String recordType = tipoIp.equals("IPv6") ? "AAAA" : "A";
-
-            // Testar via stub do systemd-resolved
             ProcessBuilder pb = new ProcessBuilder(
                 "dig", "@127.0.0.53", url, recordType, "+short"
             );
@@ -184,7 +132,6 @@ public class VerificacaoDnsService {
 
             String linha;
             String primeiraResposta = null;
-
             while ((linha = reader.readLine()) != null) {
                 linha = linha.trim();
                 if (!linha.isEmpty() && !linha.startsWith(";")) {
@@ -192,19 +139,13 @@ public class VerificacaoDnsService {
                     break;
                 }
             }
-
             process.waitFor();
-
             return primeiraResposta;
-
         } catch (Exception e) {
             return null;
         }
     }
 
-    /**
-     * Testa usando comando resolvectl (systemd-resolved).
-     */
     private String testarComResolvectl(String url, String tipoIp) {
         try {
             ProcessBuilder pb = new ProcessBuilder("resolvectl", "query", url);
@@ -217,42 +158,47 @@ public class VerificacaoDnsService {
 
             String linha;
             while ((linha = reader.readLine()) != null) {
-                // Procurar linha com IP
+                String lower = linha.toLowerCase();
+                if (lower.contains("nxdomain") || lower.contains("name error")
+                        || lower.contains("does not exist")) {
+                    process.waitFor();
+                    return "NXDOMAIN";
+                }
                 if (linha.contains(":") && (linha.contains("IN A") || linha.contains("IN AAAA"))) {
                     String[] partes = linha.trim().split("\\s+");
                     if (partes.length > 0) {
+                        process.waitFor();
                         return partes[0];
                     }
                 }
             }
-
             process.waitFor();
             return null;
-
         } catch (Exception e) {
             return null;
         }
     }
 
-    /**
-     * Testa usando lookup Java nativo (fallback).
-     */
     private String testarComJava(String url) {
         try {
             java.net.InetAddress addr = java.net.InetAddress.getByName(url);
             return addr.getHostAddress();
+        } catch (java.net.UnknownHostException e) {
+            return null;
         } catch (Exception e) {
             return null;
         }
     }
 
-    /**
-     * Exibe resumo dos resultados.
-     */
     public void exibirResumo(List<ResultadoVerificacao> resultados) {
+        exibirResumo(resultados, ServidorDns.getPadrao());
+    }
+
+    public void exibirResumo(List<ResultadoVerificacao> resultados, ServidorDns servidor) {
+        ServidorDns alvo = servidor != null ? servidor : ServidorDns.getPadrao();
         System.out.println();
         System.out.println("─────────────────────────────────────────────────────────────────");
-        System.out.println("RESUMO DA VERIFICAÇÃO:");
+        System.out.println("RESUMO DA VERIFICAÇÃO (" + alvo.getNome() + "):");
         System.out.println("─────────────────────────────────────────────────────────────────");
 
         int total = resultados.size();
@@ -276,12 +222,11 @@ public class VerificacaoDnsService {
 
         if (falhas == 0) {
             System.out.println("✅ TODOS OS TESTES PASSARAM!");
-            System.out.println("   O DNS Cloudflare Families está funcionando corretamente.");
+            System.out.println("   O DNS " + alvo.getNome() + " parece ativo no stub do sistema.");
         } else {
             System.out.println("⚠️ ALGUNS TESTES FALHARAM!");
             System.out.println("   Verifique a configuração do DNS.");
         }
-
         System.out.println();
     }
 }

@@ -41,6 +41,7 @@ public class GuiaLarWindowsCli {
         boolean desfazer = argList.contains("--desfazer") || argList.contains("--undo");
         boolean aplicar = argList.contains("--aplicar-dns") || argList.contains("--apply-dns");
         boolean abrirGuias = argList.contains("--abrir-guias") || argList.contains("--open-guides");
+        ServidorDns alvo = resolverDns(argList);
 
         imprimirCabecalho();
 
@@ -61,9 +62,24 @@ public class GuiaLarWindowsCli {
 
         exibirGuiasNavegadores(diag.getNavegadores(), abrirGuias);
 
-        if (aplicar || confirmar("Deseja tentar aplicar o DNS Cloudflare Families agora? (pode pedir UAC)")) {
+        String pergunta = "Deseja tentar aplicar " + alvo.getNome()
+            + " no DNS do Windows (todos os apps)? (pode pedir UAC)";
+        if (alvo.isRequerClienteExterno()) {
+            var assist = new br.uniube.pi.guialar.aplicacao.dns.UblockDnsAssistenteService();
+            System.out.println(assist.textoAjudaGui());
+            System.out.println("Status: " + assist.statusResumo());
+            System.out.println("Instale com Profile ID (PowerShell Admin):");
+            System.out.println("  " + assist.comandoInstalacaoSugerido(
+                br.uniube.pi.guialar.dominio.sistema.TipoSistema.WINDOWS, null));
+            System.out.println("Ou: java -jar guialar-digital.jar --gui  (assistente pede o ID)");
+            return;
+        }
+
+        if (aplicar || confirmar(pergunta)) {
             System.out.println();
-            ConfiguracaoDns resultado = dnsService.configurar(ServidorDns.getPadrao());
+            System.out.println("Alvo: " + alvo.getNome() + " (" + alvo.getPrimario()
+                + " / " + alvo.getSecundario() + ")");
+            ConfiguracaoDns resultado = dnsService.configurar(alvo);
             if (!resultado.isAplicado()) {
                 System.out.println();
                 System.out.println("Status final: DNS " + StatusDns.NAO_APLICADO.getRotuloPt() + ".");
@@ -72,13 +88,22 @@ public class GuiaLarWindowsCli {
             } else {
                 System.out.println();
                 System.out.println("Status final: DNS " + StatusDns.APLICADO.getRotuloPt() + ".");
-                System.out.println("Ainda configure DoH nos navegadores para " + ServidorDns.DOH_ENDPOINT);
+                System.out.println("Ainda configure DoH nos navegadores para " + alvo.getDohEndpoint());
             }
         } else {
             System.out.println("Aplicação de DNS ignorada. Diagnóstico e guias permanecem disponíveis.");
         }
 
         imprimirExpectativaLaboratorio(diag);
+    }
+
+    private static ServidorDns resolverDns(List<String> argList) {
+        for (String a : argList) {
+            if (a.startsWith("--dns=")) {
+                return ServidorDns.deArgumento(a.substring("--dns=".length()));
+            }
+        }
+        return ServidorDns.getPadrao();
     }
 
     private void exibirGuiasNavegadores(List<Navegador> navegadores, boolean abrir) {
@@ -135,6 +160,7 @@ public class GuiaLarWindowsCli {
         System.out.println("╚════════════════════════════════════════════════════════════════╝");
         System.out.println();
         System.out.println("Flags: --diagnostico  --aplicar-dns  --desfazer  --abrir-guias");
+        System.out.println("       --dns=families | --dns=ublockdns");
         System.out.println();
     }
 }

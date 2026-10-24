@@ -2,6 +2,7 @@ package br.uniube.pi.guialar.aplicacao.dns;
 
 import br.uniube.pi.guialar.dominio.distro.InfoDistro;
 import br.uniube.pi.guialar.dominio.dns.ConfiguracaoDns;
+import br.uniube.pi.guialar.dominio.dns.ServidorDns;
 
 /**
  * Fachada Linux legada: delega para {@link ConfiguradorDnsLinuxService}.
@@ -20,6 +21,10 @@ public class ConfiguradorDnsService {
 
     public ConfiguracaoDns configurar(InfoDistro distro) {
         return linux.configurar(distro);
+    }
+
+    public ConfiguracaoDns configurar(InfoDistro distro, ServidorDns servidor) {
+        return linux.configurar(distro, servidor);
     }
 
     public ConfiguracaoDns desfazer() {

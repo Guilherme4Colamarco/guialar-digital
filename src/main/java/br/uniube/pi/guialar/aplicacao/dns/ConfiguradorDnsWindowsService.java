@@ -27,12 +27,17 @@ public class ConfiguradorDnsWindowsService {
     }
 
     public ConfiguracaoDns configurar(ServidorDns servidor) {
+        ServidorDns alvo = servidor != null ? servidor : ServidorDns.getPadrao();
+        if (alvo.isRequerClienteExterno()) {
+            return ConfiguracaoDns.erro("uBlockDNS",
+                "Use o assistente uBlockDNS (perfil + instalador Windows), não Set-DnsClientServerAddress direto.");
+        }
         System.out.println("Configurando DNS no Windows via " + WindowsDnsChanger.METODO + "...");
-        System.out.println("Alvo: " + servidor.getNome()
-            + " (" + servidor.getPrimario() + " / " + servidor.getSecundario() + ")");
+        System.out.println("Alvo: " + alvo.getNome()
+            + " (" + alvo.getPrimario() + " / " + alvo.getSecundario() + ")");
         System.out.println();
 
-        ConfiguracaoDns resultado = changer.configurar(servidor);
+        ConfiguracaoDns resultado = changer.configurar(alvo);
 
         if (resultado.isAplicado()) {
             System.out.println("✓ " + resultado.getMensagem());
@@ -47,7 +52,7 @@ public class ConfiguradorDnsWindowsService {
             System.out.println("Instruções manuais (se tiver admin):");
             System.out.println(changer.getInstrucoesReversao().replace("desfazer", "aplicar/desfazer"));
             System.out.println("  Set-DnsClientServerAddress -InterfaceAlias \"Wi-Fi\" -ServerAddresses (`\""
-                + servidor.getPrimario() + "`\",`\"" + servidor.getSecundario() + "`\")");
+                + alvo.getPrimario() + "`\",`\"" + alvo.getSecundario() + "`\")");
         }
         return resultado;
     }
