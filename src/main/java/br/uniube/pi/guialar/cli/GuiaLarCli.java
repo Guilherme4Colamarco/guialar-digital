@@ -33,6 +33,7 @@ public class GuiaLarCli {
     private final InstaladorExtensaoService instaladorExtensao;
     private final AutorizadorService autorizador;
     private final VerificacaoDnsService verificacaoDns;
+    private ServidorDns servidorSelecionado = ServidorDns.getPadrao();
 
     public GuiaLarCli(
             DetectorDistroService detectorDistro,
@@ -50,6 +51,7 @@ public class GuiaLarCli {
     }
 
     public void run(String... args) throws Exception {
+        servidorSelecionado = resolverDns(args);
         imprimirCabecalho();
         
         InfoDistro distro = detectarSistema();
@@ -68,11 +70,31 @@ public class GuiaLarCli {
             System.exit(0);
         }
 
+        if (servidorSelecionado.isRequerClienteExterno()) {
+            var assist = new br.uniube.pi.guialar.aplicacao.dns.UblockDnsAssistenteService();
+            System.out.println(assist.textoAjudaGui());
+            System.out.println("Status: " + assist.statusResumo());
+            System.out.println("Instale com Profile ID:");
+            System.out.println("  " + assist.comandoInstalacaoSugerido(null, null));
+            System.out.println("Ou use a GUI: java -jar guialar-digital.jar --gui");
+            configurarNavegadores(navegadores);
+            return;
+        }
+
         configurarDns(distro);
         verificarDns();
         configurarNavegadores(navegadores);
 
         imprimirRodape();
+    }
+
+    private static ServidorDns resolverDns(String... args) {
+        for (String a : args) {
+            if (a != null && a.startsWith("--dns=")) {
+                return ServidorDns.deArgumento(a.substring("--dns=".length()));
+            }
+        }
+        return ServidorDns.getPadrao();
     }
 
     private void imprimirCabecalho() {
@@ -120,10 +142,10 @@ public class GuiaLarCli {
     private PlanoAcao criarPlanoAcao(InfoDistro distro, List<Navegador> navegadores) {
         PlanoAcao plano = new PlanoAcao();
         
-        ServidorDns servidor = ServidorDns.getPadrao();
+        ServidorDns servidor = servidorSelecionado;
         
         plano.adicionarAcao(
-            "Configurar DNS do sistema para " + servidor.getNome() + 
+            "Configurar DNS do sistema (todos os apps) para " + servidor.getNome() + 
             " (IPv4: " + servidor.getPrimario() + " / " + servidor.getSecundario() + 
             ", IPv6: " + servidor.getPrimarioIpv6() + " / " + servidor.getSecundarioIpv6() + ")", 
             true
@@ -151,7 +173,7 @@ public class GuiaLarCli {
         );
         
         plano.adicionarAcao(
-            "   Firefox/Chrome devem usar DoH: https://family.cloudflare-dns.com/dns-query"
+            "   Firefox/Chrome devem usar DoH: " + servidor.getDohEndpoint()
         );
         
         plano.adicionarAcao(
@@ -171,16 +193,17 @@ public class GuiaLarCli {
         System.out.println("\n🌐 ETAPA 3: Configurando DNS seguro...");
         System.out.println("─────────────────────────────────────────────────────────────────");
         
-        ServidorDns servidor = ServidorDns.getPadrao();
-        System.out.println("Servidor DNS: " + servidor.getNome());
+        ServidorDns servidor = servidorSelecionado;
+        System.out.println("Servidor DNS (todos os apps neste computador): " + servidor.getNome());
         System.out.println("  • IPv4 Primário: " + servidor.getPrimario());
         System.out.println("  • IPv4 Secundário: " + servidor.getSecundario());
         System.out.println("  • IPv6 Primário: " + servidor.getPrimarioIpv6());
         System.out.println("  • IPv6 Secundário: " + servidor.getSecundarioIpv6());
         System.out.println("  • Proteção: " + servidor.getDescricao());
+        System.out.println("  • DoH: " + servidor.getDohEndpoint());
         System.out.println();
         
-        ConfiguracaoDns resultado = configuradorDns.configurar(distro);
+        ConfiguracaoDns resultado = configuradorDns.configurar(distro, servidor);
 
         if (resultado.isAguardandoUsuario()) {
             System.out.println("⏳ Aguardando você aplicar: " + resultado.getMensagem());
@@ -201,8 +224,8 @@ public class GuiaLarCli {
         System.out.println("─────────────────────────────────────────────────────────────────");
         System.out.println();
         
-        List<ResultadoVerificacao> resultados = verificacaoDns.verificar();
-        verificacaoDns.exibirResumo(resultados);
+        List<ResultadoVerificacao> resultados = verificacaoDns.verificar(servidorSelecionado);
+        verificacaoDns.exibirResumo(resultados, servidorSelecionado);
     }
 
     private void configurarNavegadores(List<Navegador> navegadores) {
@@ -233,11 +256,12 @@ public class GuiaLarCli {
         System.out.println("║                    Configuração Concluída                      ║");
         System.out.println("╚════════════════════════════════════════════════════════════════╝");
         System.out.println();
+        ServidorDns s = servidorSelecionado;
         System.out.println("Revise o resumo da verificação acima antes de considerar a proteção ativa.");
-        System.out.println("  • IPv4: 1.1.1.3 / 1.0.0.3");
-        System.out.println("  • IPv6: 2606:4700:4700::1113 / 2606:4700:4700::1003");
-        System.out.println("  • Proteção contra malware");
-        System.out.println("  • Bloqueio de conteúdo adulto (18+)");
+        System.out.println("  • Alvo: " + s.getNome());
+        System.out.println("  • IPv4: " + s.getPrimario() + " / " + s.getSecundario());
+        System.out.println("  • IPv6: " + s.getPrimarioIpv6() + " / " + s.getSecundarioIpv6());
+        System.out.println("  • " + s.getDescricao());
         System.out.println();
         System.out.println("⚠️  AÇÃO CRÍTICA NECESSÁRIA - DNS-over-HTTPS (DoH)");
         System.out.println("─────────────────────────────────────────────────────────────────");
@@ -245,37 +269,10 @@ public class GuiaLarCli {
         System.out.println("Se seus navegadores usam DNS Seguro/DoH, eles IGNORAM o DNS do");
         System.out.println("sistema e o filtro NÃO FUNCIONA!");
         System.out.println();
-        System.out.println("Configure DoH dos navegadores para Cloudflare FAMILIES:");
+        System.out.println("Configure DoH dos navegadores para:");
+        System.out.println("  " + s.getDohEndpoint());
         System.out.println();
-        System.out.println("Firefox:");
-        System.out.println("  1. about:preferences#general → Configurações de Rede");
-        System.out.println("  2. DNS sobre HTTPS → Personalizado");
-        System.out.println("  3. URL: https://family.cloudflare-dns.com/dns-query");
-        System.out.println();
-        System.out.println("Chrome/Edge/Brave:");
-        System.out.println("  1. Configurações → Privacidade → Segurança");
-        System.out.println("  2. Usar DNS seguro → Personalizado");
-        System.out.println("  3. URL: https://family.cloudflare-dns.com/dns-query");
-        System.out.println();
-        System.out.println("⚠️  NÃO use o DoH genérico (dns.cloudflare.com) - não bloqueia!");
-        System.out.println();
-        System.out.println("─────────────────────────────────────────────────────────────────");
-        System.out.println();
-        System.out.println("📋 VERIFICAÇÃO E TESTES:");
-        System.out.println();
-        System.out.println("1. Verificar DNS do sistema:");
-        System.out.println("   • Debian/Ubuntu: resolvectl status");
-        System.out.println("   • Fedora: nmcli device show | grep DNS");
-        System.out.println("   • Arch: resolvectl status");
-        System.out.println();
-        System.out.println("2. Testar bloqueio (deve retornar 0.0.0.0):");
-        System.out.println("   dig @1.1.1.3 malware.testcategory.com");
-        System.out.println("   dig @1.1.1.3 nudity.testcategory.com");
-        System.out.println();
-        System.out.println("3. Testar site normal (deve funcionar):");
-        System.out.println("   dig @1.1.1.3 example.com");
-        System.out.println();
-        System.out.println("4. Reinicie seus navegadores para aplicar as configurações");
+        System.out.println("Flags: --dns=families | --dns=adguard (alias: --dns=ublock)");
         System.out.println();
         System.out.println("ℹ️  Nenhum dado foi coletado durante a configuração.");
         System.out.println();

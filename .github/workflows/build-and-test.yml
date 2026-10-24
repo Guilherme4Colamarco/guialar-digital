@@ -40,12 +40,27 @@ jobs:
     - name: Pacote Windows lab
       run: ant dist-windows
 
+    - name: Dependências pacotes Linux
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y rpm
+        curl -sL -o /tmp/appimagetool \
+          https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+        chmod +x /tmp/appimagetool
+        sudo mv /tmp/appimagetool /usr/local/bin/appimagetool
+
+    - name: Pacotes Linux (.deb .rpm .AppImage)
+      run: ant package-linux
+
     - name: Verificar JAR criado
       run: |
         ls -lh build/jar/guialar-digital.jar
         test -f build/jar/guialar-digital.jar
         test -f dist/windows/guialar-digital.jar
         test -f dist/windows/smoke-diagnostico-windows.bat
+        test -f dist/linux/guialar-digital_*_amd64.deb
+        test -f dist/linux/guialar-digital-*-*.rpm
+        test -f dist/linux/guialar-digital-*-amd64.AppImage
 
     - name: Upload do JAR
       uses: actions/upload-artifact@v4
@@ -54,6 +69,9 @@ jobs:
         path: |
           build/jar/guialar-digital.jar
           dist/windows/
+          dist/linux/*.deb
+          dist/linux/*.rpm
+          dist/linux/*.AppImage
         retention-days: 7
 
   smoke-test-debian:

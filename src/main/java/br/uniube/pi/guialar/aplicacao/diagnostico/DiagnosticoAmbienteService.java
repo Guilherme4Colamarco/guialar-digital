@@ -73,25 +73,37 @@ public class DiagnosticoAmbienteService {
         StatusDns status;
         String notaDns;
 
-        ServidorDns alvo = ServidorDns.getPadrao();
+        ServidorDns detectado = null;
+        for (String ip : dnsAtuais) {
+            for (ServidorDns candidato : ServidorDns.values()) {
+                if (candidato.getPrimario().equals(ip) || candidato.getSecundario().equals(ip)
+                        || candidato.getPrimarioIpv6().equalsIgnoreCase(ip)
+                        || candidato.getSecundarioIpv6().equalsIgnoreCase(ip)) {
+                    detectado = candidato;
+                    break;
+                }
+            }
+            if (detectado != null) {
+                break;
+            }
+        }
         boolean manifestoExiste = manifestoStore.existe();
-        boolean dnsCorresponde = dnsAtuais.contains(alvo.getPrimario())
-            || dnsAtuais.contains(alvo.getSecundario());
+        boolean dnsCorresponde = detectado != null;
 
         if (motivoLeitura != null && dnsAtuais.isEmpty()) {
             status = StatusDns.LEITURA_BLOQUEADA;
             notaDns = motivoLeitura;
         } else if (dnsCorresponde && manifestoExiste) {
             status = StatusDns.APLICADO;
-            notaDns = "Cloudflare Families detectado e manifesto presente.";
+            notaDns = detectado.getNome() + " detectado e manifesto presente.";
         } else if (dnsCorresponde) {
             status = StatusDns.PARCIAL;
-            notaDns = "DNS Families parece presente, mas sem manifesto GuiaLar "
+            notaDns = detectado.getNome() + " parece presente, mas sem manifesto GuiaLar "
                 + "(pode ter sido configurado manualmente ou por GPO).";
         } else if (manifestoExiste) {
             status = StatusDns.NAO_APLICADO;
-            notaDns = "Há manifesto, porém o DNS atual não corresponde ao Cloudflare Families. "
-                + "Filtro GuiaLar: não aplicado / sobrescrito.";
+            notaDns = "Há manifesto, porém o DNS atual não corresponde a um alvo GuiaLar "
+                + "(Families ou AdGuard). Filtro: não aplicado / sobrescrito.";
         } else {
             status = StatusDns.NAO_APLICADO;
             notaDns = "DNS GuiaLar não aplicado. Em conta limitada a aplicação "

@@ -25,7 +25,7 @@ public class LinuxDnsChanger implements DnsChanger {
 
     @Override
     public ConfiguracaoDns configurar(ServidorDns servidor) {
-        return linux.configurar(distro);
+        return linux.configurar(distro, servidor);
     }
 
     @Override
@@ -40,24 +40,24 @@ public class LinuxDnsChanger implements DnsChanger {
             );
 
             String linha;
-            boolean encontrouFamilies = false;
+            boolean encontrou = false;
 
             while ((linha = reader.readLine()) != null) {
-                if (LinuxDnsFamiliesDetector.textoContemFamilies(linha)) {
-                    encontrouFamilies = true;
+                if (LinuxDnsFamiliesDetector.textoContemAlvoGuialar(linha)) {
+                    encontrou = true;
                     break;
                 }
             }
 
             process.waitFor();
-            return encontrouFamilies;
+            return encontrou;
 
         } catch (Exception e) {
             try {
                 java.nio.file.Path resolvConf = java.nio.file.Path.of("/etc/resolv.conf");
                 if (java.nio.file.Files.exists(resolvConf)) {
                     String conteudo = java.nio.file.Files.readString(resolvConf);
-                    return LinuxDnsFamiliesDetector.textoContemFamilies(conteudo);
+                    return LinuxDnsFamiliesDetector.textoContemAlvoGuialar(conteudo);
                 }
             } catch (Exception e2) {
                 // Ignora

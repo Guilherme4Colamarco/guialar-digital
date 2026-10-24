@@ -18,7 +18,7 @@
     <property name="test.windows.class" value="br.uniube.pi.guialar.test.WindowsAdapterSmokeTest"/>
     <property name="test.linux.class" value="br.uniube.pi.guialar.test.LinuxDnsLogicTest"/>
     <property name="jar.name" value="guialar-digital.jar"/>
-    <property name="version" value="0.2.0"/>
+    <property name="version" value="0.3.0"/>
 
     <!-- Classpath -->
     <path id="classpath">
@@ -103,6 +103,14 @@
         </copy>
         <copy file="README.md" todir="${dist.dir}"/>
         <echo message="Distribuição criada em: ${dist.dir}"/>
+    </target>
+
+    <!-- Target: package-linux - .deb .rpm AppImage (ou AppDir tar) -->
+    <target name="package-linux" depends="jar" description="Pacotes Linux (.deb .rpm .AppImage)">
+        <exec executable="bash" failonerror="true">
+            <arg value="scripts/package-linux.sh"/>
+            <env key="VERSION" value="${version}"/>
+        </exec>
     </target>
 
     <!-- Target: dist-windows - pacote fácil de copiar para PC de laboratório -->
@@ -191,6 +199,7 @@ Expectativa em PC trancado:
         <echo message="  ant test / test-windows - Testes do adapter Windows (mocks)"/>
         <echo message="  ant dist           - Distribuição completa"/>
         <echo message="  ant dist-windows   - Pacote para copiar ao PC Windows do lab"/>
+        <echo message="  ant package-linux  - Gera .deb .rpm .AppImage em dist/linux/"/>
         <echo message="  ant run            - CLI (Linux: pkexec ao aplicar DNS)"/>
         <echo message="  ant run-gui        - Interface gráfica"/>
         <echo message="  ant run-diagnostico - Diagnóstico sem privilégios"/>

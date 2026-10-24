@@ -76,32 +76,40 @@ public class ConfiguradorDnsLinuxService {
     }
 
     public ConfiguracaoDns configurar(InfoDistro distro) {
-        ServidorDns servidor = ServidorDns.getPadrao();
+        return configurar(distro, ServidorDns.getPadrao());
+    }
+
+    public ConfiguracaoDns configurar(InfoDistro distro, ServidorDns servidor) {
+        ServidorDns alvo = servidor != null ? servidor : ServidorDns.getPadrao();
+        if (alvo.isRequerClienteExterno()) {
+            return ConfiguracaoDns.erro("uBlockDNS",
+                "Use o assistente uBlockDNS (perfil + instalador), não o fluxo de IPs Cloudflare.");
+        }
         if (distro.getTipo() == TipoDistro.DESCONHECIDA && !selector.isNixOs()) {
             return ConfiguracaoDns.erro("unknown", "Distribuição não suportada");
         }
 
         if (distro.getTipo() == TipoDistro.NIXOS || selector.isNixOs()) {
-            return configurarNixOs(servidor);
+            return configurarNixOs(alvo);
         }
 
         LinuxDnsBackend backend = selector.selecionar(distro);
         ConfiguracaoDns aplicado = switch (backend) {
-            case NETWORK_MANAGER -> configurarNetworkManager(servidor);
-            case NETPLAN -> configurarNetplan(servidor);
-            case SYSTEMD_RESOLVED -> configurarSystemdResolved(servidor);
-            case RESOLV_CONF -> configurarResolvConf(servidor);
+            case NETWORK_MANAGER -> configurarNetworkManager(alvo);
+            case NETPLAN -> configurarNetplan(alvo);
+            case SYSTEMD_RESOLVED -> configurarSystemdResolved(alvo);
+            case RESOLV_CONF -> configurarResolvConf(alvo);
             case NIXOS_SNIPPET -> ConfiguracaoDns.erro("NixOS", "ramo inesperado");
         };
-        return finalizarComVerificacao(aplicado, servidor);
+        return finalizarComVerificacao(aplicado, alvo);
     }
 
     private ConfiguracaoDns finalizarComVerificacao(ConfiguracaoDns aplicado, ServidorDns servidor) {
         if (aplicado.isAguardandoUsuario() || !aplicado.isAplicado()) {
             return aplicado;
         }
-        List<ResultadoVerificacao> resultados = verificacaoDns.verificar();
-        if (VerificacaoDnsService.protecaoConfirmada(resultados)) {
+        List<ResultadoVerificacao> resultados = verificacaoDns.verificar(servidor);
+        if (VerificacaoDnsService.protecaoConfirmada(resultados, servidor)) {
             return aplicado;
         }
         return ConfiguracaoDns.sucessoComAviso(servidor, aplicado.getMetodoConfiguracao(),

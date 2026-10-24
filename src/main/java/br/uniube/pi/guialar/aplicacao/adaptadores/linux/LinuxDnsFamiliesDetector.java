@@ -1,9 +1,12 @@
 package br.uniube.pi.guialar.aplicacao.adaptadores.linux;
 
+import br.uniube.pi.guialar.dominio.dns.ServidorDns;
+
 import java.util.regex.Pattern;
 
 /**
  * Detecta IPs Cloudflare Families sem falso positivo (ex.: 1.1.1.30).
+ * uBlockDNS usa cliente em 127.0.0.1 — detecte via {@code ublockdns status}, não só pelo IP.
  */
 public final class LinuxDnsFamiliesDetector {
 
@@ -20,5 +23,19 @@ public final class LinuxDnsFamiliesDetector {
             return false;
         }
         return IPV4_FAMILIES.matcher(texto).find() || IPV6_FAMILIES.matcher(texto).find();
+    }
+
+    public static boolean textoContemAlvoGuialar(String texto) {
+        return textoContemFamilies(texto);
+    }
+
+    public static boolean textoContem(ServidorDns servidor, String texto) {
+        if (servidor == null || servidor.isRequerClienteExterno()) {
+            return false;
+        }
+        if (servidor == ServidorDns.CLOUDFLARE_FAMILIES_MALWARE_ADULT) {
+            return textoContemFamilies(texto);
+        }
+        return servidor.apareceEm(texto);
     }
 }
