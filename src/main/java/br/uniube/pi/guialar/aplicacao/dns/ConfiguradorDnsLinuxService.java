@@ -390,6 +390,7 @@ public class ConfiguradorDnsLinuxService {
         }
         return """
             Para reverter o DNS no Linux use Desfazer proteção no GuiaLar (manifesto em ~/.guialar/).
+            Sem interface gráfica: java -jar guialar-digital.jar --cli --desfazer
 
             systemd-resolved: remove /etc/systemd/resolved.conf.d/99-guialar.conf e reinicia o serviço.
             """.trim();

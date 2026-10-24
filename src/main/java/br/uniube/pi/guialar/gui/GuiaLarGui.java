@@ -637,7 +637,9 @@ public class GuiaLarGui {
         botoes.add(botaoDesfazer);
         botoes.add(botaoExecutar);
 
-        rodape.add(aviso, BorderLayout.WEST);
+        // Aviso em linha própria: na mesma linha dos botões a janela passava de 1280 px
+        // quando "Desfazer proteção" aparecia, e "Ativar proteção" saía da tela.
+        rodape.add(aviso, BorderLayout.NORTH);
         rodape.add(botoes, BorderLayout.EAST);
         return rodape;
     }

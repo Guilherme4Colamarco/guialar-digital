@@ -188,6 +188,10 @@ java -jar guialar-digital.jar --gui
 
 Manifesto / desfazer: `%LOCALAPPDATA%\GuiaLar\dns-manifest.properties`
 
+No Linux sem interface gráfica (ex.: Ubuntu Server), o desfazer também funciona pela CLI,
+como usuário normal (pede a senha via pkexec): `java -jar guialar-digital.jar --cli --desfazer`.
+Manifesto em `~/.guialar/`.
+
 > Em rede de campus filtrada o app **ainda abre**. Só afirmamos filtro ativo se
 > o DNS GuiaLar estiver **aplicado** (nunca quando a escrita falhou).
 

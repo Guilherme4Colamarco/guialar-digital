@@ -58,6 +58,7 @@ public class LinuxDnsLogicTest {
         testNetplanNaoAplicadoSemInterfaces();
         testNetplanScriptFalhaGenerateRestaura();
         testNetplanScriptExecutaDeVerdade();
+        testUmNavegadorPorPerfil();
         testManifestoAdulteradoNaoExecutaPkexec();
         testRevertNmUsaUuidComValoresEntreAspas();
         testValidatorRejeitaInjecaoIgnoreAutoDns();
@@ -419,6 +420,20 @@ public class LinuxDnsLogicTest {
         assertTrue("não aplicado", !r.isAplicado());
         assertTrue("sem manifesto", !Files.exists(manifest));
         ok("testNetplanNaoAplicadoSemInterfaces");
+    }
+
+    private static void testUmNavegadorPorPerfil() throws Exception {
+        Path home = Files.createTempDirectory("home-nav-");
+        Files.createDirectories(home.resolve(".mozilla/firefox"));
+        Files.createDirectories(home.resolve(".config/chromium"));
+        var lista = new br.uniube.pi.guialar.aplicacao.adaptadores.linux.LinuxBrowserDetector(home.toString()).detectar();
+        long firefox = lista.stream()
+            .filter(n -> n.getCaminhoPerfil().equals(home.resolve(".mozilla/firefox").toString())).count();
+        long chromium = lista.stream()
+            .filter(n -> n.getCaminhoPerfil().equals(home.resolve(".config/chromium").toString())).count();
+        assertEq("um Firefox por perfil (não duplica como ESR)", 1L, firefox);
+        assertEq("um Chromium por perfil", 1L, chromium);
+        ok("testUmNavegadorPorPerfil");
     }
 
     /** Roda o script gerado em bash de verdade (pasta temporária + netplan falso). Pula sem bash/python3. */

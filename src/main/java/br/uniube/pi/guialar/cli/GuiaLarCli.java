@@ -51,7 +51,13 @@ public class GuiaLarCli {
 
     public void run(String... args) throws Exception {
         imprimirCabecalho();
-        
+
+        List<String> argList = List.of(args);
+        if (argList.contains("--desfazer") || argList.contains("--undo")) {
+            desfazerDns();
+            return;
+        }
+
         InfoDistro distro = detectarSistema();
         if (!distro.isSuportada()) {
             System.err.println("\n❌ Distribuição não suportada.");
@@ -165,6 +171,18 @@ public class GuiaLarCli {
         plano.adicionarAcao("PRIVACIDADE: Nenhum histórico de navegação será coletado");
 
         return plano;
+    }
+
+    private void desfazerDns() {
+        System.out.println("\n↩ Desfazendo o DNS configurado pelo GuiaLar...");
+        System.out.println("─────────────────────────────────────────────────────────────────");
+        ConfiguracaoDns resultado = configuradorDns.desfazer();
+        if (resultado.isAplicado()) {
+            System.out.println("✓ " + resultado.getMensagem());
+        } else {
+            System.err.println("○ " + resultado.getMensagem());
+            System.exit(1);
+        }
     }
 
     private void configurarDns(InfoDistro distro) {
