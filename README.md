@@ -210,6 +210,10 @@ ant run-gui
 java -jar build/jar/guialar-digital.jar --gui
 ```
 
+**Telas com escala (125%, 150%...):** no Linux o app tenta descobrir a escala do
+GNOME/KDE sozinho. Se a janela ainda aparecer pequena ou grande demais, ajuste à mão:
+`guialar-digital --escala=1.5` (ou `GUIALAR_ESCALA=1.5 guialar-digital`).
+
 Seleção de modo ao executar o JAR:
 
 - `--gui` força a interface gráfica.

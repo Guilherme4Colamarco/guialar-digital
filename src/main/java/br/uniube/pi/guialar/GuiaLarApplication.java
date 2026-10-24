@@ -9,6 +9,7 @@ import br.uniube.pi.guialar.aplicacao.dns.ConfiguradorDnsService;
 import br.uniube.pi.guialar.aplicacao.extensao.InstaladorExtensaoService;
 import br.uniube.pi.guialar.aplicacao.autorizacao.AutorizadorService;
 import br.uniube.pi.guialar.aplicacao.verificacao.VerificacaoDnsService;
+import br.uniube.pi.guialar.gui.EscalaTela;
 import br.uniube.pi.guialar.gui.GuiaLarGui;
 import br.uniube.pi.guialar.dominio.sistema.TipoSistema;
 
@@ -32,6 +33,9 @@ public class GuiaLarApplication {
 
     public static void main(String[] args) {
         configurarConsoleUtf8();
+        if (!Arrays.asList(args).contains("--cli")) {
+            EscalaTela.aplicar(args);
+        }
 
         if (deveUsarGui(args)) {
             TemaGui temaGui = resolverTemaGui(args);

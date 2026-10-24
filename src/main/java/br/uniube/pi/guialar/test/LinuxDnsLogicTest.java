@@ -59,6 +59,7 @@ public class LinuxDnsLogicTest {
         testNetplanScriptFalhaGenerateRestaura();
         testNetplanScriptExecutaDeVerdade();
         testUmNavegadorPorPerfil();
+        testEscalaTela();
         testManifestoAdulteradoNaoExecutaPkexec();
         testRevertNmUsaUuidComValoresEntreAspas();
         testValidatorRejeitaInjecaoIgnoreAutoDns();
@@ -420,6 +421,22 @@ public class LinuxDnsLogicTest {
         assertTrue("não aplicado", !r.isAplicado());
         assertTrue("sem manifesto", !Files.exists(manifest));
         ok("testNetplanNaoAplicadoSemInterfaces");
+    }
+
+    private static void testEscalaTela() {
+        assertEq("Xft.dpi 144 = 1.5", 1.5, br.uniube.pi.guialar.gui.EscalaTela.escalaDeXftDpi("Xft.antialias:\t1\nXft.dpi:\t144\n"));
+        assertEq("Xft.dpi 96 = 1.0", 1.0, br.uniube.pi.guialar.gui.EscalaTela.escalaDeXftDpi("Xft.dpi: 96"));
+        assertEq("sem Xft.dpi", null, br.uniube.pi.guialar.gui.EscalaTela.escalaDeXftDpi("Xcursor.size: 24"));
+        assertEq("maior scale do monitors.xml", 1.75, br.uniube.pi.guialar.gui.EscalaTela.maiorEscalaMonitores(
+            "<monitors><configuration><logicalmonitor><scale>1.25</scale></logicalmonitor>"
+            + "<logicalmonitor><scale>1.75</scale></logicalmonitor></configuration></monitors>"));
+        assertEq("--escala vence a variável", 2.0,
+            br.uniube.pi.guialar.gui.EscalaTela.lerManual(new String[] {"--gui", "--escala=2"}, "1.25"));
+        assertEq("variável GUIALAR_ESCALA com vírgula", 1.25,
+            br.uniube.pi.guialar.gui.EscalaTela.lerManual(new String[0], "1,25"));
+        assertEq("limita a 3x", 3.0, br.uniube.pi.guialar.gui.EscalaTela.lerManual(new String[] {"--escala=9"}, null));
+        assertEq("valor inválido ignorado", null, br.uniube.pi.guialar.gui.EscalaTela.lerManual(new String[] {"--escala=abc"}, null));
+        ok("testEscalaTela");
     }
 
     private static void testUmNavegadorPorPerfil() throws Exception {

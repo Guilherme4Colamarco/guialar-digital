@@ -26,6 +26,7 @@ import javax.swing.BorderFactory;
 import javax.swing.Box;
 import javax.swing.BoxLayout;
 import javax.swing.JButton;
+import javax.swing.JComponent;
 import javax.swing.JFrame;
 import javax.swing.JLabel;
 import javax.swing.JOptionPane;
@@ -34,7 +35,9 @@ import javax.swing.JScrollPane;
 import javax.swing.JTextArea;
 import javax.swing.SwingUtilities;
 import javax.swing.SwingWorker;
+import javax.swing.UIDefaults;
 import javax.swing.UIManager;
+import javax.swing.plaf.FontUIResource;
 import javax.swing.border.EmptyBorder;
 
 import java.awt.BorderLayout;
@@ -66,14 +69,14 @@ public class GuiaLarGui {
 
     private static final Color COR_TEXTO_CLARO = Color.WHITE;
     private static final String PREF_TEMA = "tema";
-    private static final float FONTE_CORPO = 15f;
-    private static final float FONTE_TITULO_CARTAO = 16f;
-    private static final float FONTE_TITULO_APP = 28f;
-    private static final float FONTE_SUBTITULO = 16f;
-    private static final float FONTE_STATUS = 22f;
-    private static final float FONTE_RODAPE = 14f;
-    private static final float FONTE_BOTAO_PRIMARIO = 15f;
-    private static final float FONTE_MONO = 14f;
+    private static final float FONTE_CORPO = EscalaTela.fonte(15f);
+    private static final float FONTE_TITULO_CARTAO = EscalaTela.fonte(16f);
+    private static final float FONTE_TITULO_APP = EscalaTela.fonte(28f);
+    private static final float FONTE_SUBTITULO = EscalaTela.fonte(16f);
+    private static final float FONTE_STATUS = EscalaTela.fonte(22f);
+    private static final float FONTE_RODAPE = EscalaTela.fonte(14f);
+    private static final float FONTE_BOTAO_PRIMARIO = EscalaTela.fonte(15f);
+    private static final float FONTE_MONO = EscalaTela.fonte(14f);
 
     private static final String[] CHAVES_UI_TEMA_ESCURO = {
         "Panel.background", "OptionPane.background", "ScrollPane.background", "Viewport.background",
@@ -266,7 +269,23 @@ public class GuiaLarGui {
                     }
                 }
             }
+            escalarFontesPadrao();
         } catch (Exception ignored) {
+        }
+    }
+
+    /** Lê do tema recém-carregado (não das fontes já escaladas) para não multiplicar duas vezes. */
+    private static void escalarFontesPadrao() {
+        double fator = EscalaTela.fatorFonte();
+        if (fator == 1.0) {
+            return;
+        }
+        UIDefaults padrao = UIManager.getLookAndFeelDefaults();
+        for (Object chave : java.util.Collections.list(padrao.keys())) {
+            Object valor = padrao.get(chave);
+            if (valor instanceof Font f) {
+                UIManager.put(chave, new FontUIResource(f.deriveFont((float) (f.getSize2D() * fator))));
+            }
         }
     }
 
@@ -367,9 +386,12 @@ public class GuiaLarGui {
         tarefas.add(criarCartaoTarefa("1. Tentar ativar proteção", "Filtra sites perigosos e inadequados. Pode pedir autorização do responsável pelo computador."));
         tarefas.add(criarCartaoTarefa("2. Proteger navegadores", "Veja instruções simples para bloquear anúncios no Edge, Chrome e outros navegadores."));
         tarefas.add(criarCartaoTarefa("3. Verificar novamente", "Confira se a proteção já está ativa nesta rede."));
+        travarAltura(tarefas);
         corpo.add(tarefas);
         corpo.add(Box.createVerticalStrut(14));
-        corpo.add(criarResumoEncontrado());
+        JPanel resumo = criarResumoEncontrado();
+        travarAltura(resumo);
+        corpo.add(resumo);
         corpo.add(Box.createVerticalStrut(8));
         JButton detalhes = new JButton("Ver detalhes técnicos");
         detalhes.setAlignmentX(Component.LEFT_ALIGNMENT);
@@ -396,13 +418,19 @@ public class GuiaLarGui {
         JLabel ajuda = linha("Você pode usar o GuiaLar sem mudar nada. Em computadores da faculdade ou do trabalho, peça ajuda ao suporte local.");
         ajuda.setForeground(tema.secundario());
         corpo.add(ajuda);
+        // Com a janela maximizada, o espaço extra fica no fim, não dentro dos cartões.
+        corpo.add(Box.createVerticalGlue());
         atualizarResumoAmigavel();
         return corpo;
     }
 
+    private static void travarAltura(JComponent c) {
+        c.setMaximumSize(new Dimension(Integer.MAX_VALUE, c.getPreferredSize().height));
+    }
+
     private JPanel criarCartaoTarefa(String titulo, String descricao) {
         JPanel p = criarCartao(titulo);
-        JLabel d = linha("<html><body style='width: 205px'>" + descricao + "</body></html>");
+        JLabel d = linha("<html><body style='width: " + Math.round(205 * EscalaTela.fatorFonte()) + "px'>" + descricao + "</body></html>");
         d.setFont(d.getFont().deriveFont(Font.PLAIN, FONTE_CORPO));
         p.add(d);
         return p;
@@ -615,7 +643,7 @@ public class GuiaLarGui {
 
         botaoCopiarConfig = new JButton("Copiar configuração");
         botaoCopiarConfig.setVisible(textoCopiarNixOs != null && !textoCopiarNixOs.isBlank());
-        botaoCopiarConfig.setFont(botaoCopiarConfig.getFont().deriveFont(Font.BOLD, 14f));
+        botaoCopiarConfig.setFont(botaoCopiarConfig.getFont().deriveFont(Font.BOLD, FONTE_RODAPE));
         botaoCopiarConfig.addActionListener(e -> copiarConfiguracaoNixOs());
 
         botaoExecutar = new JButton(tipoSistema.isWindows()
