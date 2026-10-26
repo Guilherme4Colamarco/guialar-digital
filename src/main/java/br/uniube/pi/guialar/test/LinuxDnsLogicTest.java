@@ -60,6 +60,7 @@ public class LinuxDnsLogicTest {
         testNetplanScriptExecutaDeVerdade();
         testUmNavegadorPorPerfil();
         testEscalaTela();
+        testScriptNmExecutaDeVerdade();
         testManifestoAdulteradoNaoExecutaPkexec();
         testRevertNmUsaUuidComValoresEntreAspas();
         testValidatorRejeitaInjecaoIgnoreAutoDns();
@@ -421,6 +422,64 @@ public class LinuxDnsLogicTest {
         assertTrue("não aplicado", !r.isAplicado());
         assertTrue("sem manifesto", !Files.exists(manifest));
         ok("testNetplanNaoAplicadoSemInterfaces");
+    }
+
+    /** Roda o script NetworkManager em bash com um nmcli falso que registra as chamadas. */
+    private static void testScriptNmExecutaDeVerdade() throws Exception {
+        if (!comandoNoPath("bash")) {
+            ok("testScriptNmExecutaDeVerdade (pulado: sem bash)");
+            return;
+        }
+        FakeLinuxCommandRunner runner = runnerComNmAtivo();
+        runner.responder("nmcli -t -f NAME,TYPE,DEVICE connection show --active",
+            new LinuxCommandResult(0, "Wi-Fi:802-11-wireless:wlan0", "", false));
+        stubDnsShow(runner, "Wi-Fi");
+        svc(runner, manifestTemp()).configurar(new InfoDistro(TipoDistro.DEBIAN, "Debian", "12", "NetworkManager"));
+        String script = runner.getScriptsPrivilegiados().get(0);
+
+        Path dir = Files.createTempDirectory("nmcli-fake-");
+        Path bin = Files.createDirectories(dir.resolve("bin"));
+        Path log = dir.resolve("calls.log");
+        // FALHAR=reapply faz o "device reapply" falhar; FALHAR=ipv6dns faz o modify do ipv6.dns falhar
+        Path fake = bin.resolve("nmcli");
+        Files.writeString(fake, "#!/bin/sh\necho \"$*\" >> '" + log + "'\n"
+            + "case \"$*\" in\n"
+            + "  *GENERAL.DEVICES*) echo wlan0 ;;\n"
+            + "  'device reapply'*) [ \"$FALHAR\" = reapply ] && exit 1 ;;\n"
+            + "  *'ipv6.dns 2606'*) [ \"$FALHAR\" = ipv6dns ] && exit 1 ;;\n"
+            + "esac\nexit 0\n");
+        fake.toFile().setExecutable(true);
+
+        // 1) caminho normal: aplica com reapply, sem reconectar
+        executarBashComEnv(script, bin, "");
+        List<String> chamadas = Files.readAllLines(log);
+        assertTrue("usa device reapply", chamadas.contains("device reapply wlan0"));
+        assertTrue("não reconecta o Wi-Fi", chamadas.stream().noneMatch(c -> c.startsWith("connection up")));
+
+        // 2) reapply falha: cai para connection up
+        Files.delete(log);
+        executarBashComEnv(script, bin, "reapply");
+        assertTrue("fallback connection up", Files.readAllLines(log).contains("connection up " + UUID_WIFI));
+
+        // 3) falha no meio: a restauração roda até o fim, mesmo com o reapply falhando
+        Files.delete(log);
+        executarBashComEnv(script, bin, "ipv6dns");
+        List<String> rb = Files.readAllLines(log);
+        assertTrue("restaura ipv4.dns anterior", rb.contains("connection modify " + UUID_WIFI + " ipv4.dns 8.8.8.8"));
+        assertTrue("restaura ignore-auto-dns", rb.contains("connection modify " + UUID_WIFI + " ipv6.ignore-auto-dns no"));
+        ok("testScriptNmExecutaDeVerdade");
+    }
+
+    private static void executarBashComEnv(String script, Path binExtra, String falhar) throws Exception {
+        ProcessBuilder pb = new ProcessBuilder("bash", "-s").redirectErrorStream(true);
+        pb.environment().put("PATH", binExtra + java.io.File.pathSeparator + System.getenv("PATH"));
+        pb.environment().put("FALHAR", falhar);
+        Process p = pb.start();
+        try (var out = p.getOutputStream()) {
+            out.write(script.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        }
+        p.getInputStream().readAllBytes();
+        p.waitFor();
     }
 
     private static void testEscalaTela() {
