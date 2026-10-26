@@ -213,9 +213,11 @@ public class GuiaLarGui {
         frame.setMinimumSize(new Dimension(900, 680));
 
         frame.setContentPane(criarRaiz());
-        frame.pack();
+        empacotar();
         frame.setLocationRelativeTo(null);
         frame.setVisible(true);
+        // O texto dos cartões só calcula a altura certa depois de exibido na largura real.
+        SwingUtilities.invokeLater(this::crescerSeNecessario);
 
         atualizarBotoesManifesto();
         log("GuiaLar Digital iniciado (" + tipoSistema.getNome() + ").");
@@ -380,13 +382,18 @@ public class GuiaLarGui {
         corpo.add(status);
         corpo.add(Box.createVerticalStrut(14));
 
-        JPanel tarefas = new JPanel(new GridLayout(1, 3, 12, 0));
+        JPanel tarefas = new JPanel(new GridLayout(1, 3, 12, 0)) {
+            @Override
+            public Dimension getMaximumSize() {
+                // Altura acompanha o texto na largura atual; o espaço extra fica no fim.
+                return new Dimension(Integer.MAX_VALUE, getPreferredSize().height);
+            }
+        };
         tarefas.setBackground(tema.fundo());
         tarefas.setAlignmentX(Component.LEFT_ALIGNMENT);
         tarefas.add(criarCartaoTarefa("1. Tentar ativar proteção", "Filtra sites perigosos e inadequados. Pode pedir autorização do responsável pelo computador."));
         tarefas.add(criarCartaoTarefa("2. Proteger navegadores", "Veja instruções simples para bloquear anúncios no Edge, Chrome e outros navegadores."));
         tarefas.add(criarCartaoTarefa("3. Verificar novamente", "Confira se a proteção já está ativa nesta rede."));
-        travarAltura(tarefas);
         corpo.add(tarefas);
         corpo.add(Box.createVerticalStrut(14));
         JPanel resumo = criarResumoEncontrado();
@@ -430,8 +437,18 @@ public class GuiaLarGui {
 
     private JPanel criarCartaoTarefa(String titulo, String descricao) {
         JPanel p = criarCartao(titulo);
-        JLabel d = linha("<html><body style='width: " + Math.round(205 * EscalaTela.fatorFonte()) + "px'>" + descricao + "</body></html>");
+        // Texto que quebra conforme a largura real do cartão: com largura fixa ele era
+        // cortado quando o gerenciador de janelas (ex.: COSMIC) deixava a janela mais estreita.
+        JTextArea d = new JTextArea(descricao, 0, 18);
+        d.setLineWrap(true);
+        d.setWrapStyleWord(true);
+        d.setEditable(false);
+        d.setFocusable(false);
+        d.setOpaque(false);
+        d.setBorder(null);
         d.setFont(d.getFont().deriveFont(Font.PLAIN, FONTE_CORPO));
+        d.setForeground(tema.texto());
+        d.setAlignmentX(Component.LEFT_ALIGNMENT);
         p.add(d);
         return p;
     }
@@ -460,7 +477,29 @@ public class GuiaLarGui {
     private void alternarDetalhesTecnicos() {
         detalhesTecnicos.setVisible(!detalhesTecnicos.isVisible());
         frame.revalidate();
+        empacotar();
+    }
+
+    private void empacotar() {
         frame.pack();
+    }
+
+    /** Aumenta a janela se o conteúdo não couber; nunca encolhe nem passa da área útil da tela. */
+    private void crescerSeNecessario() {
+        if (frame == null || (frame.getExtendedState() & java.awt.Frame.MAXIMIZED_BOTH) != 0) {
+            return;
+        }
+        Dimension pref = frame.getPreferredSize();
+        Dimension atual = frame.getSize();
+        if (pref.width <= atual.width && pref.height <= atual.height) {
+            return;
+        }
+        java.awt.Rectangle tela = frame.getGraphicsConfiguration().getBounds();
+        java.awt.Insets bordas = Toolkit.getDefaultToolkit().getScreenInsets(frame.getGraphicsConfiguration());
+        int maxL = tela.width - bordas.left - bordas.right;
+        int maxA = tela.height - bordas.top - bordas.bottom;
+        frame.setSize(Math.min(Math.max(pref.width, atual.width), maxL),
+            Math.min(Math.max(pref.height, atual.height), maxA));
     }
 
     private void atualizarResumoAmigavel() {
@@ -991,6 +1030,7 @@ public class GuiaLarGui {
         if (botaoCopiarConfig != null) {
             botaoCopiarConfig.setVisible(textoCopiarNixOs != null && !textoCopiarNixOs.isBlank());
         }
+        SwingUtilities.invokeLater(this::crescerSeNecessario);
     }
 
     private void copiarConfiguracaoNixOs() {
