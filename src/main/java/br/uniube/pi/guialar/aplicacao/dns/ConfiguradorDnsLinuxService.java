@@ -215,7 +215,9 @@ public class ConfiguradorDnsLinuxService {
         String v6 = servidor.getPrimarioIpv6() + " " + servidor.getSecundarioIpv6();
         StringBuilder sb = new StringBuilder();
         sb.append("set -e\n");
+        sb.append(FUNCAO_NM_REAPLICAR);
         sb.append("guialar_nm_rollback() {\n");
+        sb.append("  set +e\n");
         for (LinuxNmConexaoEstado b : backups) {
             sb.append(montarBlocoNmRestaurar(b));
         }
@@ -231,7 +233,7 @@ public class ConfiguradorDnsLinuxService {
                 .append(LinuxShellEscape.shSingleQuote(v6)).append("\n");
             sb.append("nmcli connection modify ").append(q).append(" ipv6.ignore-auto-dns ")
                 .append(LinuxShellEscape.shSingleQuote("yes")).append("\n");
-            sb.append("nmcli connection up ").append(q).append("\n");
+            sb.append("guialar_nm_reaplicar ").append(q).append("\n");
         }
         sb.append("trap - ERR\n");
         return sb.toString();
@@ -248,9 +250,24 @@ public class ConfiguradorDnsLinuxService {
             .append(LinuxShellEscape.shSingleQuote(c.ipv6Dns())).append("\n");
         sb.append("nmcli connection modify ").append(q).append(" ipv6.ignore-auto-dns ")
             .append(LinuxShellEscape.shSingleQuote(c.ipv6IgnoreAutoDns())).append("\n");
-        sb.append("nmcli connection up ").append(q).append("\n");
+        sb.append("guialar_nm_reaplicar ").append(q).append(" || true\n");
         return sb.toString();
     }
+
+    /**
+     * Aplica o DNS novo sem derrubar a conexão: "device reapply" não desconecta o Wi‑Fi,
+     * enquanto "connection up" reconecta e pode falhar ("base network connection was
+     * interrupted"). Conexão inativa: só o perfil muda, sem reconectar.
+     */
+    private static final String FUNCAO_NM_REAPLICAR = """
+        guialar_nm_reaplicar() {
+          dev=$(nmcli -g GENERAL.DEVICES connection show "$1" 2>/dev/null | head -n1)
+          if [ -z "$dev" ]; then
+            return 0
+          fi
+          nmcli device reapply "$dev" || nmcli connection up "$1"
+        }
+        """;
 
     private ConfiguracaoDns configurarNetplan(ServidorDns servidor) {
         try {
@@ -405,6 +422,7 @@ public class ConfiguradorDnsLinuxService {
         }
         StringBuilder sb = new StringBuilder();
         sb.append("set -e\n");
+        sb.append(FUNCAO_NM_REAPLICAR);
         for (LinuxNmConexaoEstado c : validado.conexoes()) {
             sb.append(montarBlocoNmRestaurar(c));
         }

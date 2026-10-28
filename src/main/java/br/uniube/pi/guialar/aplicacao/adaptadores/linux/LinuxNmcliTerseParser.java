@@ -80,6 +80,8 @@ public final class LinuxNmcliTerseParser {
 
     /**
      * Parse {@code nmcli -t -f ipv4.dns,ipv6.dns,ipv4.ignore-auto-dns,ipv6.ignore-auto-dns connection show NAME}.
+     * Listas vêm separadas por vírgula e o {@code -t} escapa {@code :} e {@code \} nos valores
+     * (ex.: {@code ipv6.dns:2606\:4700\:\:1113}).
      */
     public static Map<String, String> parseCamposDns(String stdout) {
         Map<String, String> mapa = new LinkedHashMap<>();
@@ -91,8 +93,21 @@ public final class LinuxNmcliTerseParser {
             if (idx <= 0) {
                 continue;
             }
-            mapa.put(linha.substring(0, idx), linha.substring(idx + 1));
+            mapa.put(linha.substring(0, idx), desescapar(linha.substring(idx + 1)));
         }
         return mapa;
+    }
+
+    private static String desescapar(String valor) {
+        StringBuilder sb = new StringBuilder(valor.length());
+        for (int i = 0; i < valor.length(); i++) {
+            char c = valor.charAt(i);
+            if (c == '\\' && i + 1 < valor.length()) {
+                sb.append(valor.charAt(++i));
+                continue;
+            }
+            sb.append(c);
+        }
+        return sb.toString();
     }
 }

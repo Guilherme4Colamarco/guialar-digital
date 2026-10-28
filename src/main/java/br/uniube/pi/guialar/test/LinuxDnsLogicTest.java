@@ -42,6 +42,7 @@ public class LinuxDnsLogicTest {
         testParserEscapadoDoisPontos();
         testFamiliesNaoConfunde11130();
         testUmPkexecPorAplicarNm();
+        testAplicarNmComVariosDnsDoNmcli();
         testScriptContemIpv6EIgnoreAutoDns();
         testResolvedRestartNoScript();
         testPkexec126e127();
@@ -59,6 +60,8 @@ public class LinuxDnsLogicTest {
         testNetplanScriptFalhaGenerateRestaura();
         testNetplanScriptExecutaDeVerdade();
         testUmNavegadorPorPerfil();
+        testEscalaTela();
+        testScriptNmExecutaDeVerdade();
         testManifestoAdulteradoNaoExecutaPkexec();
         testRevertNmUsaUuidComValoresEntreAspas();
         testValidatorRejeitaInjecaoIgnoreAutoDns();
@@ -118,6 +121,31 @@ public class LinuxDnsLogicTest {
             System.err.println("FALHA aplicado ou aviso verificacao: " + r.getMensagem());
             falhas++;
         }
+    }
+
+    /** Saída real do nmcli -t com dois DNS: vírgula entre eles e ':' escapado no IPv6. */
+    private static void testAplicarNmComVariosDnsDoNmcli() throws Exception {
+        FakeLinuxCommandRunner runner = runnerComNmAtivo();
+        runner.responder("nmcli -t -f NAME,TYPE,DEVICE connection show --active",
+            new LinuxCommandResult(0, "Wi-Fi:802-11-wireless:wlan0", "", false));
+        stubUuid(runner, "Wi-Fi", UUID_WIFI);
+        runner.responder("nmcli -t -f UUID,NAME connection show",
+            new LinuxCommandResult(0, UUID_WIFI + ":Wi-Fi", "", false));
+        runner.responder("nmcli -t -f ipv4.dns,ipv6.dns,ipv4.ignore-auto-dns,ipv6.ignore-auto-dns connection show Wi-Fi",
+            new LinuxCommandResult(0, "ipv4.dns:1.1.1.3,1.0.0.3\n"
+                + "ipv6.dns:2606\\:4700\\:4700\\:\\:1113,2606\\:4700\\:4700\\:\\:1003\n"
+                + "ipv4.ignore-auto-dns:yes\nipv6.ignore-auto-dns:yes", "", false));
+        Path manifest = manifestTemp();
+        ConfiguracaoDns r = svc(runner, manifest).configurar(
+            new InfoDistro(TipoDistro.DEBIAN, "PikaOS", "4", "NetworkManager"));
+        assertEq("um script pkexec", 1, runner.getScriptsPrivilegiados().size());
+        String script = runner.getScriptsPrivilegiados().get(0);
+        assertTrue("restaura IPv4 original", script.contains("ipv4.dns '1.1.1.3 1.0.0.3'"));
+        assertTrue("restaura IPv6 original",
+            script.contains("ipv6.dns '2606:4700:4700::1113 2606:4700:4700::1003'"));
+        assertTrue("não falhou na validação: " + r.getMensagem(),
+            r.getMensagem() == null || !r.getMensagem().contains("inválido"));
+        ok("testAplicarNmComVariosDnsDoNmcli");
     }
 
     private static void testScriptContemIpv6EIgnoreAutoDns() throws Exception {
@@ -420,6 +448,80 @@ public class LinuxDnsLogicTest {
         assertTrue("não aplicado", !r.isAplicado());
         assertTrue("sem manifesto", !Files.exists(manifest));
         ok("testNetplanNaoAplicadoSemInterfaces");
+    }
+
+    /** Roda o script NetworkManager em bash com um nmcli falso que registra as chamadas. */
+    private static void testScriptNmExecutaDeVerdade() throws Exception {
+        if (!comandoNoPath("bash")) {
+            ok("testScriptNmExecutaDeVerdade (pulado: sem bash)");
+            return;
+        }
+        FakeLinuxCommandRunner runner = runnerComNmAtivo();
+        runner.responder("nmcli -t -f NAME,TYPE,DEVICE connection show --active",
+            new LinuxCommandResult(0, "Wi-Fi:802-11-wireless:wlan0", "", false));
+        stubDnsShow(runner, "Wi-Fi");
+        svc(runner, manifestTemp()).configurar(new InfoDistro(TipoDistro.DEBIAN, "Debian", "12", "NetworkManager"));
+        String script = runner.getScriptsPrivilegiados().get(0);
+
+        Path dir = Files.createTempDirectory("nmcli-fake-");
+        Path bin = Files.createDirectories(dir.resolve("bin"));
+        Path log = dir.resolve("calls.log");
+        // FALHAR=reapply faz o "device reapply" falhar; FALHAR=ipv6dns faz o modify do ipv6.dns falhar
+        Path fake = bin.resolve("nmcli");
+        Files.writeString(fake, "#!/bin/sh\necho \"$*\" >> '" + log + "'\n"
+            + "case \"$*\" in\n"
+            + "  *GENERAL.DEVICES*) echo wlan0 ;;\n"
+            + "  'device reapply'*) [ \"$FALHAR\" = reapply ] && exit 1 ;;\n"
+            + "  *'ipv6.dns 2606'*) [ \"$FALHAR\" = ipv6dns ] && exit 1 ;;\n"
+            + "esac\nexit 0\n");
+        fake.toFile().setExecutable(true);
+
+        // 1) caminho normal: aplica com reapply, sem reconectar
+        executarBashComEnv(script, bin, "");
+        List<String> chamadas = Files.readAllLines(log);
+        assertTrue("usa device reapply", chamadas.contains("device reapply wlan0"));
+        assertTrue("não reconecta o Wi-Fi", chamadas.stream().noneMatch(c -> c.startsWith("connection up")));
+
+        // 2) reapply falha: cai para connection up
+        Files.delete(log);
+        executarBashComEnv(script, bin, "reapply");
+        assertTrue("fallback connection up", Files.readAllLines(log).contains("connection up " + UUID_WIFI));
+
+        // 3) falha no meio: a restauração roda até o fim, mesmo com o reapply falhando
+        Files.delete(log);
+        executarBashComEnv(script, bin, "ipv6dns");
+        List<String> rb = Files.readAllLines(log);
+        assertTrue("restaura ipv4.dns anterior", rb.contains("connection modify " + UUID_WIFI + " ipv4.dns 8.8.8.8"));
+        assertTrue("restaura ignore-auto-dns", rb.contains("connection modify " + UUID_WIFI + " ipv6.ignore-auto-dns no"));
+        ok("testScriptNmExecutaDeVerdade");
+    }
+
+    private static void executarBashComEnv(String script, Path binExtra, String falhar) throws Exception {
+        ProcessBuilder pb = new ProcessBuilder("bash", "-s").redirectErrorStream(true);
+        pb.environment().put("PATH", binExtra + java.io.File.pathSeparator + System.getenv("PATH"));
+        pb.environment().put("FALHAR", falhar);
+        Process p = pb.start();
+        try (var out = p.getOutputStream()) {
+            out.write(script.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        }
+        p.getInputStream().readAllBytes();
+        p.waitFor();
+    }
+
+    private static void testEscalaTela() {
+        assertEq("Xft.dpi 144 = 1.5", 1.5, br.uniube.pi.guialar.gui.EscalaTela.escalaDeXftDpi("Xft.antialias:\t1\nXft.dpi:\t144\n"));
+        assertEq("Xft.dpi 96 = 1.0", 1.0, br.uniube.pi.guialar.gui.EscalaTela.escalaDeXftDpi("Xft.dpi: 96"));
+        assertEq("sem Xft.dpi", null, br.uniube.pi.guialar.gui.EscalaTela.escalaDeXftDpi("Xcursor.size: 24"));
+        assertEq("maior scale do monitors.xml", 1.75, br.uniube.pi.guialar.gui.EscalaTela.maiorEscalaMonitores(
+            "<monitors><configuration><logicalmonitor><scale>1.25</scale></logicalmonitor>"
+            + "<logicalmonitor><scale>1.75</scale></logicalmonitor></configuration></monitors>"));
+        assertEq("--escala vence a variável", 2.0,
+            br.uniube.pi.guialar.gui.EscalaTela.lerManual(new String[] {"--gui", "--escala=2"}, "1.25"));
+        assertEq("variável GUIALAR_ESCALA com vírgula", 1.25,
+            br.uniube.pi.guialar.gui.EscalaTela.lerManual(new String[0], "1,25"));
+        assertEq("limita a 3x", 3.0, br.uniube.pi.guialar.gui.EscalaTela.lerManual(new String[] {"--escala=9"}, null));
+        assertEq("valor inválido ignorado", null, br.uniube.pi.guialar.gui.EscalaTela.lerManual(new String[] {"--escala=abc"}, null));
+        ok("testEscalaTela");
     }
 
     private static void testUmNavegadorPorPerfil() throws Exception {

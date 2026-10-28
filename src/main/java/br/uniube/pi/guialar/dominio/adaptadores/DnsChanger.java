@@ -8,12 +8,8 @@ import br.uniube.pi.guialar.dominio.dns.ServidorDns;
  * 
  * Arquitetura limpa: Core comum + implementações específicas por OS.
  * 
- * MVP: Apenas LinuxDnsChanger implementado.
- * 
- * Futuro (interfaces definidas, sem implementação):
- * - MacOsDnsChanger: networksetup/scutil (não NetworkManager/systemd-resolved)
- * - WindowsDnsChanger: netsh/PowerShell (Set-DnsClientServerAddress)
- * - AndroidDnsChanger: Private DNS over TLS (sem root, não muda DNS do sistema como desktop)
+ * Implementada por WindowsDnsChanger. No Linux o fluxo usa ConfiguradorDnsLinuxService
+ * diretamente (um script pkexec por ação, com manifesto para desfazer).
  */
 public interface DnsChanger {
     

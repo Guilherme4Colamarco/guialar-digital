@@ -9,6 +9,7 @@ import br.uniube.pi.guialar.aplicacao.dns.ConfiguradorDnsService;
 import br.uniube.pi.guialar.aplicacao.extensao.InstaladorExtensaoService;
 import br.uniube.pi.guialar.aplicacao.autorizacao.AutorizadorService;
 import br.uniube.pi.guialar.aplicacao.verificacao.VerificacaoDnsService;
+import br.uniube.pi.guialar.gui.EscalaTela;
 import br.uniube.pi.guialar.gui.GuiaLarGui;
 import br.uniube.pi.guialar.dominio.sistema.TipoSistema;
 
@@ -32,6 +33,9 @@ public class GuiaLarApplication {
 
     public static void main(String[] args) {
         configurarConsoleUtf8();
+        if (!Arrays.asList(args).contains("--cli")) {
+            EscalaTela.aplicar(args);
+        }
 
         if (deveUsarGui(args)) {
             TemaGui temaGui = resolverTemaGui(args);
@@ -144,24 +148,20 @@ public class GuiaLarApplication {
             return;
         }
 
-        DetectorDistroService detectorDistro = new DetectorDistroService();
-        DetectorNavegadorService detectorNavegador = new DetectorNavegadorService();
-        ConfiguradorDnsService configuradorDns = new ConfiguradorDnsService();
-        InstaladorExtensaoService instaladorExtensao = new InstaladorExtensaoService();
-        AutorizadorService autorizador = new AutorizadorService();
-        VerificacaoDnsService verificacaoDns = new VerificacaoDnsService();
-
-        GuiaLarCli cli = new GuiaLarCli(
-            detectorDistro,
-            detectorNavegador,
-            configuradorDns,
-            instaladorExtensao,
-            autorizador,
-            verificacaoDns
-        );
-
         try {
+            GuiaLarCli cli = new GuiaLarCli(
+                new DetectorDistroService(),
+                new DetectorNavegadorService(),
+                new ConfiguradorDnsService(),
+                new InstaladorExtensaoService(),
+                new AutorizadorService(),
+                new VerificacaoDnsService()
+            );
             cli.run(args);
+        } catch (IllegalStateException e) {
+            // Ex.: rodando como root (sudo java). Mensagem já explica o que fazer.
+            System.err.println("\n❌ " + e.getMessage());
+            System.exit(1);
         } catch (Exception e) {
             System.err.println("\n❌ Erro fatal: " + e.getMessage());
             e.printStackTrace();

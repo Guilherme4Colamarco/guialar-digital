@@ -17,13 +17,13 @@ Projeto desenvolvido como parte da disciplina Projetos Integrados I
 
 ### CRÍTICO — DNS:
 1. ✅ systemd-resolved: Drop-in `/etc/systemd/resolved.conf.d/99-guialar.conf` (não trunca arquivo principal)
-2. ✅ NetworkManager: Backup REAL em `~/.guialar/backups/`
+2. ✅ NetworkManager: estado anterior salvo no manifesto `~/.guialar/dns-manifest.properties`
 3. ✅ resolv.conf: Verifica symlink stub, inclui IPv6, implementa Netplan
 4. ✅ obterConexaoAtiva: Filtra VPN/docker, prioriza ethernet/wifi
 
 ### MÉDIO — Navegadores / CI:
 5. ✅ Detecção navegadores: .desktop, Flatpak, Snap, Brave Origin
-6. ✅ verificar() e reverter(): Implementação real com busca de backups
+6. ✅ Desfazer: restaura o estado do manifesto (botão na GUI ou `--cli --desfazer`)
 7. ✅ CI report: Status real de cada job (não imprime "todos passaram" cegamente)
 8. ✅ Smoke test: Via stub (resolvectl query / dig @127.0.0.53), não direto contra 1.1.1.3
 
@@ -125,6 +125,7 @@ ant help            # Mostra ajuda sobre os comandos
 ant clean           # Remove arquivos compilados
 ant compile         # Compila o código-fonte
 ant jar             # Cria o JAR executável (padrão)
+ant package-linux   # Gera .deb, .rpm e .AppImage em dist/linux/ (precisa de dpkg-deb; rpmbuild e appimagetool são opcionais)
 ant test-windows    # Testes do adapter Windows (PowerShell mockado; roda no Linux)
 ant test-linux      # Testes Linux (nmcli/pkexec/NixOS mockados)
 ant test            # Windows + Linux
@@ -208,6 +209,10 @@ ant run-gui
 # Ou diretamente pelo JAR (usuário normal; pkexec só ao ativar a proteção):
 java -jar build/jar/guialar-digital.jar --gui
 ```
+
+**Telas com escala (125%, 150%...):** no Linux o app tenta descobrir a escala do
+GNOME/KDE sozinho. Se a janela ainda aparecer pequena ou grande demais, ajuste à mão:
+`guialar-digital --escala=1.5` (ou `GUIALAR_ESCALA=1.5 guialar-digital`).
 
 Seleção de modo ao executar o JAR:
 
@@ -406,20 +411,18 @@ sudo pacman -S firefox chromium
 
 O projeto segue uma **arquitetura limpa** com interfaces comuns e implementações específicas por sistema operacional.
 
-**MVP:** Apenas Linux implementado
-**Futuro:** Interfaces definidas para Mac, Windows e Android (sem código funcional)
+**Implementado:** Linux e Windows
+**Fora de escopo:** macOS e Android (sem código)
 
 ```
 src/main/java/br/uniube/pi/guialar/
 ├── GuiaLarApplication.java              # Classe principal
 ├── dominio/                             # Core comum (interfaces e modelos)
 │   ├── sistema/
-│   │   ├── TipoSistema.java            # Enum: LINUX, WINDOWS, MAC...
-│   │   └── SistemaOperacional.java     # Interface base OS
+│   │   └── TipoSistema.java            # Enum: LINUX, WINDOWS, MAC...
 │   ├── adaptadores/                     # ⭐ Interfaces por OS
-│   │   ├── DnsChanger.java             # Interface troca DNS
-│   │   ├── BrowserDetector.java        # Interface detecção browsers
-│   │   └── ExtensionInstaller.java     # Interface instalação extensões
+│   │   ├── DnsChanger.java             # Interface troca DNS (Windows)
+│   │   └── BrowserDetector.java        # Interface detecção browsers
 │   ├── distro/
 │   │   ├── TipoDistro.java             # Enum: DEBIAN, FEDORA, ARCH
 │   │   └── InfoDistro.java             # Informações da distribuição
@@ -436,42 +439,45 @@ src/main/java/br/uniube/pi/guialar/
 │       └── PlanoAcao.java              # Plano de ações transparente
 ├── aplicacao/                           # Implementações
 │   ├── adaptadores/                     # ⭐ Implementações por OS
-│   │   └── linux/                      # ✅ MVP: ÚNICO OS IMPLEMENTADO
-│   │       ├── LinuxDnsChanger.java    # NetworkManager/systemd-resolved
-│   │       ├── LinuxBrowserDetector.java # PATH/.desktop/perfis
-│   │       └── LinuxExtensionInstaller.java # policies.json
-│   │   ├── macos/                       # 🔧 Futuro: apenas design
-│   │   ├── windows/                     # 🔧 Futuro: apenas design
-│   │   └── android/                     # 🔧 Futuro: apenas design
+│   │   ├── linux/                      # ✅ NetworkManager/Netplan/resolved/resolv.conf/NixOS
+│   │   │   ├── LinuxDnsBackendSelector.java # Escolhe o método de DNS
+│   │   │   ├── LinuxDnsManifestStore.java   # Manifesto para desfazer
+│   │   │   └── LinuxBrowserDetector.java    # PATH/.desktop/perfis/Flatpak/Snap
+│   │   └── windows/                    # ✅ PowerShell + UAC
+│   │       ├── WindowsDnsChanger.java       # Set-DnsClientServerAddress
+│   │       ├── WindowsDnsManifestStore.java # Manifesto para desfazer
+│   │       └── WindowsBrowserDetector.java
 │   ├── deteccao/
 │   │   ├── DetectorSistemaService.java # Detecta Linux/Windows/Mac
 │   │   ├── DetectorDistroService.java  # Detecta Debian/Fedora/Arch
 │   │   └── DetectorNavegadorService.java # Detecta Firefox/Chromium
 │   ├── dns/
-│   │   ├── ConfiguradorDnsService.java # Troca DNS Linux
-│   │   └── ConfiguradorDnsWindowsService.java # Esboço Windows
+│   │   ├── ConfiguradorDnsService.java      # Fachada (CLI Linux)
+│   │   ├── ConfiguradorDnsLinuxService.java # Um script pkexec por ação
+│   │   └── ConfiguradorDnsWindowsService.java # PowerShell/UAC
 │   ├── extensao/
 │   │   └── InstaladorExtensaoService.java # Instala uBlock Origin/Lite
 │   ├── verificacao/
 │   │   └── VerificacaoDnsService.java  # Smoke tests pós-DNS
 │   └── autorizacao/
 │       └── AutorizadorService.java     # Sistema autorização
+├── gui/
+│   └── GuiaLarGui.java                  # Interface gráfica (tema claro/escuro)
 └── cli/
-    └── GuiaLarCli.java                  # Interface linha de comando
+    ├── GuiaLarCli.java                  # Linha de comando (Linux)
+    └── GuiaLarWindowsCli.java           # Linha de comando (Windows)
 ```
 
 ---
 
-## 🏗️ Arquitetura Multi-OS (Design Futuro)
+## 🏗️ Arquitetura Multi-OS
 
 ### Interfaces Definidas (Core Comum)
 
 | Interface | Responsabilidade | Implementações |
 |-----------|-----------------|----------------|
-| `SistemaOperacional` | Detectar OS | Linux ✅, Mac 🔧, Windows 🔧, Android 🔧 |
-| `DnsChanger` | Trocar DNS | LinuxDnsChanger ✅ |
-| `BrowserDetector` | Detectar browsers | LinuxBrowserDetector ✅ |
-| `ExtensionInstaller` | Instalar extensões | LinuxExtensionInstaller ✅ |
+| `DnsChanger` | Trocar DNS | WindowsDnsChanger ✅ (Linux usa `ConfiguradorDnsLinuxService`) |
+| `BrowserDetector` | Detectar browsers | LinuxBrowserDetector ✅, WindowsBrowserDetector ✅ |
 
 ### Diferenças Técnicas por OS (Documentadas)
 
@@ -479,7 +485,7 @@ src/main/java/br/uniube/pi/guialar/
 - **Elevação:** GUI/CLI como usuário; escrita de DNS e desfazer via **pkexec**; manifesto em `~/.guialar/dns-manifest.properties`
 - **Ordem de backends:** NetworkManager ativo (Wi‑Fi e ethernet) → Netplan (se NM inativo) → systemd-resolved → resolv.conf
 - **DNS:** NetworkManager (nmcli), systemd-resolved (resolvectl), Netplan, resolv.conf
-  - **NetworkManager**: Conexão ativa, `ignore-auto-dns`, IPv4+IPv6, backup em `~/.guialar/backups/`
+  - **NetworkManager**: Conexão ativa, `ignore-auto-dns`, IPv4+IPv6, estado anterior no manifesto `~/.guialar/dns-manifest.properties`
   - **systemd-resolved**: Drop-in `/etc/systemd/resolved.conf.d/99-guialar.conf` (desfazer remove esse arquivo e reinicia o serviço)
   - **Netplan**: YAML em `/etc/netplan/99-guialar-dns.yaml` (Ubuntu Server)
   - **NixOS**: Se NM ativo e sem DNS global conflitante, usa NM; senão mostra trecho `networking.nameservers` para `configuration.nix` (status **aguardando você aplicar** até o smoke test passar)
@@ -574,7 +580,7 @@ Instala adblocker apropriado:
 
 | Sistema Operacional | Status | Notas |
 |---------------------|--------|-------|
-| **Windows 10/11**   | 🔧 Esboço | Instruções PowerShell manuais |
+| **Windows 10/11**   | ✅ Implementado | DNS via PowerShell/UAC, desfazer; testado com mocks |
 | **macOS**           | ❌ Fora do escopo | Não planejado |
 | **Android/iOS**     | ❌ Fora do escopo | Não planejado |
 

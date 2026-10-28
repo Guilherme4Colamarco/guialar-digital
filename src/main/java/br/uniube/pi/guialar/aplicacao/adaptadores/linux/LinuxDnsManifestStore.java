@@ -18,8 +18,6 @@ public class LinuxDnsManifestStore {
 
     public static final String KEY_TIMESTAMP = "timestamp";
     public static final String KEY_METODO = "metodo";
-    /** @deprecated use nm.count + nm.N.* */
-    public static final String KEY_CONEXAO = "conexao_nm";
     public static final String KEY_BACKUP_NM = "backup_nm";
     public static final String KEY_ARQUIVO_NETPLAN = "arquivo_netplan";
     public static final String KEY_NIXOS_SNIPPET = "nixos_snippet";

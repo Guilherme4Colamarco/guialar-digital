@@ -134,7 +134,8 @@ public class LinuxNmManifestValidator {
         if (valor == null || valor.isBlank()) {
             return "";
         }
-        String[] partes = valor.trim().split("\\s+");
+        // nmcli separa por vírgula; o manifesto antigo usa espaço
+        String[] partes = valor.trim().split("[\\s,]+");
         List<String> ok = new ArrayList<>();
         for (String parte : partes) {
             if (!parte.isEmpty() && isEnderecoValido(parte, ipv4)) {

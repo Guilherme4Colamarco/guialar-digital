@@ -20,12 +20,10 @@ O GuiaLar Digital segue uma **arquitetura limpa** que separa:
 ```
 dominio/
 ├── sistema/
-│   ├── TipoSistema.java           # Enum: LINUX, WINDOWS, MACOS, ANDROID
-│   └── SistemaOperacional.java    # Interface base para detecção de OS
+│   └── TipoSistema.java           # Enum: LINUX, WINDOWS, MACOS, ANDROID
 ├── adaptadores/                    # ⭐ Contratos multi-OS
 │   ├── DnsChanger.java            # Interface: configurar()/verificar()/reverter()
-│   ├── BrowserDetector.java       # Interface: detectar()/isInstalado()
-│   └── ExtensionInstaller.java    # Interface: instalar()/isInstalada()/remover()
+│   └── BrowserDetector.java       # Interface: detectar()/isInstalado()
 ├── distro/
 │   ├── TipoDistro.java            # Enum: DEBIAN, FEDORA, ARCH
 │   └── InfoDistro.java            # Informações da distribuição Linux
@@ -50,7 +48,10 @@ dominio/
 aplicacao/
 ├── adaptadores/                    # ⭐ Implementações por OS
 │   ├── linux/
-│   │   ├── LinuxDnsChanger.java
+│   │   ├── LinuxDnsBackendSelector.java   # Escolhe NetworkManager/Netplan/resolved/resolv.conf
+│   │   ├── LinuxNetplanPrivilegedScript.java
+│   │   ├── LinuxDnsManifestStore.java     # Manifesto para desfazer (~/.guialar)
+│   │   ├── NixOsDnsSupport.java
 │   │   └── LinuxBrowserDetector.java
 │   └── windows/
 │       ├── WindowsDnsChanger.java
@@ -63,8 +64,9 @@ aplicacao/
 │   ├── DetectorDistroService.java  # Detecta Debian/Fedora/Arch
 │   └── DetectorNavegadorService.java
 ├── dns/
-│   ├── ConfiguradorDnsService.java
-│   └── ConfiguradorDnsWindowsService.java (esboço)
+│   ├── ConfiguradorDnsService.java        # Fachada usada pela CLI Linux
+│   ├── ConfiguradorDnsLinuxService.java   # Um script pkexec por ação + manifesto
+│   └── ConfiguradorDnsWindowsService.java # PowerShell/UAC + manifesto
 ├── extensao/
 │   └── InstaladorExtensaoService.java
 ├── verificacao/
@@ -89,10 +91,10 @@ public interface DnsChanger {
 ```
 
 **Implementações:**
-- ✅ `LinuxDnsChanger` - NetworkManager/systemd-resolved/Netplan
-- 🔧 `MacOsDnsChanger` (futuro) - networksetup/scutil
-- 🔧 `WindowsDnsChanger` (futuro) - netsh/PowerShell
-- 🔧 `AndroidDnsChanger` (futuro) - Private DNS over TLS
+- ✅ `WindowsDnsChanger` - PowerShell (`Set-DnsClientServerAddress`) com UAC e manifesto
+- ✅ Linux: não usa esta interface; o fluxo fica em `ConfiguradorDnsLinuxService`
+  (NetworkManager, Netplan, systemd-resolved, resolv.conf, NixOS), um script `pkexec` por ação
+- 🔧 macOS e Android: fora de escopo
 
 ### BrowserDetector
 
@@ -105,25 +107,16 @@ public interface BrowserDetector {
 
 **Implementações:**
 - ✅ `LinuxBrowserDetector` - PATH/.desktop/perfis ~/.config/
-- 🔧 `MacOsBrowserDetector` (futuro) - /Applications/, Homebrew
-- 🔧 `WindowsBrowserDetector` (futuro) - Program Files, Registry
-- 🔧 `AndroidBrowserDetector` (futuro) - pm list packages
+- ✅ `WindowsBrowserDetector` - Program Files e perfis
+- 🔧 macOS e Android: fora de escopo
 
-### ExtensionInstaller
+### Extensões de navegador
 
-```java
-public interface ExtensionInstaller {
-    boolean instalar(Navegador navegador);
-    boolean isInstalada(Navegador navegador);
-    boolean remover(Navegador navegador);
-}
-```
-
-**Implementações:**
-- ✅ `LinuxExtensionInstaller` - policies.json (Firefox), managed policies (Chromium)
-- 🔧 `MacOsExtensionInstaller` (futuro) - Similar, caminhos diferentes
-- 🔧 `WindowsExtensionInstaller` (futuro) - Registry + arquivos
-- 🔧 `AndroidExtensionInstaller` (futuro) - Instalação manual via store
+Não há interface própria: `InstaladorExtensaoService` (Linux) grava as instruções do
+uBlock Origin Lite para Chromium e um `policies.json` para Firefox. **Limitação conhecida:**
+o `policies.json` é gravado na pasta de perfil do usuário, mas o Firefox só lê políticas da
+pasta `distribution/` da instalação ou de `/etc/firefox/policies/` (exigem administrador).
+No Windows o app abre as páginas das lojas e mostra um guia.
 
 ---
 
@@ -171,7 +164,7 @@ public interface ExtensionInstaller {
 
 ---
 
-### 🔧 Windows (Futuro - Design apenas)
+### ✅ Windows (Implementado: diagnóstico, DNS via PowerShell/UAC, desfazer, guias)
 
 #### DNS ⚠️ DIFERENTE DO LINUX
 - **netsh:** `netsh interface ipv4 set dns "Ethernet" static 1.1.1.3`
@@ -220,33 +213,13 @@ public interface ExtensionInstaller {
 
 ---
 
-## 🎯 Fluxo de Seleção de Adaptador (Futuro)
+## 🎯 Seleção por sistema operacional
 
-```java
-// Pseudocódigo - não implementado no MVP
-
-SistemaOperacional os = DetectorSistemaService.detectar();
-
-DnsChanger dnsChanger = switch (os.getTipo()) {
-    case LINUX -> new LinuxDnsChanger(distro);
-    case MACOS -> new MacOsDnsChanger();      // futuro
-    case WINDOWS -> new WindowsDnsChanger();  // futuro
-    case ANDROID -> new AndroidDnsChanger();  // futuro
-    default -> throw new UnsupportedOperationException();
-};
-
-BrowserDetector browserDetector = switch (os.getTipo()) {
-    case LINUX -> new LinuxBrowserDetector();
-    case MACOS -> new MacOsBrowserDetector();   // futuro
-    case WINDOWS -> new WindowsBrowserDetector(); // futuro
-    case ANDROID -> new AndroidBrowserDetector(); // futuro
-    default -> throw new UnsupportedOperationException();
-};
-
-// ... usar as interfaces
-ConfiguracaoDns resultado = dnsChanger.configurar(ServidorDns.getPadrao());
-List<Navegador> navegadores = browserDetector.detectar();
-```
+`GuiaLarApplication` detecta o sistema (`DetectorSistemaService`) e escolhe o fluxo:
+- **Windows:** `GuiaLarWindowsCli` / GUI → `ConfiguradorDnsWindowsService` → `WindowsDnsChanger`.
+- **Linux:** `GuiaLarCli` / GUI → `ConfiguradorDnsLinuxService`, que usa
+  `LinuxDnsBackendSelector` para escolher NetworkManager, Netplan, systemd-resolved ou
+  resolv.conf (NixOS gera um trecho para o `configuration.nix`).
 
 ---
 
@@ -255,16 +228,15 @@ List<Navegador> navegadores = browserDetector.detectar();
 | Componente | Linux | macOS | Windows | Android |
 |------------|-------|-------|---------|---------|
 | **Interface Definida** | ✅ | ✅ | ✅ | ✅ |
-| **Implementação** | ✅ | ❌ | ❌ | ❌ |
+| **Implementação** | ✅ | ❌ | ✅ | ❌ |
 | **Documentação** | ✅ | ✅ | ✅ | ✅ |
-| **Testes** | ✅ | ❌ | ❌ | ❌ |
+| **Testes (mocks)** | ✅ | ❌ | ✅ | ❌ |
 
 **Próximos passos (fora do MVP):**
-1. Implementar `MacOsDnsChanger`, `MacOsBrowserDetector`, `MacOsExtensionInstaller`
-2. Implementar `WindowsDnsChanger`, `WindowsBrowserDetector`, `WindowsExtensionInstaller`
-3. Implementar `AndroidDnsChanger` (abordagem educacional, não automática)
-4. Criar factory para selecionar adaptador correto por OS
-5. Testes em cada plataforma
+1. Implementar macOS (`networksetup`/`scutil`)
+2. Android: abordagem educacional (DNS privado configurado pelo usuário)
+3. Unificar Linux e Windows atrás de uma mesma interface (hoje há `if` por sistema na GUI)
+4. Testes em máquinas reais de cada plataforma
 
 ---
 
