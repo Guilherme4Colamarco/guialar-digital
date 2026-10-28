@@ -42,6 +42,7 @@ public class LinuxDnsLogicTest {
         testParserEscapadoDoisPontos();
         testFamiliesNaoConfunde11130();
         testUmPkexecPorAplicarNm();
+        testAplicarNmComVariosDnsDoNmcli();
         testScriptContemIpv6EIgnoreAutoDns();
         testResolvedRestartNoScript();
         testPkexec126e127();
@@ -120,6 +121,31 @@ public class LinuxDnsLogicTest {
             System.err.println("FALHA aplicado ou aviso verificacao: " + r.getMensagem());
             falhas++;
         }
+    }
+
+    /** Saída real do nmcli -t com dois DNS: vírgula entre eles e ':' escapado no IPv6. */
+    private static void testAplicarNmComVariosDnsDoNmcli() throws Exception {
+        FakeLinuxCommandRunner runner = runnerComNmAtivo();
+        runner.responder("nmcli -t -f NAME,TYPE,DEVICE connection show --active",
+            new LinuxCommandResult(0, "Wi-Fi:802-11-wireless:wlan0", "", false));
+        stubUuid(runner, "Wi-Fi", UUID_WIFI);
+        runner.responder("nmcli -t -f UUID,NAME connection show",
+            new LinuxCommandResult(0, UUID_WIFI + ":Wi-Fi", "", false));
+        runner.responder("nmcli -t -f ipv4.dns,ipv6.dns,ipv4.ignore-auto-dns,ipv6.ignore-auto-dns connection show Wi-Fi",
+            new LinuxCommandResult(0, "ipv4.dns:1.1.1.3,1.0.0.3\n"
+                + "ipv6.dns:2606\\:4700\\:4700\\:\\:1113,2606\\:4700\\:4700\\:\\:1003\n"
+                + "ipv4.ignore-auto-dns:yes\nipv6.ignore-auto-dns:yes", "", false));
+        Path manifest = manifestTemp();
+        ConfiguracaoDns r = svc(runner, manifest).configurar(
+            new InfoDistro(TipoDistro.DEBIAN, "PikaOS", "4", "NetworkManager"));
+        assertEq("um script pkexec", 1, runner.getScriptsPrivilegiados().size());
+        String script = runner.getScriptsPrivilegiados().get(0);
+        assertTrue("restaura IPv4 original", script.contains("ipv4.dns '1.1.1.3 1.0.0.3'"));
+        assertTrue("restaura IPv6 original",
+            script.contains("ipv6.dns '2606:4700:4700::1113 2606:4700:4700::1003'"));
+        assertTrue("não falhou na validação: " + r.getMensagem(),
+            r.getMensagem() == null || !r.getMensagem().contains("inválido"));
+        ok("testAplicarNmComVariosDnsDoNmcli");
     }
 
     private static void testScriptContemIpv6EIgnoreAutoDns() throws Exception {
