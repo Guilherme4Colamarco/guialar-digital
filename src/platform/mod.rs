@@ -10,6 +10,12 @@ use crate::config::DnsStateManifest;
 use anyhow::Result;
 
 pub fn apply_dns() -> Result<()> {
+    // Idempotente: um segundo `apply` regravaria o manifesto com o DNS já da Cloudflare
+    // como "original" e o `revert` nunca restauraria o DNS verdadeiro.
+    if DnsStateManifest::load()?.is_some() {
+        println!("ℹ️  A proteção já está ativa. Use 'guialar revert' antes de aplicar de novo.");
+        return Ok(());
+    }
     #[cfg(target_os = "linux")]
     {
         linux::apply_dns()

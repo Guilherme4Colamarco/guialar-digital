@@ -55,3 +55,28 @@ fn unknown_subcommand_is_rejected() {
         .expect("executa comando inválido");
     assert!(!out.status.success(), "subcomando desconhecido deve falhar");
 }
+
+/// Regressão do achado do QA (T10): segundo `apply` não pode tocar no sistema nem
+/// sobrescrever o manifesto com o DNS já filtrado como se fosse o original.
+#[cfg(unix)]
+#[test]
+fn apply_twice_keeps_original_manifest_untouched() {
+    let home = std::env::temp_dir().join(format!("guialar-dup-{}", std::process::id()));
+    let dir = home.join(".config").join("guialar");
+    std::fs::create_dir_all(&dir).unwrap();
+    let manifest = r#"{"backend":"DirectResolvConf","applied_at_utc":"1","connections":[],"previous_resolv_conf":"nameserver 9.9.9.9\n"}"#;
+    std::fs::write(dir.join("state.json"), manifest).unwrap();
+
+    let out = bin()
+        .arg("apply")
+        .env("HOME", &home)
+        .env_remove("SUDO_USER")
+        .output()
+        .expect("executa apply");
+
+    let after = std::fs::read_to_string(dir.join("state.json")).unwrap();
+    std::fs::remove_dir_all(&home).ok();
+    assert!(out.status.success(), "apply duplicado deve sair 0");
+    assert!(String::from_utf8_lossy(&out.stdout).contains("já está ativa"));
+    assert_eq!(after, manifest, "manifesto original não pode mudar");
+}
