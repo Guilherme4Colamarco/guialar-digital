@@ -1,0 +1,11 @@
+# QA (vh-qa): validação Docker do port Rust — build multi-stage + runtime slim.
+# Fix QA-002: build e runtime na MESMA distro (bookworm) para casar a glibc
+# (rust:1-slim aponta p/ trixie e gera binário com GLIBC_2.39 que Warn em bookworm).
+FROM rust:1-bookworm AS build
+WORKDIR /src
+COPY . .
+RUN cargo build --release
+
+FROM debian:bookworm-slim
+COPY --from=build /src/target/release/guialar /usr/local/bin/guialar
+ENTRYPOINT ["guialar"]

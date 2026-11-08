@@ -1,0 +1,341 @@
+//! Backend Linux para configuração e reversão de DNS.
+//!
+//! Suporta 4 estratégias em ordem de prioridade:
+//! 1. NetworkManager (`nmcli` por UUID da conexão ativa)
+//! 2. systemd-resolved (drop-in em `/etc/systemd/resolved.conf.d/99-guialar.conf`)
+//! 3. Runit / Openresolv (`resolvconf` ou serviços em `/var/service`)
+//! 4. Arquivo direto `/etc/resolv.conf` (com backup e substituição atômica)
+
+use std::fs::{self, OpenOptions};
+use std::io::Write;
+use std::net::Ipv4Addr;
+use std::path::Path;
+use std::process::Command;
+use anyhow::{bail, Context, Result};
+
+use crate::config::{BackendKind, ConnectionBackup, DnsStateManifest, CLOUDFLARE_IPV4, CLOUDFLARE_IPV6};
+
+/// Detecta qual subsistema de DNS está ativo no ambiente Linux.
+pub fn detect_active_backend() -> BackendKind {
+    // 1. Checa NetworkManager ativo (/run/NetworkManager existe ou `nmcli general status` responde)
+    if Path::new("/run/NetworkManager").exists() || is_service_active_runit("NetworkManager") {
+        if let Ok(output) = Command::new("nmcli").arg("general").arg("status").output() {
+            if output.status.success() {
+                return BackendKind::NetworkManager;
+            }
+        }
+    }
+
+    // 2. Checa systemd-resolved
+    if Path::new("/run/systemd/resolve").exists() {
+        return BackendKind::SystemdResolved;
+    }
+
+    // 3. Checa se o sistema roda runit (/run/runit existe) com resolvconf ou openresolv
+    if Path::new("/run/runit").exists() || Path::new("/var/service").exists() {
+        if is_command_available("resolvconf") {
+            return BackendKind::OpenResolvRunit;
+        }
+    }
+
+    // Fallback: se resolvconf existir no PATH
+    if is_command_available("resolvconf") {
+        return BackendKind::OpenResolvRunit;
+    }
+
+    // Fallback universal seguro
+    BackendKind::DirectResolvConf
+}
+
+/// Aplica a proteção familiar conforme o backend detectado.
+pub fn apply_dns() -> Result<()> {
+    let backend = detect_active_backend();
+    let mut manifest = DnsStateManifest::new(backend.clone());
+
+    match backend {
+        BackendKind::NetworkManager => {
+            apply_network_manager(&mut manifest)?;
+        }
+        BackendKind::SystemdResolved => {
+            apply_systemd_resolved(&mut manifest)?;
+        }
+        BackendKind::OpenResolvRunit => {
+            apply_openresolv_runit(&mut manifest)?;
+        }
+        BackendKind::DirectResolvConf => {
+            apply_direct_resolv_conf(&mut manifest)?;
+        }
+        BackendKind::WindowsPowerShell => {
+            bail!("Backend Windows chamado em ambiente Linux");
+        }
+    }
+
+    manifest.save_atomic()?;
+    Ok(())
+}
+
+/// Reverte as configurações para o estado original utilizando o manifesto.
+pub fn revert_dns(manifest: &DnsStateManifest) -> Result<()> {
+    match manifest.backend {
+        BackendKind::NetworkManager => {
+            revert_network_manager(manifest)?;
+        }
+        BackendKind::SystemdResolved => {
+            revert_systemd_resolved()?;
+        }
+        BackendKind::OpenResolvRunit => {
+            revert_openresolv_runit()?;
+        }
+        BackendKind::DirectResolvConf => {
+            revert_direct_resolv_conf(manifest)?;
+        }
+        BackendKind::WindowsPowerShell => {
+            bail!("Backend Windows chamado em ambiente Linux");
+        }
+    }
+
+    DnsStateManifest::remove_manifest()?;
+    Ok(())
+}
+
+// ============================================================================
+// 1. NetworkManager Implementation (via nmcli)
+// ============================================================================
+
+fn apply_network_manager(manifest: &mut DnsStateManifest) -> Result<()> {
+    let active_uuids = get_active_nm_connections()?;
+    if active_uuids.is_empty() {
+        bail!("Nenhuma conexão ativa do NetworkManager (ethernet/wifi) encontrada");
+    }
+
+    let ipv4_str = format!("{} {}", CLOUDFLARE_IPV4[0], CLOUDFLARE_IPV4[1]);
+    let ipv6_str = format!("{} {}", CLOUDFLARE_IPV6[0], CLOUDFLARE_IPV6[1]);
+
+    for uuid in &active_uuids {
+        let backup = inspect_nm_connection(uuid)?;
+        manifest.connections.push(backup);
+
+        run_privileged_command("nmcli", &["connection", "modify", uuid, "ipv4.dns", &ipv4_str, "ipv4.ignore-auto-dns", "yes"])?;
+        let _ = run_privileged_command("nmcli", &["connection", "modify", uuid, "ipv6.dns", &ipv6_str, "ipv6.ignore-auto-dns", "yes"]);
+        run_privileged_command("nmcli", &["connection", "up", "uuid", uuid])?;
+    }
+
+    Ok(())
+}
+
+fn revert_network_manager(manifest: &DnsStateManifest) -> Result<()> {
+    for conn in &manifest.connections {
+        let uuid = &conn.id;
+        if conn.was_dhcp_ipv4 {
+            run_privileged_command("nmcli", &["connection", "modify", uuid, "ipv4.dns", "", "ipv4.ignore-auto-dns", "no"])?;
+        } else if !conn.original_ipv4_dns.is_empty() {
+            let prev: Vec<String> = conn.original_ipv4_dns.iter().map(|ip| ip.to_string()).collect();
+            run_privileged_command("nmcli", &["connection", "modify", uuid, "ipv4.dns", &prev.join(" ")])?;
+        }
+
+        if conn.was_dhcp_ipv6 {
+            let _ = run_privileged_command("nmcli", &["connection", "modify", uuid, "ipv6.dns", "", "ipv6.ignore-auto-dns", "no"]);
+        }
+
+        let _ = run_privileged_command("nmcli", &["connection", "up", "uuid", uuid]);
+    }
+    Ok(())
+}
+
+fn get_active_nm_connections() -> Result<Vec<String>> {
+    let output = Command::new("nmcli")
+        .args(["-t", "-f", "UUID,TYPE", "connection", "show", "--active"])
+        .output()
+        .context("Falha ao executar nmcli")?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut uuids = Vec::new();
+
+    for line in stdout.lines() {
+        let parts: Vec<&str> = line.split(':').collect();
+        if parts.len() >= 2 {
+            let uuid = parts[0];
+            let conn_type = parts[1];
+            if conn_type.contains("ethernet") || conn_type.contains("wireless") || conn_type.contains("wifi") {
+                uuids.push(uuid.to_string());
+            }
+        }
+    }
+    Ok(uuids)
+}
+
+fn inspect_nm_connection(uuid: &str) -> Result<ConnectionBackup> {
+    let output = Command::new("nmcli")
+        .args(["-t", "-f", "ipv4.dns,ipv4.ignore-auto-dns", "connection", "show", uuid])
+        .output()
+        .context("Falha ao inspecionar conexão do NetworkManager")?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut was_dhcp = true;
+    let mut original_ips = Vec::new();
+
+    for line in stdout.lines() {
+        if line.starts_with("ipv4.ignore-auto-dns:") {
+            if line.contains("yes") {
+                was_dhcp = false;
+            }
+        } else if line.starts_with("ipv4.dns:") {
+            let val = line.trim_start_matches("ipv4.dns:").trim();
+            for ip_str in val.split_whitespace() {
+                if let Ok(ip) = ip_str.parse::<Ipv4Addr>() {
+                    original_ips.push(ip);
+                }
+            }
+        }
+    }
+
+    Ok(ConnectionBackup {
+        id: uuid.to_string(),
+        original_ipv4_dns: original_ips,
+        original_ipv6_dns: Vec::new(),
+        was_dhcp_ipv4: was_dhcp,
+        was_dhcp_ipv6: true,
+    })
+}
+
+// ============================================================================
+// 2. systemd-resolved Implementation
+// ============================================================================
+
+fn apply_systemd_resolved(_manifest: &mut DnsStateManifest) -> Result<()> {
+    let dropin_dir = Path::new("/etc/systemd/resolved.conf.d");
+    if !dropin_dir.exists() {
+        run_privileged_command("mkdir", &["-p", "/etc/systemd/resolved.conf.d"])?;
+    }
+
+    let conf_content = format!(
+        "[Resolve]\nDNS={} {} {} {}\nFallbackDNS=1.1.1.1 8.8.8.8\n",
+        CLOUDFLARE_IPV4[0], CLOUDFLARE_IPV4[1], CLOUDFLARE_IPV6[0], CLOUDFLARE_IPV6[1]
+    );
+
+    let temp_file = "/tmp/99-guialar.conf.tmp";
+    fs::write(temp_file, conf_content)?;
+    run_privileged_command("cp", &[temp_file, "/etc/systemd/resolved.conf.d/99-guialar.conf"])?;
+    let _ = fs::remove_file(temp_file);
+
+    run_privileged_command("systemctl", &["restart", "systemd-resolved"])?;
+    Ok(())
+}
+
+fn revert_systemd_resolved() -> Result<()> {
+    let dropin_path = "/etc/systemd/resolved.conf.d/99-guialar.conf";
+    if Path::new(dropin_path).exists() {
+        run_privileged_command("rm", &["-f", dropin_path])?;
+        let _ = run_privileged_command("systemctl", &["restart", "systemd-resolved"]);
+    }
+    Ok(())
+}
+
+// ============================================================================
+// 3. Runit & Openresolv Implementation (Void Linux / runit services)
+// ============================================================================
+
+fn apply_openresolv_runit(_manifest: &mut DnsStateManifest) -> Result<()> {
+    let conf = format!(
+        "nameserver {}\nnameserver {}\nnameserver {}\nnameserver {}\n",
+        CLOUDFLARE_IPV4[0], CLOUDFLARE_IPV4[1], CLOUDFLARE_IPV6[0], CLOUDFLARE_IPV6[1]
+    );
+
+    let temp_file = "/tmp/guialar_resolvconf.tmp";
+    fs::write(temp_file, conf)?;
+
+    let status = Command::new("pkexec")
+        .args(["sh", "-c", "resolvconf -a guialar < /tmp/guialar_resolvconf.tmp"])
+        .status()?;
+
+    let _ = fs::remove_file(temp_file);
+
+    if !status.success() {
+        bail!("Falha ao aplicar DNS via resolvconf no runit");
+    }
+    Ok(())
+}
+
+fn revert_openresolv_runit() -> Result<()> {
+    let status = Command::new("pkexec")
+        .args(["resolvconf", "-d", "guialar"])
+        .status()?;
+
+    if !status.success() {
+        bail!("Falha ao remover interface guialar do resolvconf");
+    }
+    Ok(())
+}
+
+// ============================================================================
+// 4. Direct /etc/resolv.conf Fallback (Atomic Replace)
+// ============================================================================
+
+fn apply_direct_resolv_conf(manifest: &mut DnsStateManifest) -> Result<()> {
+    let resolv_path = Path::new("/etc/resolv.conf");
+    if resolv_path.exists() {
+        let current = fs::read_to_string(resolv_path).unwrap_or_default();
+        manifest.previous_resolv_conf = Some(current);
+    }
+
+    let content = format!(
+        "# Gerado pelo GuiaLar Digital - Protecao Familiar\nnameserver {}\nnameserver {}\nnameserver {}\nnameserver {}\n",
+        CLOUDFLARE_IPV4[0], CLOUDFLARE_IPV4[1], CLOUDFLARE_IPV6[0], CLOUDFLARE_IPV6[1]
+    );
+
+    let temp_path = "/tmp/resolv.conf.guialar.tmp";
+    let mut file = OpenOptions::new().write(true).create(true).truncate(true).open(temp_path)?;
+    file.write_all(content.as_bytes())?;
+    file.flush()?;
+
+    run_privileged_command("cp", &[temp_path, "/etc/resolv.conf"])?;
+    let _ = fs::remove_file(temp_path);
+    Ok(())
+}
+
+fn revert_direct_resolv_conf(manifest: &DnsStateManifest) -> Result<()> {
+    if let Some(ref prev) = manifest.previous_resolv_conf {
+        let temp_path = "/tmp/resolv.conf.revert.tmp";
+        fs::write(temp_path, prev)?;
+        run_privileged_command("cp", &[temp_path, "/etc/resolv.conf"])?;
+        let _ = fs::remove_file(temp_path);
+    }
+    Ok(())
+}
+
+// ============================================================================
+// Helpers de Sistema
+// ============================================================================
+
+fn is_command_available(cmd: &str) -> bool {
+    Command::new("which")
+        .arg(cmd)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+fn is_service_active_runit(service_name: &str) -> bool {
+    let service_dir = Path::new("/var/service").join(service_name);
+    if service_dir.exists() {
+        if let Ok(output) = Command::new("sv").arg("status").arg(service_name).output() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            return stdout.starts_with("run:");
+        }
+    }
+    false
+}
+
+fn run_privileged_command(program: &str, args: &[&str]) -> Result<()> {
+    let mut cmd = Command::new("pkexec");
+    cmd.arg(program);
+    for arg in args {
+        cmd.arg(arg);
+    }
+
+    let status = cmd.status().with_context(|| format!("Falha ao executar {} com pkexec", program))?;
+    if !status.success() {
+        bail!("Comando {} finalizou com erro ({:?})", program, status.code());
+    }
+    Ok(())
+}
