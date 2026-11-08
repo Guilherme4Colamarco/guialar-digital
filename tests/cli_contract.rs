@@ -17,12 +17,12 @@ fn help_lists_the_four_public_subcommands() {
 }
 
 #[test]
-fn version_reports_0_2_0() {
+fn version_reports_cargo_version() {
     let out = bin().arg("--version").output().expect("executa --version");
     assert!(out.status.success());
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        stdout.contains("0.2.0"),
+        stdout.contains(env!("CARGO_PKG_VERSION")),
         "versão inesperada: {}",
         stdout.trim()
     );
