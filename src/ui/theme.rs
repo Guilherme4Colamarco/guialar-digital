@@ -14,6 +14,34 @@ pub fn gtk_theme_is_dark(name: &str) -> bool {
     n.contains("dark") || n.contains("black")
 }
 
+/// `gtk-application-prefer-dark-theme=1` ou `gtk-theme-name` escuro em um `settings.ini` do GTK.
+#[cfg_attr(windows, allow(dead_code))]
+pub fn ini_prefers_dark(content: &str) -> bool {
+    content.lines().any(|l| {
+        let Some((k, v)) = l.split_once('=') else {
+            return false;
+        };
+        let (k, v) = (k.trim(), v.trim());
+        (k == "gtk-application-prefer-dark-theme" && matches!(v, "1" | "true" | "True"))
+            || (k == "gtk-theme-name" && gtk_theme_is_dark(v))
+    })
+}
+
+/// Junta as fontes de tema do desktop Linux: `GTK_THEME`, GSettings (`color-scheme`,
+/// `gtk-theme`) e `settings.ini`.
+#[cfg_attr(windows, allow(dead_code))]
+pub fn desktop_prefers_dark(
+    env_theme: Option<&str>,
+    color_scheme: Option<&str>,
+    gtk_theme: Option<&str>,
+    ini: Option<&str>,
+) -> bool {
+    env_theme.is_some_and(gtk_theme_is_dark)
+        || color_scheme == Some("prefer-dark")
+        || gtk_theme.is_some_and(gtk_theme_is_dark)
+        || ini.is_some_and(ini_prefers_dark)
+}
+
 /// Fotografia do sistema exibida na janela.
 #[derive(Debug, Clone)]
 pub struct Snapshot {
@@ -149,5 +177,30 @@ mod tests {
             0xFFFF_FFFF_8000_0001u64
         );
         assert_ne!(0x8000_0001u32 as u64, 0xFFFF_FFFF_8000_0001u64);
+    }
+
+    #[test]
+    fn fontes_de_tema_do_desktop() {
+        assert!(desktop_prefers_dark(Some("Adwaita:dark"), None, None, None));
+        assert!(desktop_prefers_dark(None, Some("prefer-dark"), None, None));
+        assert!(desktop_prefers_dark(
+            None,
+            Some("default"),
+            Some("Arc-Dark"),
+            None
+        ));
+        assert!(desktop_prefers_dark(
+            None,
+            None,
+            None,
+            Some("[Settings]\ngtk-application-prefer-dark-theme = 1\n")
+        ));
+        assert!(!desktop_prefers_dark(
+            None,
+            Some("default"),
+            Some("Adwaita"),
+            Some("[Settings]\ngtk-theme-name=Adwaita\n")
+        ));
+        assert!(!desktop_prefers_dark(None, None, None, None));
     }
 }

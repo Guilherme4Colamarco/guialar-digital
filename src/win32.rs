@@ -116,43 +116,50 @@ extern "system" {
 pub const HKEY_CURRENT_USER: isize = 0x8000_0001u32 as i32 as isize;
 pub const RRF_RT_REG_DWORD: u32 = 0x0000_0010;
 
-/// Funções não documentadas do `uxtheme.dll`, importadas por ordinal (modo escuro dos controles Win32).
-fn uxtheme_ordinal(ordinal: usize) -> *mut c_void {
-    // SAFETY: nome terminado em zero; o ordinal vai no lugar do ponteiro (convenção do Win32).
-    unsafe {
-        let m = LoadLibraryW(w("uxtheme.dll").as_ptr());
-        if m.is_null() {
-            return std::ptr::null_mut();
+/// Ponteiros (como `usize`; 0 = indisponível) dos ordinais 135, 136 e 133 do `uxtheme.dll`.
+static UXTHEME: std::sync::OnceLock<[usize; 3]> = std::sync::OnceLock::new();
+
+/// Funções não documentadas do `uxtheme.dll`, resolvidas uma só vez (modo escuro dos controles Win32).
+fn uxtheme_fns() -> [usize; 3] {
+    *UXTHEME.get_or_init(|| {
+        // SAFETY: `#[link(name = "uxtheme")]` já carrega a DLL; o ordinal vai no lugar do ponteiro de nome.
+        unsafe {
+            let mut m = GetModuleHandleW(w("uxtheme.dll").as_ptr());
+            if m.is_null() {
+                m = LoadLibraryW(w("uxtheme.dll").as_ptr());
+            }
+            if m.is_null() {
+                return [0; 3];
+            }
+            [135usize, 136, 133].map(|o| GetProcAddress(m, o as *const u8) as usize)
         }
-        GetProcAddress(m, ordinal as *const u8)
-    }
+    })
 }
 
 /// Ordinal 135 `SetPreferredAppMode(AllowDark)` + ordinal 136 `FlushMenuThemes()`.
 pub fn enable_dark_mode_for_process() {
+    let f = uxtheme_fns();
     // SAFETY: assinaturas conhecidas dos ordinais; ponteiro nulo (Windows antigo) é ignorado.
     unsafe {
-        let f = uxtheme_ordinal(135);
-        if !f.is_null() {
-            let f: unsafe extern "system" fn(i32) -> i32 = std::mem::transmute(f);
-            f(1);
+        if f[0] != 0 {
+            let g: unsafe extern "system" fn(i32) -> i32 = std::mem::transmute(f[0]);
+            g(1);
         }
-        let f = uxtheme_ordinal(136);
-        if !f.is_null() {
-            let f: unsafe extern "system" fn() = std::mem::transmute(f);
-            f();
+        if f[1] != 0 {
+            let g: unsafe extern "system" fn() = std::mem::transmute(f[1]);
+            g();
         }
     }
 }
 
 /// Ordinal 133 `AllowDarkModeForWindow(hwnd, allow)`.
 pub fn allow_dark_mode_for_window(hwnd: HWND, allow: bool) {
+    let f = uxtheme_fns();
     // SAFETY: assinatura conhecida do ordinal; ponteiro nulo é ignorado.
     unsafe {
-        let f = uxtheme_ordinal(133);
-        if !f.is_null() {
-            let f: unsafe extern "system" fn(HWND, i32) -> i32 = std::mem::transmute(f);
-            f(hwnd, allow as i32);
+        if f[2] != 0 {
+            let g: unsafe extern "system" fn(HWND, i32) -> i32 = std::mem::transmute(f[2]);
+            g(hwnd, allow as i32);
         }
     }
 }

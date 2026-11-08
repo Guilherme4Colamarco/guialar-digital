@@ -287,8 +287,7 @@ fn place_buttons(hwnd: HWND) {
 
 fn set_busy(hwnd: HWND, busy: bool) {
     STATE.lock().unwrap().busy = busy;
-    for (i, b) in BUTTONS.lock().unwrap().iter().enumerate() {
-        let _ = i;
+    for b in BUTTONS.lock().unwrap().iter() {
         // SAFETY: handles de botões filhos.
         unsafe { EnableWindow(*b as HWND, (!busy) as i32) };
     }

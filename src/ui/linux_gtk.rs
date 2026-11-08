@@ -62,9 +62,12 @@ mod imp {
         g_signal_connect_data: unsafe extern "C" fn(P, *const c_char, P, P, P, c_int) -> u64,
         g_application_run: unsafe extern "C" fn(P, c_int, P) -> c_int,
         g_object_unref: unsafe extern "C" fn(P),
-        g_object_get: unsafe extern "C" fn(P, *const c_char, *mut P, P),
         g_free: unsafe extern "C" fn(P),
-        gtk_settings_get_default: unsafe extern "C" fn() -> P,
+        g_settings_schema_source_get_default: unsafe extern "C" fn() -> P,
+        g_settings_schema_source_lookup: unsafe extern "C" fn(P, *const c_char, c_int) -> P,
+        g_settings_schema_unref: unsafe extern "C" fn(P),
+        g_settings_new: unsafe extern "C" fn(*const c_char) -> P,
+        g_settings_get_string: unsafe extern "C" fn(P, *const c_char) -> P,
         adw_style_manager_get_default: unsafe extern "C" fn() -> P,
         adw_style_manager_set_color_scheme: unsafe extern "C" fn(P, c_int),
         adw_init: unsafe extern "C" fn(),
@@ -137,39 +140,107 @@ mod imp {
         UI.lock().unwrap().unwrap_or_default()
     }
 
-    /// Segue o tema do sistema: `GTK_THEME`/`gtk-theme-name` escuro => PREFER_DARK (4);
-    /// senão DEFAULT (0), que segue o portal XDG (GNOME/KDE/COSMIC).
+    // AdwColorScheme
+    const ADW_COLOR_SCHEME_DEFAULT: c_int = 0; // segue o portal XDG (GNOME/KDE/COSMIC)
+    #[allow(dead_code)]
+    const ADW_COLOR_SCHEME_PREFER_DARK: c_int = 3;
+    // Força escuro mesmo se o portal responder "claro" (ex.: XFCE com tema GTK -dark, sem portal).
+    const ADW_COLOR_SCHEME_FORCE_DARK: c_int = 4;
+
+    const SCHEMA_INTERFACE: &str = "org.gnome.desktop.interface";
+
+    /// GSettings vivo durante o `run` (para os sinais `changed::*`); 0 = schema ausente.
+    static GSETTINGS: Mutex<usize> = Mutex::new(0);
+
+    /// `adw_init()` sobrescreve `GtkSettings:gtk-theme-name`; por isso a leitura vem do GSettings,
+    /// de `GTK_THEME` e do `settings.ini`, nunca do `GtkSettings` depois do `adw_init`.
+    fn gsettings_string(settings: usize, key: &str) -> Option<String> {
+        if settings == 0 {
+            return None;
+        }
+        let a = api();
+        // SAFETY: `settings` é um GSettings vivo; a string devolvida é nossa e liberada com `g_free`.
+        unsafe {
+            let p = (a.g_settings_get_string)(settings as P, cs(key).as_ptr());
+            if p.is_null() {
+                return None;
+            }
+            let v = std::ffi::CStr::from_ptr(p as *const c_char)
+                .to_string_lossy()
+                .into_owned();
+            (a.g_free)(p);
+            Some(v)
+        }
+    }
+
+    fn settings_ini() -> Option<String> {
+        let base = std::env::var_os("XDG_CONFIG_HOME")
+            .map(std::path::PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".config"))
+            })?;
+        std::fs::read_to_string(base.join("gtk-3.0/settings.ini")).ok()
+    }
+
+    /// Segue o tema do sistema: escuro detectado => FORCE_DARK (4); senão DEFAULT (0).
     fn sync_system_color_scheme() {
         let a = api();
-        // SAFETY: chamado na thread principal; a string de `g_object_get` é liberada com `g_free`.
+        let gs = *GSETTINGS.lock().unwrap();
+        let env = std::env::var("GTK_THEME").ok();
+        let dark = theme::desktop_prefers_dark(
+            env.as_deref(),
+            gsettings_string(gs, "color-scheme").as_deref(),
+            gsettings_string(gs, "gtk-theme").as_deref(),
+            settings_ini().as_deref(),
+        );
+        // SAFETY: chamado na thread principal.
         unsafe {
-            let mut dark = std::env::var("GTK_THEME")
-                .map(|t| theme::gtk_theme_is_dark(&t))
-                .unwrap_or(false);
-            let settings = (a.gtk_settings_get_default)();
-            if !dark && !settings.is_null() {
-                let mut name: P = std::ptr::null_mut();
-                (a.g_object_get)(
-                    settings,
-                    cs("gtk-theme-name").as_ptr(),
-                    &mut name,
-                    std::ptr::null_mut(),
-                );
-                if !name.is_null() {
-                    let n = std::ffi::CStr::from_ptr(name as *const c_char).to_string_lossy();
-                    dark = theme::gtk_theme_is_dark(&n);
-                    (a.g_free)(name);
-                }
-            }
             let sm = (a.adw_style_manager_get_default)();
             if !sm.is_null() {
-                (a.adw_style_manager_set_color_scheme)(sm, if dark { 4 } else { 0 });
+                let scheme = if dark {
+                    ADW_COLOR_SCHEME_FORCE_DARK
+                } else {
+                    ADW_COLOR_SCHEME_DEFAULT
+                };
+                (a.adw_style_manager_set_color_scheme)(sm, scheme);
             }
         }
     }
 
-    unsafe extern "C" fn on_theme_name_changed(_s: P, _p: P, _d: P) {
+    unsafe extern "C" fn on_setting_changed(_s: P, _key: P, _d: P) {
         sync_system_color_scheme();
+    }
+
+    /// Abre o GSettings da interface só se o schema existir (senão o GLib abortaria o processo).
+    fn open_interface_settings() -> usize {
+        let a = api();
+        // SAFETY: consulta de schema na thread principal; o schema é liberado após o uso.
+        unsafe {
+            let src = (a.g_settings_schema_source_get_default)();
+            if src.is_null() {
+                return 0;
+            }
+            let schema = (a.g_settings_schema_source_lookup)(src, cs(SCHEMA_INTERFACE).as_ptr(), 1);
+            if schema.is_null() {
+                return 0;
+            }
+            (a.g_settings_schema_unref)(schema);
+            let gs = (a.g_settings_new)(cs(SCHEMA_INTERFACE).as_ptr());
+            if gs.is_null() {
+                return 0;
+            }
+            for sig in ["changed::gtk-theme", "changed::color-scheme"] {
+                (a.g_signal_connect_data)(
+                    gs,
+                    cs(sig).as_ptr(),
+                    on_setting_changed as P,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    0,
+                );
+            }
+            gs as usize
+        }
     }
 
     fn cs(s: &str) -> CString {
@@ -426,18 +497,8 @@ mod imp {
         // SAFETY: bibliotecas carregadas; todas as chamadas ocorrem na thread principal.
         unsafe {
             (a.adw_init)();
+            *GSETTINGS.lock().unwrap() = open_interface_settings();
             sync_system_color_scheme();
-            let settings = (a.gtk_settings_get_default)();
-            if !settings.is_null() {
-                (a.g_signal_connect_data)(
-                    settings,
-                    cs("notify::gtk-theme-name").as_ptr(),
-                    on_theme_name_changed as P,
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    0,
-                );
-            }
             let app = (a.adw_application_new)(cs("br.uniube.pi.guialar").as_ptr(), 0);
             (a.g_signal_connect_data)(
                 app,
