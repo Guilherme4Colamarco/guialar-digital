@@ -53,7 +53,17 @@ pub fn open_extension_page(url: &str) -> std::io::Result<()> {
 
     #[cfg(target_os = "linux")]
     {
-        Command::new("xdg-open").arg(url).spawn()?;
+        let status = Command::new("xdg-open")
+            .arg(url)
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()?;
+        if !status.success() {
+            return Err(std::io::Error::other(format!(
+                "xdg-open terminou com {:?}",
+                status.code()
+            )));
+        }
     }
 
     Ok(())
