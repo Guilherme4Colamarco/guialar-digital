@@ -3,6 +3,7 @@
 mod browser;
 mod config;
 mod platform;
+mod policy;
 mod sysutil;
 mod verify;
 
@@ -14,7 +15,7 @@ use std::process::ExitCode;
 #[derive(Parser)]
 #[command(
     name = "guialar",
-    version = "0.2.0",
+    version = "0.2.1",
     about = "GuiaLar Digital - Proteção familiar de navegação via DNS Cloudflare Family e uBlock Origin",
     long_about = "Configura de forma segura o DNS da Cloudflare for Families (1.1.1.3 / 1.0.0.3) e auxilia na instalação de bloqueadores de anúncios em Linux (NetworkManager, systemd-resolved, runit/resolvconf) e Windows."
 )]
@@ -26,6 +27,8 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     Status,
+    /// Tudo de uma vez: DNS Cloudflare Family + bloqueador de anúncios.
+    Setup,
     Apply,
     Revert,
     Browser {
@@ -36,13 +39,24 @@ enum Commands {
     InternalApply,
     #[command(hide = true)]
     InternalRevert,
+    #[command(hide = true)]
+    InternalBrowser,
 }
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
 
-    let result = match cli.command.unwrap_or(Commands::Status) {
+    let sem_comando = cli.command.is_none();
+    // Duplo clique no .exe (sem argumentos) no Windows: assistente guiado.
+    let default = if cfg!(windows) {
+        Commands::Setup
+    } else {
+        Commands::Status
+    };
+    let result = match cli.command.unwrap_or(default) {
         Commands::Status => handle_status(),
+        Commands::Setup => handle_setup(sem_comando),
+        Commands::InternalBrowser => handle_internal_browser(),
         Commands::Apply => handle_apply(),
         Commands::Revert => handle_revert(),
         Commands::Browser { install_all } => handle_browser(install_all),
@@ -57,6 +71,46 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+fn handle_setup(interativo: bool) -> anyhow::Result<()> {
+    use std::io::{BufRead, Write};
+    println!("🛡️  GuiaLar Digital — Configuração rápida\n");
+    println!("Isto vai:\n  1. usar o DNS Cloudflare Family (bloqueia malware e conteúdo adulto)\n  2. instalar o bloqueador de anúncios uBlock nos navegadores encontrados\n");
+    let result = (|| {
+        if interativo {
+            print!("Continuar? [S/n] ");
+            let _ = std::io::stdout().flush();
+            let mut l = String::new();
+            let _ = std::io::stdin().lock().read_line(&mut l);
+            if matches!(l.trim().to_lowercase().as_str(), "n" | "nao" | "não") {
+                println!("Nada foi alterado.");
+                return Ok(());
+            }
+        }
+        handle_apply()?;
+        handle_browser(true)?;
+        println!("\n✅ Pronto. Reabra o navegador para o bloqueador aparecer.");
+        println!("   Para desfazer o DNS: guialar revert");
+        Ok(())
+    })();
+    if interativo {
+        if let Err(e) = &result {
+            eprintln!("\n❌ Erro: {e:#}");
+        }
+        print!("\nPressione Enter para fechar...");
+        let _ = std::io::stdout().flush();
+        let _ = std::io::stdin().lock().read_line(&mut String::new());
+    }
+    result
+}
+
+fn handle_internal_browser() -> anyhow::Result<()> {
+    #[cfg(windows)]
+    for line in policy::install_all()? {
+        println!("  ✓ {line}");
+    }
+    Ok(())
 }
 
 fn handle_status() -> anyhow::Result<()> {
@@ -135,7 +189,28 @@ fn handle_revert() -> anyhow::Result<()> {
 }
 
 fn handle_browser(install_all: bool) -> anyhow::Result<()> {
-    println!("🧩 Extensão uBlock Origin — Proteção de Anúncios e Rastreamento\n");
+    println!("🧩 uBlock Origin — Proteção de Anúncios e Rastreamento\n");
+    #[cfg(windows)]
+    {
+        let _ = install_all;
+        if platform::elevate_if_needed("internal-browser")? {
+            return Ok(());
+        }
+        let feitos = policy::install_all()?;
+        if feitos.is_empty() {
+            anyhow::bail!("Nenhum navegador compatível (Chrome, Edge, Brave, Firefox) encontrado.");
+        }
+        for line in feitos {
+            println!("  ✓ {line}");
+        }
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    open_store_pages(install_all)
+}
+
+#[cfg(not(windows))]
+fn open_store_pages(install_all: bool) -> anyhow::Result<()> {
     let browsers = browser::detect_browsers();
     let mut opened = false;
 

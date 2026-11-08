@@ -45,6 +45,7 @@ pub fn detect_browsers() -> Vec<BrowserInfo> {
     ]
 }
 
+#[cfg_attr(windows, allow(dead_code))]
 pub fn open_extension_page(url: &str) -> std::io::Result<()> {
     #[cfg(target_os = "windows")]
     {
@@ -70,5 +71,26 @@ pub fn open_extension_page(url: &str) -> std::io::Result<()> {
 }
 
 fn is_app_installed(cmd: &str) -> bool {
-    crate::sysutil::command_exists(cmd)
+    crate::sysutil::command_exists(cmd) || windows_install_exists(cmd)
+}
+
+/// No Windows os navegadores quase nunca estão no `PATH`: procura nos locais padrão.
+#[cfg(windows)]
+fn windows_install_exists(cmd: &str) -> bool {
+    let relative = match cmd {
+        "firefox" => r"Mozilla Firefox\firefox.exe",
+        "google-chrome" => r"Google\Chrome\Application\chrome.exe",
+        "brave" => r"BraveSoftware\Brave-Browser\Application\brave.exe",
+        "msedge" => r"Microsoft\Edge\Application\msedge.exe",
+        _ => return false,
+    };
+    ["ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"]
+        .iter()
+        .filter_map(std::env::var_os)
+        .any(|dir| std::path::Path::new(&dir).join(relative).is_file())
+}
+
+#[cfg(not(windows))]
+fn windows_install_exists(_cmd: &str) -> bool {
+    false
 }

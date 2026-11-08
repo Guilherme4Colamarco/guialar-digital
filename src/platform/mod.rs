@@ -43,3 +43,9 @@ pub fn revert_dns(manifest: &DnsStateManifest) -> Result<()> {
         anyhow::bail!("Sistema operacional não suportado nativamente pelo GuiaLar");
     }
 }
+
+/// Windows: reabre como administrador (UAC) para `subcomando`. `true` = já executado lá.
+#[cfg(target_os = "windows")]
+pub fn elevate_if_needed(subcomando: &str) -> Result<bool> {
+    windows::elevate_if_needed(subcomando)
+}
