@@ -13,16 +13,21 @@ use crate::sysutil::{encode_powershell, is_safe_ps_alias};
 const PS_PREFIX: &str =
     "[Console]::OutputEncoding=[Text.Encoding]::UTF8; $ErrorActionPreference='Stop'; ";
 
+/// `CREATE_NO_WINDOW`: nenhuma janela de console pisca ao chamar o PowerShell.
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
 fn powershell(script: &str) -> Command {
+    use std::os::windows::process::CommandExt;
     let mut cmd = Command::new("powershell");
-    cmd.args([
-        "-NoProfile",
-        "-NonInteractive",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-EncodedCommand",
-    ])
-    .arg(encode_powershell(&format!("{PS_PREFIX}{script}")));
+    cmd.creation_flags(CREATE_NO_WINDOW)
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-EncodedCommand",
+        ])
+        .arg(encode_powershell(&format!("{PS_PREFIX}{script}")));
     cmd
 }
 
@@ -45,26 +50,22 @@ fn run_powershell(script: &str) -> Result<()> {
 }
 
 fn is_admin() -> bool {
-    powershell_output(
-        "([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)",
-    )
-    .map(|o| o.trim().eq_ignore_ascii_case("true"))
-    .unwrap_or(false)
+    // SAFETY: função Win32 sem argumentos.
+    unsafe { crate::win32::IsUserAnAdmin() != 0 }
 }
 
-/// Se não é administrador, reabre o programa com UAC rodando `subcomando` e
-/// devolve `true` (trabalho feito na janela elevada). `false` = já é admin.
+/// Se não é administrador, reabre o programa com UAC (sem janela) rodando
+/// `subcomando` e espera terminar. `true` = trabalho feito na instância elevada.
 pub fn elevate_if_needed(subcomando: &str) -> Result<bool> {
     if is_admin() {
         return Ok(false);
     }
     let exe = std::env::current_exe().context("não foi possível localizar o executável")?;
-    let exe = exe.to_string_lossy().replace('\'', "''");
-    println!("🔐 Confirme a janela de permissão do Windows (UAC)...");
-    run_powershell(&format!(
-        "$p = Start-Process -FilePath '{exe}' -ArgumentList '{subcomando}' -Verb RunAs -Wait -PassThru; exit $p.ExitCode"
-    ))
-    .context("a permissão de administrador foi negada ou a operação falhou")?;
+    let code = crate::win32::run_elevated_hidden(&exe.to_string_lossy(), subcomando)
+        .map_err(anyhow::Error::msg)?;
+    if code != 0 {
+        bail!("a operação elevada falhou (código {code})");
+    }
     Ok(true)
 }
 
@@ -93,7 +94,7 @@ pub fn apply_dns() -> Result<()> {
         ))?;
     }
     manifest.save_atomic()?;
-    let _ = Command::new("ipconfig").arg("/flushdns").output();
+    flush_dns();
     Ok(())
 }
 
@@ -139,7 +140,8 @@ pub fn revert_dns(manifest: &DnsStateManifest) -> Result<()> {
         );
     }
     DnsStateManifest::remove_manifest()?;
-    let _ = Command::new("ipconfig").arg("/flushdns").output();
+    crate::policy::revert_all()?;
+    flush_dns();
     Ok(())
 }
 
@@ -173,4 +175,12 @@ fn inspect_interface_state(index: u32, alias: &str) -> Result<ConnectionBackup> 
         original_ipv6_dns: Vec::new(),
         was_dhcp_ipv6: true,
     })
+}
+
+fn flush_dns() {
+    use std::os::windows::process::CommandExt;
+    let _ = Command::new("ipconfig")
+        .arg("/flushdns")
+        .creation_flags(CREATE_NO_WINDOW)
+        .output();
 }

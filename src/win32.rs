@@ -1,0 +1,338 @@
+//! Declarações mínimas da API Win32 (FFI manual: sem crates externos no binário).
+#![allow(
+    non_snake_case,
+    clippy::upper_case_acronyms,
+    clippy::too_many_arguments
+)]
+
+use std::ffi::c_void;
+
+pub type HWND = *mut c_void;
+pub type HANDLE = *mut c_void;
+pub type HDC = *mut c_void;
+pub type HGDIOBJ = *mut c_void;
+pub type WNDPROC = unsafe extern "system" fn(HWND, u32, usize, isize) -> isize;
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct RECT {
+    pub left: i32,
+    pub top: i32,
+    pub right: i32,
+    pub bottom: i32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct POINT {
+    pub x: i32,
+    pub y: i32,
+}
+
+#[repr(C)]
+pub struct MSG {
+    pub hwnd: HWND,
+    pub message: u32,
+    pub wParam: usize,
+    pub lParam: isize,
+    pub time: u32,
+    pub pt: POINT,
+}
+
+#[repr(C)]
+pub struct WNDCLASSEXW {
+    pub cbSize: u32,
+    pub style: u32,
+    pub lpfnWndProc: WNDPROC,
+    pub cbClsExtra: i32,
+    pub cbWndExtra: i32,
+    pub hInstance: HANDLE,
+    pub hIcon: HANDLE,
+    pub hCursor: HANDLE,
+    pub hbrBackground: HANDLE,
+    pub lpszMenuName: *const u16,
+    pub lpszClassName: *const u16,
+    pub hIconSm: HANDLE,
+}
+
+#[repr(C)]
+pub struct PAINTSTRUCT {
+    pub hdc: HDC,
+    pub fErase: i32,
+    pub rcPaint: RECT,
+    pub fRestore: i32,
+    pub fIncUpdate: i32,
+    pub rgbReserved: [u8; 32],
+}
+
+#[repr(C)]
+pub struct SHELLEXECUTEINFOW {
+    pub cbSize: u32,
+    pub fMask: u32,
+    pub hwnd: HWND,
+    pub lpVerb: *const u16,
+    pub lpFile: *const u16,
+    pub lpParameters: *const u16,
+    pub lpDirectory: *const u16,
+    pub nShow: i32,
+    pub hInstApp: HANDLE,
+    pub lpIDList: *mut c_void,
+    pub lpClass: *const u16,
+    pub hkeyClass: HANDLE,
+    pub dwHotKey: u32,
+    pub hIconOrMonitor: HANDLE,
+    pub hProcess: HANDLE,
+}
+
+pub const SEE_MASK_NOCLOSEPROCESS: u32 = 0x40;
+pub const SW_HIDE: i32 = 0;
+pub const SW_SHOWNORMAL: i32 = 1;
+pub const INFINITE: u32 = 0xFFFF_FFFF;
+pub const ATTACH_PARENT_PROCESS: u32 = 0xFFFF_FFFF;
+
+#[link(name = "kernel32")]
+extern "system" {
+    pub fn AttachConsole(pid: u32) -> i32;
+    pub fn GetStdHandle(which: u32) -> HANDLE;
+    pub fn SetStdHandle(which: u32, h: HANDLE) -> i32;
+    pub fn CreateFileW(
+        name: *const u16,
+        access: u32,
+        share: u32,
+        sec: *mut c_void,
+        disp: u32,
+        flags: u32,
+        template: HANDLE,
+    ) -> HANDLE;
+    pub fn WaitForSingleObject(h: HANDLE, ms: u32) -> u32;
+    pub fn GetExitCodeProcess(h: HANDLE, code: *mut u32) -> i32;
+    pub fn CloseHandle(h: HANDLE) -> i32;
+    pub fn GetModuleHandleW(name: *const u16) -> HANDLE;
+}
+
+#[link(name = "shell32")]
+extern "system" {
+    pub fn ShellExecuteExW(info: *mut SHELLEXECUTEINFOW) -> i32;
+    pub fn IsUserAnAdmin() -> i32;
+}
+
+#[link(name = "user32")]
+extern "system" {
+    pub fn RegisterClassExW(c: *const WNDCLASSEXW) -> u16;
+    pub fn CreateWindowExW(
+        ex: u32,
+        class: *const u16,
+        title: *const u16,
+        style: u32,
+        x: i32,
+        y: i32,
+        w: i32,
+        h: i32,
+        parent: HWND,
+        menu: HANDLE,
+        inst: HANDLE,
+        param: *mut c_void,
+    ) -> HWND;
+    pub fn ShowWindow(h: HWND, cmd: i32) -> i32;
+    pub fn UpdateWindow(h: HWND) -> i32;
+    pub fn GetMessageW(m: *mut MSG, h: HWND, min: u32, max: u32) -> i32;
+    pub fn TranslateMessage(m: *const MSG) -> i32;
+    pub fn DispatchMessageW(m: *const MSG) -> isize;
+    pub fn PostQuitMessage(code: i32);
+    pub fn DefWindowProcW(h: HWND, m: u32, w: usize, l: isize) -> isize;
+    pub fn PostMessageW(h: HWND, m: u32, w: usize, l: isize) -> i32;
+    pub fn SendMessageW(h: HWND, m: u32, w: usize, l: isize) -> isize;
+    pub fn InvalidateRect(h: HWND, r: *const RECT, erase: i32) -> i32;
+    pub fn BeginPaint(h: HWND, ps: *mut PAINTSTRUCT) -> HDC;
+    pub fn EndPaint(h: HWND, ps: *const PAINTSTRUCT) -> i32;
+    pub fn GetClientRect(h: HWND, r: *mut RECT) -> i32;
+    pub fn MoveWindow(h: HWND, x: i32, y: i32, w: i32, hh: i32, repaint: i32) -> i32;
+    pub fn SetWindowPos(h: HWND, after: HWND, x: i32, y: i32, w: i32, hh: i32, flags: u32) -> i32;
+    pub fn EnableWindow(h: HWND, enable: i32) -> i32;
+    pub fn LoadCursorW(inst: HANDLE, name: *const u16) -> HANDLE;
+    pub fn LoadImageW(
+        inst: HANDLE,
+        name: *const u16,
+        kind: u32,
+        cx: i32,
+        cy: i32,
+        flags: u32,
+    ) -> HANDLE;
+    pub fn DrawIconEx(
+        hdc: HDC,
+        x: i32,
+        y: i32,
+        icon: HANDLE,
+        cx: i32,
+        cy: i32,
+        step: u32,
+        br: HANDLE,
+        flags: u32,
+    ) -> i32;
+    pub fn GetDpiForWindow(h: HWND) -> u32;
+    pub fn SetForegroundWindow(h: HWND) -> i32;
+}
+
+#[link(name = "gdi32")]
+extern "system" {
+    pub fn CreateSolidBrush(color: u32) -> HGDIOBJ;
+    pub fn CreatePen(style: i32, width: i32, color: u32) -> HGDIOBJ;
+    pub fn DeleteObject(o: HGDIOBJ) -> i32;
+    pub fn SelectObject(dc: HDC, o: HGDIOBJ) -> HGDIOBJ;
+    pub fn SetBkMode(dc: HDC, mode: i32) -> i32;
+    pub fn SetTextColor(dc: HDC, color: u32) -> u32;
+    pub fn CreateFontW(
+        h: i32,
+        w: i32,
+        esc: i32,
+        orient: i32,
+        weight: i32,
+        italic: u32,
+        underline: u32,
+        strike: u32,
+        charset: u32,
+        out: u32,
+        clip: u32,
+        quality: u32,
+        pitch: u32,
+        face: *const u16,
+    ) -> HGDIOBJ;
+    pub fn DrawTextW(dc: HDC, text: *const u16, n: i32, r: *mut RECT, fmt: u32) -> i32;
+    pub fn RoundRect(dc: HDC, l: i32, t: i32, r: i32, b: i32, rw: i32, rh: i32) -> i32;
+    pub fn Ellipse(dc: HDC, l: i32, t: i32, r: i32, b: i32) -> i32;
+    pub fn FillRect(dc: HDC, r: *const RECT, br: HGDIOBJ) -> i32;
+    pub fn CreateCompatibleDC(dc: HDC) -> HDC;
+    pub fn CreateCompatibleBitmap(dc: HDC, w: i32, h: i32) -> HGDIOBJ;
+    pub fn DeleteDC(dc: HDC) -> i32;
+    pub fn BitBlt(
+        dst: HDC,
+        x: i32,
+        y: i32,
+        w: i32,
+        h: i32,
+        src: HDC,
+        sx: i32,
+        sy: i32,
+        rop: u32,
+    ) -> i32;
+}
+
+#[link(name = "dwmapi")]
+extern "system" {
+    pub fn DwmSetWindowAttribute(h: HWND, attr: u32, data: *const c_void, size: u32) -> i32;
+}
+
+#[link(name = "uxtheme")]
+extern "system" {
+    pub fn SetWindowTheme(h: HWND, app: *const u16, list: *const u16) -> i32;
+}
+
+#[link(name = "advapi32")]
+extern "system" {
+    pub fn RegGetValueW(
+        key: isize,
+        sub: *const u16,
+        value: *const u16,
+        flags: u32,
+        kind: *mut u32,
+        data: *mut c_void,
+        size: *mut u32,
+    ) -> i32;
+}
+
+/// `&str` -> UTF-16 terminado em zero.
+pub fn w(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+/// `MAKEINTRESOURCE`: id numérico como ponteiro de nome de recurso.
+pub fn int_resource(id: usize) -> *const u16 {
+    id as *const u16
+}
+
+/// `RGB` `0xRRGGBB` -> `COLORREF` (`0x00BBGGRR`).
+pub fn rgb(c: u32) -> u32 {
+    ((c & 0xFF) << 16) | (c & 0xFF00) | ((c >> 16) & 0xFF)
+}
+
+/// Executa `exe args` elevado (UAC), sem janela, esperando o fim. Devolve o exit code.
+pub fn run_elevated_hidden(exe: &str, args: &str) -> Result<u32, String> {
+    let verb = w("runas");
+    let file = w(exe);
+    let params = w(args);
+    let mut info = SHELLEXECUTEINFOW {
+        cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+        fMask: SEE_MASK_NOCLOSEPROCESS,
+        hwnd: std::ptr::null_mut(),
+        lpVerb: verb.as_ptr(),
+        lpFile: file.as_ptr(),
+        lpParameters: params.as_ptr(),
+        lpDirectory: std::ptr::null(),
+        nShow: SW_HIDE,
+        hInstApp: std::ptr::null_mut(),
+        lpIDList: std::ptr::null_mut(),
+        lpClass: std::ptr::null(),
+        hkeyClass: std::ptr::null_mut(),
+        dwHotKey: 0,
+        hIconOrMonitor: std::ptr::null_mut(),
+        hProcess: std::ptr::null_mut(),
+    };
+    // SAFETY: `info` e os buffers UTF-16 vivem até o fim da chamada; o handle é fechado abaixo.
+    unsafe {
+        if ShellExecuteExW(&mut info) == 0 || info.hProcess.is_null() {
+            return Err("a permissão de administrador foi negada".into());
+        }
+        WaitForSingleObject(info.hProcess, INFINITE);
+        let mut code = 1u32;
+        GetExitCodeProcess(info.hProcess, &mut code);
+        CloseHandle(info.hProcess);
+        Ok(code)
+    }
+}
+
+/// Anexa ao console de quem chamou (cmd/PowerShell), sem sobrescrever redirecionamentos.
+pub fn attach_parent_console() {
+    // SAFETY: chamadas Win32 simples; handles novos são entregues ao processo.
+    unsafe {
+        if AttachConsole(ATTACH_PARENT_PROCESS) == 0 {
+            return;
+        }
+        let invalid = usize::MAX as HANDLE;
+        for (which, name, access) in [
+            (0xFFFF_FFF6u32, "CONIN$", 0xC000_0000u32),
+            (0xFFFF_FFF5, "CONOUT$", 0xC000_0000),
+            (0xFFFF_FFF4, "CONOUT$", 0xC000_0000),
+        ] {
+            let cur = GetStdHandle(which);
+            if cur.is_null() || cur == invalid {
+                let h = CreateFileW(
+                    w(name).as_ptr(),
+                    access,
+                    3,
+                    std::ptr::null_mut(),
+                    3,
+                    0,
+                    std::ptr::null_mut(),
+                );
+                if h != invalid {
+                    SetStdHandle(which, h);
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rgb_troca_canais() {
+        assert_eq!(rgb(0x112233), 0x0033_2211);
+    }
+
+    #[test]
+    fn w_termina_em_zero() {
+        assert_eq!(w("ab"), vec![97, 98, 0]);
+    }
+}

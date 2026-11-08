@@ -61,8 +61,30 @@ pub fn merge_firefox_policies(existing: Option<&str>) -> Result<String> {
     Ok(serde_json::to_string_pretty(&root)?)
 }
 
+/// Remove só a entrada do GuiaLar de um `policies.json`; `None` = nada a gravar/remover.
+pub fn remove_firefox_policy(existing: &str) -> Result<Option<String>> {
+    let mut root: Value =
+        serde_json::from_str(existing).context("policies.json existente é inválido")?;
+    let Some(settings) = root
+        .get_mut("policies")
+        .and_then(|p| p.get_mut("ExtensionSettings"))
+        .and_then(Value::as_object_mut)
+    else {
+        return Ok(None);
+    };
+    if settings.remove(FIREFOX_UBO_ID).is_none() {
+        return Ok(None);
+    }
+    if settings.is_empty() {
+        root["policies"]
+            .as_object_mut()
+            .map(|p| p.remove("ExtensionSettings"));
+    }
+    Ok(Some(serde_json::to_string_pretty(&root)?))
+}
+
 #[cfg(windows)]
-pub use win::install_all;
+pub use win::{install_all, revert_all};
 
 #[cfg(windows)]
 mod win {
@@ -112,6 +134,45 @@ mod win {
             done.push("Firefox: uBlock Origin instalado ao reabrir o navegador".into());
         }
         Ok(done)
+    }
+
+    /// Remove as políticas gravadas pelo GuiaLar. Chaves/valores ausentes não são erro.
+    pub fn revert_all() -> Result<()> {
+        for (_, key, _) in chromium_policies() {
+            let existe = hidden(Command::new("reg").args(["query", key, "/v", POLICY_VALUE_NAME]))
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if !existe {
+                continue;
+            }
+            let status =
+                hidden(Command::new("reg").args(["delete", key, "/v", POLICY_VALUE_NAME, "/f"]))
+                    .status()
+                    .context("falha ao executar reg.exe")?;
+            if !status.success() {
+                anyhow::bail!("reg delete falhou em {key} ({:?})", status.code());
+            }
+        }
+        if let Some(exe) = find_exe(r"Mozilla Firefox\firefox.exe") {
+            let file = exe
+                .parent()
+                .context("pasta do Firefox")?
+                .join("distribution")
+                .join("policies.json");
+            if let Ok(current) = std::fs::read_to_string(&file) {
+                if let Some(novo) = remove_firefox_policy(&current)? {
+                    std::fs::write(&file, novo).context("gravando policies.json do Firefox")?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Sem janela de console piscando (CREATE_NO_WINDOW).
+    fn hidden(cmd: &mut Command) -> &mut Command {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000)
     }
 
     fn reg_add(key: &str, data: &str) -> Result<()> {
@@ -175,5 +236,34 @@ mod tests {
             .all(|(_, k, d)| k.starts_with(r"HKLM\SOFTWARE\Policies")
                 && d.starts_with(UBOL_CHROMIUM_ID)
                 && d.contains(";https://")));
+    }
+
+    #[test]
+    fn remove_firefox_tira_so_a_entrada_do_guialar() {
+        let atual = merge_firefox_policies(Some(
+            r#"{"policies":{"DisableTelemetry":true,"ExtensionSettings":{"x@y":{"installation_mode":"blocked"}}}}"#,
+        ))
+        .unwrap();
+        let novo = remove_firefox_policy(&atual).unwrap().unwrap();
+        let v: Value = serde_json::from_str(&novo).unwrap();
+        assert!(v["policies"]["ExtensionSettings"]
+            .get(FIREFOX_UBO_ID)
+            .is_none());
+        assert_eq!(
+            v["policies"]["ExtensionSettings"]["x@y"]["installation_mode"],
+            "blocked"
+        );
+        assert_eq!(v["policies"]["DisableTelemetry"], true);
+    }
+
+    #[test]
+    fn remove_firefox_sem_entrada_nao_grava() {
+        assert!(remove_firefox_policy(r#"{"policies":{}}"#)
+            .unwrap()
+            .is_none());
+        let so_nosso = merge_firefox_policies(None).unwrap();
+        let v: Value =
+            serde_json::from_str(&remove_firefox_policy(&so_nosso).unwrap().unwrap()).unwrap();
+        assert!(v["policies"].get("ExtensionSettings").is_none());
     }
 }

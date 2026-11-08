@@ -1,11 +1,18 @@
-//! Ponto de entrada CLI do GuiaLar Digital em Rust.
+//! Ponto de entrada do GuiaLar Digital: janela nativa (sem argumentos) ou CLI.
+//!
+//! No Windows o binário usa o subsistema "windows" (duplo clique não abre console);
+//! com argumentos ele se anexa ao console de quem o chamou.
+#![cfg_attr(all(windows, not(test)), windows_subsystem = "windows")]
 
 mod browser;
 mod config;
 mod platform;
 mod policy;
 mod sysutil;
+mod ui;
 mod verify;
+#[cfg(windows)]
+mod win32;
 
 use crate::config::DnsStateManifest;
 use crate::verify::ProtectionStatus;
@@ -15,7 +22,7 @@ use std::process::ExitCode;
 #[derive(Parser)]
 #[command(
     name = "guialar",
-    version = "0.2.1",
+    version,
     about = "GuiaLar Digital - Proteção familiar de navegação via DNS Cloudflare Family e uBlock Origin",
     long_about = "Configura de forma segura o DNS da Cloudflare for Families (1.1.1.3 / 1.0.0.3) e auxilia na instalação de bloqueadores de anúncios em Linux (NetworkManager, systemd-resolved, runit/resolvconf) e Windows."
 )]
@@ -27,6 +34,8 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     Status,
+    /// Abre a janela gráfica (padrão quando não há argumentos).
+    Gui,
     /// Tudo de uma vez: DNS Cloudflare Family + bloqueador de anúncios.
     Setup,
     Apply,
@@ -44,18 +53,32 @@ enum Commands {
 }
 
 fn main() -> ExitCode {
+    #[cfg(windows)]
+    if std::env::args_os().len() > 1 {
+        win32::attach_parent_console();
+    }
     let cli = Cli::parse();
 
     let sem_comando = cli.command.is_none();
-    // Duplo clique no .exe (sem argumentos) no Windows: assistente guiado.
-    let default = if cfg!(windows) {
-        Commands::Setup
-    } else {
-        Commands::Status
-    };
-    let result = match cli.command.unwrap_or(default) {
-        Commands::Status => handle_status(),
-        Commands::Setup => handle_setup(sem_comando),
+    if matches!(cli.command, None | Some(Commands::Gui)) {
+        match ui::run() {
+            Ok(true) => return ExitCode::SUCCESS,
+            Ok(false) if sem_comando => {} // sem display: cai no resumo da CLI
+            Ok(false) => {
+                eprintln!("❌ Nenhum ambiente gráfico disponível (DISPLAY/WAYLAND_DISPLAY).");
+                return ExitCode::FAILURE;
+            }
+            Err(err) => {
+                eprintln!("\n❌ Erro ao abrir a janela: {:#}", err);
+                if !sem_comando {
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
+    }
+    let result = match cli.command.unwrap_or(Commands::Status) {
+        Commands::Status | Commands::Gui => handle_status(),
+        Commands::Setup => handle_setup(false),
         Commands::InternalBrowser => handle_internal_browser(),
         Commands::Apply => handle_apply(),
         Commands::Revert => handle_revert(),
@@ -153,6 +176,10 @@ fn handle_status() -> anyhow::Result<()> {
 }
 
 fn handle_apply() -> anyhow::Result<()> {
+    if DnsStateManifest::load()?.is_some() {
+        println!("ℹ️  A proteção já está ativa. Use 'guialar revert' antes de aplicar de novo.");
+        return Ok(());
+    }
     println!("⚙️  Aplicando proteção familiar no sistema...");
     platform::apply_dns()?;
     println!("✅ Proteção familiar ativada com sucesso!");
@@ -179,6 +206,14 @@ fn handle_revert() -> anyhow::Result<()> {
     println!("🔄 Restaurando configurações originais de DNS...");
 
     let Some(manifest) = DnsStateManifest::load()? else {
+        #[cfg(windows)]
+        {
+            // Sem DNS para reverter, mas ainda pode haver políticas do uBlock.
+            if platform::elevate_if_needed("internal-revert")? {
+                return Ok(());
+            }
+            policy::revert_all()?;
+        }
         println!("ℹ️  Nenhum manifesto de proteção ativo encontrado para reverter.");
         return Ok(());
     };
@@ -244,6 +279,9 @@ fn handle_internal_apply() -> anyhow::Result<()> {
 fn handle_internal_revert() -> anyhow::Result<()> {
     if let Some(manifest) = DnsStateManifest::load()? {
         platform::revert_dns(&manifest)?;
+    } else {
+        #[cfg(windows)]
+        policy::revert_all()?;
     }
     Ok(())
 }

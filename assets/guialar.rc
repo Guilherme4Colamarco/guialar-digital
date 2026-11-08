@@ -1,0 +1,31 @@
+1 ICON "guialar.ico"
+1 24 "app.manifest"
+
+1 VERSIONINFO
+FILEVERSION 0,3,0,0
+PRODUCTVERSION 0,3,0,0
+FILEFLAGSMASK 0x3fL
+FILEFLAGS 0x0L
+FILEOS 0x40004L
+FILETYPE 0x1L
+FILESUBTYPE 0x0L
+BEGIN
+  BLOCK "StringFileInfo"
+  BEGIN
+    BLOCK "041604b0"
+    BEGIN
+      VALUE "CompanyName", "Projeto GuiaLar Digital (Uniube)"
+      VALUE "FileDescription", "GuiaLar Digital - Prote\347\343o Familiar de Rede e Navegadores"
+      VALUE "FileVersion", "0.3.0.0"
+      VALUE "InternalName", "guialar"
+      VALUE "LegalCopyright", "Copyright (c) 2026 GuiaLar Digital - Licen\347a MIT"
+      VALUE "OriginalFilename", "guialar.exe"
+      VALUE "ProductName", "GuiaLar Digital"
+      VALUE "ProductVersion", "0.3.0.0"
+    END
+  END
+  BLOCK "VarFileInfo"
+  BEGIN
+    VALUE "Translation", 0x0416, 1200
+  END
+END

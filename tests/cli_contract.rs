@@ -38,7 +38,12 @@ fn status_exits_success_and_reports_state() {
 
 #[test]
 fn default_command_is_status() {
-    let out = bin().output().expect("executa sem argumentos");
+    // Sem display, o comando padrão cai no resumo (com display abriria a janela).
+    let out = bin()
+        .env_remove("DISPLAY")
+        .env_remove("WAYLAND_DISPLAY")
+        .output()
+        .expect("executa sem argumentos");
     assert!(out.status.success(), "comando default deve sair 0");
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
@@ -79,4 +84,16 @@ fn apply_twice_keeps_original_manifest_untouched() {
     assert!(out.status.success(), "apply duplicado deve sair 0");
     assert!(String::from_utf8_lossy(&out.stdout).contains("já está ativa"));
     assert_eq!(after, manifest, "manifesto original não pode mudar");
+}
+
+#[test]
+fn gui_without_display_fails_cleanly() {
+    let out = bin()
+        .arg("gui")
+        .env_remove("DISPLAY")
+        .env_remove("WAYLAND_DISPLAY")
+        .output()
+        .expect("executa gui");
+    assert!(!out.status.success(), "gui sem display deve falhar");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("ambiente gráfico"));
 }
