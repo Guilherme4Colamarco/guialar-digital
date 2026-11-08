@@ -3,18 +3,15 @@
 //! Guarda os IPs oficiais da Cloudflare for Families (IPv4 e IPv6)
 //! e gerencia o manifesto atômico de reversão em formato JSON (~/.config/guialar/state.json).
 
+use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::path::PathBuf;
-use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
 
 /// IPs Oficiais do Cloudflare 1.1.1.1 for Families (Bloqueio de Malware + Conteúdo Adulto).
-pub const CLOUDFLARE_IPV4: [Ipv4Addr; 2] = [
-    Ipv4Addr::new(1, 1, 1, 3),
-    Ipv4Addr::new(1, 0, 0, 3),
-];
+pub const CLOUDFLARE_IPV4: [Ipv4Addr; 2] = [Ipv4Addr::new(1, 1, 1, 3), Ipv4Addr::new(1, 0, 0, 3)];
 
 pub const CLOUDFLARE_IPV6: [Ipv6Addr; 2] = [
     Ipv6Addr::new(0x2606, 0x4700, 0x4700, 0, 0, 0, 0, 0x1113),
@@ -75,8 +72,9 @@ impl DnsStateManifest {
 
         #[cfg(not(target_os = "windows"))]
         {
-            let home = std::env::var("HOME").context("Variável de ambiente $HOME não encontrada")?;
-            Ok(PathBuf::from(home).join(".config").join("guialar").join("state.json"))
+            let home = crate::sysutil::effective_home()
+                .context("Variável de ambiente $HOME não encontrada")?;
+            Ok(home.join(".config").join("guialar").join("state.json"))
         }
     }
 

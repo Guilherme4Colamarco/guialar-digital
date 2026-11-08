@@ -1,10 +1,12 @@
 //! Backend Windows para configuração e reversão de DNS via PowerShell/Win32.
 
+use anyhow::{bail, Context, Result};
 use std::net::Ipv4Addr;
 use std::process::Command;
-use anyhow::{bail, Context, Result};
 
-use crate::config::{BackendKind, ConnectionBackup, DnsStateManifest, CLOUDFLARE_IPV4, CLOUDFLARE_IPV6};
+use crate::config::{
+    BackendKind, ConnectionBackup, DnsStateManifest, CLOUDFLARE_IPV4, CLOUDFLARE_IPV6,
+};
 
 pub fn apply_dns() -> Result<()> {
     let mut manifest = DnsStateManifest::new(BackendKind::WindowsPowerShell);
@@ -39,13 +41,21 @@ pub fn revert_dns(manifest: &DnsStateManifest) -> Result<()> {
         let alias = &conn.id;
 
         if conn.was_dhcp_ipv4 {
-            let ps_cmd = format!("Set-DnsClientServerAddress -InterfaceAlias '{}' -ResetServerAddresses", alias);
+            let ps_cmd = format!(
+                "Set-DnsClientServerAddress -InterfaceAlias '{}' -ResetServerAddresses",
+                alias
+            );
             let _ = run_powershell(&ps_cmd);
         } else if !conn.original_ipv4_dns.is_empty() {
-            let ips: Vec<String> = conn.original_ipv4_dns.iter().map(|ip| format!("'{}'", ip)).collect();
+            let ips: Vec<String> = conn
+                .original_ipv4_dns
+                .iter()
+                .map(|ip| format!("'{}'", ip))
+                .collect();
             let ps_cmd = format!(
                 "Set-DnsClientServerAddress -InterfaceAlias '{}' -ServerAddresses @({})",
-                alias, ips.join(",")
+                alias,
+                ips.join(",")
             );
             let _ = run_powershell(&ps_cmd);
         }

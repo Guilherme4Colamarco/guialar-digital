@@ -6,14 +6,16 @@
 //! 3. Runit / Openresolv (`resolvconf` ou serviços em `/var/service`)
 //! 4. Arquivo direto `/etc/resolv.conf` (com backup e substituição atômica)
 
-use std::fs::{self, OpenOptions};
+use anyhow::{bail, Context, Result};
+use std::fs;
 use std::io::Write;
 use std::net::Ipv4Addr;
 use std::path::Path;
 use std::process::Command;
-use anyhow::{bail, Context, Result};
 
-use crate::config::{BackendKind, ConnectionBackup, DnsStateManifest, CLOUDFLARE_IPV4, CLOUDFLARE_IPV6};
+use crate::config::{
+    BackendKind, ConnectionBackup, DnsStateManifest, CLOUDFLARE_IPV4, CLOUDFLARE_IPV6,
+};
 
 /// Detecta qual subsistema de DNS está ativo no ambiente Linux.
 pub fn detect_active_backend() -> BackendKind {
@@ -29,13 +31,6 @@ pub fn detect_active_backend() -> BackendKind {
     // 2. Checa systemd-resolved
     if Path::new("/run/systemd/resolve").exists() {
         return BackendKind::SystemdResolved;
-    }
-
-    // 3. Checa se o sistema roda runit (/run/runit existe) com resolvconf ou openresolv
-    if Path::new("/run/runit").exists() || Path::new("/var/service").exists() {
-        if is_command_available("resolvconf") {
-            return BackendKind::OpenResolvRunit;
-        }
     }
 
     // Fallback: se resolvconf existir no PATH
@@ -115,8 +110,30 @@ fn apply_network_manager(manifest: &mut DnsStateManifest) -> Result<()> {
         let backup = inspect_nm_connection(uuid)?;
         manifest.connections.push(backup);
 
-        run_privileged_command("nmcli", &["connection", "modify", uuid, "ipv4.dns", &ipv4_str, "ipv4.ignore-auto-dns", "yes"])?;
-        let _ = run_privileged_command("nmcli", &["connection", "modify", uuid, "ipv6.dns", &ipv6_str, "ipv6.ignore-auto-dns", "yes"]);
+        run_privileged_command(
+            "nmcli",
+            &[
+                "connection",
+                "modify",
+                uuid,
+                "ipv4.dns",
+                &ipv4_str,
+                "ipv4.ignore-auto-dns",
+                "yes",
+            ],
+        )?;
+        let _ = run_privileged_command(
+            "nmcli",
+            &[
+                "connection",
+                "modify",
+                uuid,
+                "ipv6.dns",
+                &ipv6_str,
+                "ipv6.ignore-auto-dns",
+                "yes",
+            ],
+        );
         run_privileged_command("nmcli", &["connection", "up", "uuid", uuid])?;
     }
 
@@ -127,14 +144,43 @@ fn revert_network_manager(manifest: &DnsStateManifest) -> Result<()> {
     for conn in &manifest.connections {
         let uuid = &conn.id;
         if conn.was_dhcp_ipv4 {
-            run_privileged_command("nmcli", &["connection", "modify", uuid, "ipv4.dns", "", "ipv4.ignore-auto-dns", "no"])?;
+            run_privileged_command(
+                "nmcli",
+                &[
+                    "connection",
+                    "modify",
+                    uuid,
+                    "ipv4.dns",
+                    "",
+                    "ipv4.ignore-auto-dns",
+                    "no",
+                ],
+            )?;
         } else if !conn.original_ipv4_dns.is_empty() {
-            let prev: Vec<String> = conn.original_ipv4_dns.iter().map(|ip| ip.to_string()).collect();
-            run_privileged_command("nmcli", &["connection", "modify", uuid, "ipv4.dns", &prev.join(" ")])?;
+            let prev: Vec<String> = conn
+                .original_ipv4_dns
+                .iter()
+                .map(|ip| ip.to_string())
+                .collect();
+            run_privileged_command(
+                "nmcli",
+                &["connection", "modify", uuid, "ipv4.dns", &prev.join(" ")],
+            )?;
         }
 
         if conn.was_dhcp_ipv6 {
-            let _ = run_privileged_command("nmcli", &["connection", "modify", uuid, "ipv6.dns", "", "ipv6.ignore-auto-dns", "no"]);
+            let _ = run_privileged_command(
+                "nmcli",
+                &[
+                    "connection",
+                    "modify",
+                    uuid,
+                    "ipv6.dns",
+                    "",
+                    "ipv6.ignore-auto-dns",
+                    "no",
+                ],
+            );
         }
 
         let _ = run_privileged_command("nmcli", &["connection", "up", "uuid", uuid]);
@@ -156,7 +202,10 @@ fn get_active_nm_connections() -> Result<Vec<String>> {
         if parts.len() >= 2 {
             let uuid = parts[0];
             let conn_type = parts[1];
-            if conn_type.contains("ethernet") || conn_type.contains("wireless") || conn_type.contains("wifi") {
+            if conn_type.contains("ethernet")
+                || conn_type.contains("wireless")
+                || conn_type.contains("wifi")
+            {
                 uuids.push(uuid.to_string());
             }
         }
@@ -166,7 +215,14 @@ fn get_active_nm_connections() -> Result<Vec<String>> {
 
 fn inspect_nm_connection(uuid: &str) -> Result<ConnectionBackup> {
     let output = Command::new("nmcli")
-        .args(["-t", "-f", "ipv4.dns,ipv4.ignore-auto-dns", "connection", "show", uuid])
+        .args([
+            "-t",
+            "-f",
+            "ipv4.dns,ipv4.ignore-auto-dns",
+            "connection",
+            "show",
+            uuid,
+        ])
         .output()
         .context("Falha ao inspecionar conexão do NetworkManager")?;
 
@@ -215,7 +271,10 @@ fn apply_systemd_resolved(_manifest: &mut DnsStateManifest) -> Result<()> {
 
     let temp_file = "/tmp/99-guialar.conf.tmp";
     fs::write(temp_file, conf_content)?;
-    run_privileged_command("cp", &[temp_file, "/etc/systemd/resolved.conf.d/99-guialar.conf"])?;
+    run_privileged_command(
+        "cp",
+        &[temp_file, "/etc/systemd/resolved.conf.d/99-guialar.conf"],
+    )?;
     let _ = fs::remove_file(temp_file);
 
     run_privileged_command("systemctl", &["restart", "systemd-resolved"])?;
@@ -241,14 +300,16 @@ fn apply_openresolv_runit(_manifest: &mut DnsStateManifest) -> Result<()> {
         CLOUDFLARE_IPV4[0], CLOUDFLARE_IPV4[1], CLOUDFLARE_IPV6[0], CLOUDFLARE_IPV6[1]
     );
 
-    let temp_file = "/tmp/guialar_resolvconf.tmp";
-    fs::write(temp_file, conf)?;
-
-    let status = Command::new("pkexec")
-        .args(["sh", "-c", "resolvconf -a guialar < /tmp/guialar_resolvconf.tmp"])
-        .status()?;
-
-    let _ = fs::remove_file(temp_file);
+    let mut child = privileged_command("resolvconf", &["-a", "guialar"])
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .context("Falha ao iniciar resolvconf")?;
+    child
+        .stdin
+        .take()
+        .context("stdin do resolvconf indisponível")?
+        .write_all(conf.as_bytes())?;
+    let status = child.wait()?;
 
     if !status.success() {
         bail!("Falha ao aplicar DNS via resolvconf no runit");
@@ -257,9 +318,7 @@ fn apply_openresolv_runit(_manifest: &mut DnsStateManifest) -> Result<()> {
 }
 
 fn revert_openresolv_runit() -> Result<()> {
-    let status = Command::new("pkexec")
-        .args(["resolvconf", "-d", "guialar"])
-        .status()?;
+    let status = privileged_command("resolvconf", &["-d", "guialar"]).status()?;
 
     if !status.success() {
         bail!("Falha ao remover interface guialar do resolvconf");
@@ -283,22 +342,30 @@ fn apply_direct_resolv_conf(manifest: &mut DnsStateManifest) -> Result<()> {
         CLOUDFLARE_IPV4[0], CLOUDFLARE_IPV4[1], CLOUDFLARE_IPV6[0], CLOUDFLARE_IPV6[1]
     );
 
-    let temp_path = "/tmp/resolv.conf.guialar.tmp";
-    let mut file = OpenOptions::new().write(true).create(true).truncate(true).open(temp_path)?;
-    file.write_all(content.as_bytes())?;
-    file.flush()?;
+    write_resolv_conf(&content)
+}
 
-    run_privileged_command("cp", &[temp_path, "/etc/resolv.conf"])?;
-    let _ = fs::remove_file(temp_path);
+/// Grava `/etc/resolv.conf` via `tee` com o conteúdo em stdin (sem arquivo temporário).
+fn write_resolv_conf(content: &str) -> Result<()> {
+    let mut child = privileged_command("tee", &["/etc/resolv.conf"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .context("Falha ao iniciar tee para /etc/resolv.conf")?;
+    child
+        .stdin
+        .take()
+        .context("stdin do tee indisponível")?
+        .write_all(content.as_bytes())?;
+    if !child.wait()?.success() {
+        bail!("Falha ao gravar /etc/resolv.conf");
+    }
     Ok(())
 }
 
 fn revert_direct_resolv_conf(manifest: &DnsStateManifest) -> Result<()> {
     if let Some(ref prev) = manifest.previous_resolv_conf {
-        let temp_path = "/tmp/resolv.conf.revert.tmp";
-        fs::write(temp_path, prev)?;
-        run_privileged_command("cp", &[temp_path, "/etc/resolv.conf"])?;
-        let _ = fs::remove_file(temp_path);
+        write_resolv_conf(prev)?;
     }
     Ok(())
 }
@@ -308,11 +375,7 @@ fn revert_direct_resolv_conf(manifest: &DnsStateManifest) -> Result<()> {
 // ============================================================================
 
 fn is_command_available(cmd: &str) -> bool {
-    Command::new("which")
-        .arg(cmd)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    crate::sysutil::command_exists(cmd)
 }
 
 fn is_service_active_runit(service_name: &str) -> bool {
@@ -326,16 +389,31 @@ fn is_service_active_runit(service_name: &str) -> bool {
     false
 }
 
-fn run_privileged_command(program: &str, args: &[&str]) -> Result<()> {
-    let mut cmd = Command::new("pkexec");
-    cmd.arg(program);
-    for arg in args {
-        cmd.arg(arg);
-    }
+/// Comando já prefixado com a elevação adequada (nenhuma se já é root).
+fn privileged_command(program: &str, args: &[&str]) -> Command {
+    let prefix = crate::sysutil::current_privilege_prefix();
+    let mut cmd = match prefix.split_first() {
+        Some((tool, rest)) => {
+            let mut c = Command::new(tool);
+            c.args(rest).arg(program);
+            c
+        }
+        None => Command::new(program),
+    };
+    cmd.args(args);
+    cmd
+}
 
-    let status = cmd.status().with_context(|| format!("Falha ao executar {} com pkexec", program))?;
+fn run_privileged_command(program: &str, args: &[&str]) -> Result<()> {
+    let status = privileged_command(program, args)
+        .status()
+        .with_context(|| format!("Falha ao executar {} com privilégios", program))?;
     if !status.success() {
-        bail!("Comando {} finalizou com erro ({:?})", program, status.code());
+        bail!(
+            "Comando {} finalizou com erro ({:?})",
+            program,
+            status.code()
+        );
     }
     Ok(())
 }

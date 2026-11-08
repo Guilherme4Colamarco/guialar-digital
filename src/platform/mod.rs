@@ -6,8 +6,8 @@ pub mod linux;
 #[cfg(target_os = "windows")]
 pub mod windows;
 
-use anyhow::Result;
 use crate::config::DnsStateManifest;
+use anyhow::Result;
 
 pub fn apply_dns() -> Result<()> {
     #[cfg(target_os = "linux")]

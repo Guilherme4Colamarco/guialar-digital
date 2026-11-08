@@ -1,14 +1,15 @@
 //! Ponto de entrada CLI do GuiaLar Digital em Rust.
 
+mod browser;
 mod config;
 mod platform;
+mod sysutil;
 mod verify;
-mod browser;
 
-use std::process::ExitCode;
-use clap::{Parser, Subcommand};
 use crate::config::DnsStateManifest;
 use crate::verify::ProtectionStatus;
+use clap::{Parser, Subcommand};
+use std::process::ExitCode;
 
 #[derive(Parser)]
 #[command(
@@ -84,7 +85,10 @@ fn handle_status() -> anyhow::Result<()> {
     for b in browsers {
         if b.is_installed {
             found = true;
-            println!("  - {:<16} [Instalado] (Loja: {})", b.name, b.extension_store_url);
+            println!(
+                "  - {:<16} [Instalado] (Loja: {})",
+                b.name, b.extension_store_url
+            );
         }
     }
     if !found {
@@ -102,7 +106,9 @@ fn handle_apply() -> anyhow::Result<()> {
 
     match verify::check_status() {
         ProtectionStatus::Protected => {
-            println!("🎉 Conexão validada: A rede já está navegando com filtros familiares ativos.");
+            println!(
+                "🎉 Conexão validada: A rede já está navegando com filtros familiares ativos."
+            );
         }
         ProtectionStatus::PartiallyConfigured(msg) => {
             eprintln!("⚠️  Aviso pós-aplicação: {}", msg);
@@ -131,15 +137,27 @@ fn handle_revert() -> anyhow::Result<()> {
 fn handle_browser(install_all: bool) -> anyhow::Result<()> {
     println!("🧩 Extensão uBlock Origin — Proteção de Anúncios e Rastreamento\n");
     let browsers = browser::detect_browsers();
+    let mut opened = false;
 
     for b in &browsers {
         if b.is_installed {
             println!("Abrindo página de instalação para {}...", b.name);
-            let _ = browser::open_extension_page(b.extension_store_url);
+            if let Err(e) = browser::open_extension_page(b.extension_store_url) {
+                anyhow::bail!(
+                    "Não foi possível abrir a página. Abra manualmente: {} ({e})",
+                    b.extension_store_url
+                );
+            }
+            opened = true;
             if !install_all {
                 break;
             }
         }
+    }
+    if !opened {
+        anyhow::bail!(
+            "Nenhum navegador compatível encontrado (Firefox, Chrome, Brave, Chromium, Edge)."
+        );
     }
     Ok(())
 }

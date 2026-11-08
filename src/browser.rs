@@ -10,7 +10,8 @@ pub struct BrowserInfo {
 }
 
 pub const UBLOCK_FIREFOX: &str = "https://addons.mozilla.org/pt-BR/firefox/addon/ublock-origin/";
-pub const UBLOCK_CHROME: &str = "https://chromewebstore.google.com/detail/ublock-origin/cjpalhdlnbpafiamejdnhcphjbkeiagm";
+pub const UBLOCK_CHROME: &str =
+    "https://chromewebstore.google.com/detail/ublock-origin/cjpalhdlnbpafiamejdnhcphjbkeiagm";
 pub const UBLOCK_EDGE: &str = "https://microsoftedge.microsoft.com/addons/detail/ublock-origin/odfafepnkmbhccpbejgmiehpchacaeak";
 
 pub fn detect_browsers() -> Vec<BrowserInfo> {
@@ -22,7 +23,8 @@ pub fn detect_browsers() -> Vec<BrowserInfo> {
         },
         BrowserInfo {
             name: "Google Chrome",
-            is_installed: is_app_installed("google-chrome") || is_app_installed("google-chrome-stable"),
+            is_installed: is_app_installed("google-chrome")
+                || is_app_installed("google-chrome-stable"),
             extension_store_url: UBLOCK_CHROME,
         },
         BrowserInfo {
@@ -58,13 +60,5 @@ pub fn open_extension_page(url: &str) -> std::io::Result<()> {
 }
 
 fn is_app_installed(cmd: &str) -> bool {
-    #[cfg(target_os = "windows")]
-    {
-        Command::new("where").arg(cmd).output().map(|o| o.status.success()).unwrap_or(false)
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        Command::new("which").arg(cmd).output().map(|o| o.status.success()).unwrap_or(false)
-    }
+    crate::sysutil::command_exists(cmd)
 }

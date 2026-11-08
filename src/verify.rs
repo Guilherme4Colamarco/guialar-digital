@@ -1,7 +1,12 @@
 //! Módulo de verificação unificado e smoke test de resolução DNS.
 
-use std::net::ToSocketAddrs;
-use crate::config::{DnsStateManifest, CLOUDFLARE_IPV4};
+use std::net::{IpAddr, ToSocketAddrs};
+use std::sync::mpsc;
+use std::time::Duration;
+
+use crate::config::{DnsStateManifest, CLOUDFLARE_IPV4, CLOUDFLARE_IPV6};
+
+pub const RESOLUTION_TIMEOUT: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProtectionStatus {
@@ -13,7 +18,9 @@ pub enum ProtectionStatus {
 pub fn check_status() -> ProtectionStatus {
     let manifest_opt = match DnsStateManifest::load() {
         Ok(m) => m,
-        Err(e) => return ProtectionStatus::PartiallyConfigured(format!("Manifesto corrompido: {}", e)),
+        Err(e) => {
+            return ProtectionStatus::PartiallyConfigured(format!("Manifesto corrompido: {}", e))
+        }
     };
 
     if manifest_opt.is_none() {
@@ -23,26 +30,36 @@ pub fn check_status() -> ProtectionStatus {
     if run_dns_smoke_test() {
         ProtectionStatus::Protected
     } else {
-        ProtectionStatus::PartiallyConfigured("DNS gravado, mas a filtragem familiar não respondeu no teste de rede".into())
+        ProtectionStatus::PartiallyConfigured(
+            "DNS gravado, mas a filtragem familiar não respondeu no teste de rede".into(),
+        )
     }
 }
 
-fn run_dns_smoke_test() -> bool {
-    let probe_target = "family.cloudflare-dns.com:53";
-    let Ok(addrs_iter) = probe_target.to_socket_addrs() else {
-        return false;
-    };
+/// `true` somente se a resolução contém um IP da Cloudflare Family.
+///
+/// Sem esta checagem, DNS sequestrado (127.0.0.1, proxy do provedor) era
+/// reportado como "protegido" (QA-001).
+pub fn resolution_is_family(addrs: &[IpAddr]) -> bool {
+    addrs.iter().any(|ip| match ip {
+        IpAddr::V4(v4) => CLOUDFLARE_IPV4.contains(v4),
+        IpAddr::V6(v6) => CLOUDFLARE_IPV6.contains(v6),
+    })
+}
 
-    for addr in addrs_iter {
-        let ip = addr.ip();
-        if CLOUDFLARE_IPV4.contains(&match ip {
-            std::net::IpAddr::V4(v4) => v4,
-            _ => continue,
-        }) {
-            return true;
-        }
-    }
-    true
+/// Smoke test com timeout: rede quebrada não pode travar a CLI.
+fn run_dns_smoke_test() -> bool {
+    let (tx, rx) = mpsc::channel::<Vec<IpAddr>>();
+    std::thread::spawn(move || {
+        let addrs = "family.cloudflare-dns.com:53"
+            .to_socket_addrs()
+            .map(|it| it.map(|a| a.ip()).collect::<Vec<_>>())
+            .unwrap_or_default();
+        let _ = tx.send(addrs);
+    });
+    rx.recv_timeout(RESOLUTION_TIMEOUT)
+        .map(|a| resolution_is_family(&a))
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -135,15 +152,20 @@ mod qa_tests {
         assert_eq!(loaded.unwrap().backend, BackendKind::SystemdResolved);
     }
 
-    /// QA-KNOWN-BUG QA-001 (documentado executável; ignorado para manter a suíte verde):
-    /// run_dns_smoke_test() retorna `true` ao final do loop mesmo quando a resolução de
-    /// family.cloudflare-dns.com NÃO contém IPs Cloudflare (1.1.1.3/1.0.0.3) — ex.: DNS
-    /// sequestrado pelo ISP/proxy. Nesse cenário o status vira Protected (falso positivo).
-    /// Corrigir exige mudança em produção (fora do escopo QA); ver channel_result.
+    /// QA-001: só IPs Cloudflare Family contam como protegido.
     #[test]
-    #[ignore = "QA-001: falso positivo do smoke test DNS (early-true)"]
-    fn qa001_smoke_test_should_fail_when_no_cloudflare_ip() {
-        // Red-test de referência: exigiria injeção de resolvedor mockado.
-        // Mantido como documentação executável do bug QA-001.
+    fn qa001_resolution_is_family_rejects_hijacked_dns() {
+        use std::net::{Ipv4Addr, Ipv6Addr};
+        assert!(!resolution_is_family(&[]));
+        assert!(!resolution_is_family(&["127.0.0.1".parse().unwrap()]));
+        assert!(!resolution_is_family(&[IpAddr::V4(Ipv4Addr::new(
+            1, 1, 1, 1
+        ))]));
+        assert!(!resolution_is_family(&[IpAddr::V6(Ipv6Addr::LOCALHOST)]));
+        assert!(resolution_is_family(&["1.1.1.3".parse().unwrap()]));
+        assert!(resolution_is_family(&[
+            "127.0.0.1".parse().unwrap(),
+            "1.0.0.3".parse().unwrap()
+        ]));
     }
 }
