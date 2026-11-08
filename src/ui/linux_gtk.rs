@@ -62,6 +62,11 @@ mod imp {
         g_signal_connect_data: unsafe extern "C" fn(P, *const c_char, P, P, P, c_int) -> u64,
         g_application_run: unsafe extern "C" fn(P, c_int, P) -> c_int,
         g_object_unref: unsafe extern "C" fn(P),
+        g_object_get: unsafe extern "C" fn(P, *const c_char, *mut P, P),
+        g_free: unsafe extern "C" fn(P),
+        gtk_settings_get_default: unsafe extern "C" fn() -> P,
+        adw_style_manager_get_default: unsafe extern "C" fn() -> P,
+        adw_style_manager_set_color_scheme: unsafe extern "C" fn(P, c_int),
         adw_init: unsafe extern "C" fn(),
         adw_application_new: unsafe extern "C" fn(*const c_char, c_int) -> P,
         adw_application_window_new: unsafe extern "C" fn(P) -> P,
@@ -130,6 +135,41 @@ mod imp {
 
     fn ui() -> Ui {
         UI.lock().unwrap().unwrap_or_default()
+    }
+
+    /// Segue o tema do sistema: `GTK_THEME`/`gtk-theme-name` escuro => PREFER_DARK (4);
+    /// senão DEFAULT (0), que segue o portal XDG (GNOME/KDE/COSMIC).
+    fn sync_system_color_scheme() {
+        let a = api();
+        // SAFETY: chamado na thread principal; a string de `g_object_get` é liberada com `g_free`.
+        unsafe {
+            let mut dark = std::env::var("GTK_THEME")
+                .map(|t| theme::gtk_theme_is_dark(&t))
+                .unwrap_or(false);
+            let settings = (a.gtk_settings_get_default)();
+            if !dark && !settings.is_null() {
+                let mut name: P = std::ptr::null_mut();
+                (a.g_object_get)(
+                    settings,
+                    cs("gtk-theme-name").as_ptr(),
+                    &mut name,
+                    std::ptr::null_mut(),
+                );
+                if !name.is_null() {
+                    let n = std::ffi::CStr::from_ptr(name as *const c_char).to_string_lossy();
+                    dark = theme::gtk_theme_is_dark(&n);
+                    (a.g_free)(name);
+                }
+            }
+            let sm = (a.adw_style_manager_get_default)();
+            if !sm.is_null() {
+                (a.adw_style_manager_set_color_scheme)(sm, if dark { 4 } else { 0 });
+            }
+        }
+    }
+
+    unsafe extern "C" fn on_theme_name_changed(_s: P, _p: P, _d: P) {
+        sync_system_color_scheme();
     }
 
     fn cs(s: &str) -> CString {
@@ -386,6 +426,18 @@ mod imp {
         // SAFETY: bibliotecas carregadas; todas as chamadas ocorrem na thread principal.
         unsafe {
             (a.adw_init)();
+            sync_system_color_scheme();
+            let settings = (a.gtk_settings_get_default)();
+            if !settings.is_null() {
+                (a.g_signal_connect_data)(
+                    settings,
+                    cs("notify::gtk-theme-name").as_ptr(),
+                    on_theme_name_changed as P,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    0,
+                );
+            }
             let app = (a.adw_application_new)(cs("br.uniube.pi.guialar").as_ptr(), 0);
             (a.g_signal_connect_data)(
                 app,

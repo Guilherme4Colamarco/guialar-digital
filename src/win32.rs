@@ -108,6 +108,53 @@ extern "system" {
     pub fn GetExitCodeProcess(h: HANDLE, code: *mut u32) -> i32;
     pub fn CloseHandle(h: HANDLE) -> i32;
     pub fn GetModuleHandleW(name: *const u16) -> HANDLE;
+    pub fn LoadLibraryW(name: *const u16) -> HANDLE;
+    pub fn GetProcAddress(module: HANDLE, name: *const u8) -> *mut c_void;
+}
+
+/// `HKEY_CURRENT_USER`: `(HKEY)(ULONG_PTR)(LONG)0x80000001` — precisa de sign-extension em 64 bits.
+pub const HKEY_CURRENT_USER: isize = 0x8000_0001u32 as i32 as isize;
+pub const RRF_RT_REG_DWORD: u32 = 0x0000_0010;
+
+/// Funções não documentadas do `uxtheme.dll`, importadas por ordinal (modo escuro dos controles Win32).
+fn uxtheme_ordinal(ordinal: usize) -> *mut c_void {
+    // SAFETY: nome terminado em zero; o ordinal vai no lugar do ponteiro (convenção do Win32).
+    unsafe {
+        let m = LoadLibraryW(w("uxtheme.dll").as_ptr());
+        if m.is_null() {
+            return std::ptr::null_mut();
+        }
+        GetProcAddress(m, ordinal as *const u8)
+    }
+}
+
+/// Ordinal 135 `SetPreferredAppMode(AllowDark)` + ordinal 136 `FlushMenuThemes()`.
+pub fn enable_dark_mode_for_process() {
+    // SAFETY: assinaturas conhecidas dos ordinais; ponteiro nulo (Windows antigo) é ignorado.
+    unsafe {
+        let f = uxtheme_ordinal(135);
+        if !f.is_null() {
+            let f: unsafe extern "system" fn(i32) -> i32 = std::mem::transmute(f);
+            f(1);
+        }
+        let f = uxtheme_ordinal(136);
+        if !f.is_null() {
+            let f: unsafe extern "system" fn() = std::mem::transmute(f);
+            f();
+        }
+    }
+}
+
+/// Ordinal 133 `AllowDarkModeForWindow(hwnd, allow)`.
+pub fn allow_dark_mode_for_window(hwnd: HWND, allow: bool) {
+    // SAFETY: assinatura conhecida do ordinal; ponteiro nulo é ignorado.
+    unsafe {
+        let f = uxtheme_ordinal(133);
+        if !f.is_null() {
+            let f: unsafe extern "system" fn(HWND, i32) -> i32 = std::mem::transmute(f);
+            f(hwnd, allow as i32);
+        }
+    }
 }
 
 #[link(name = "shell32")]
@@ -329,6 +376,15 @@ mod tests {
     #[test]
     fn rgb_troca_canais() {
         assert_eq!(rgb(0x112233), 0x0033_2211);
+    }
+
+    #[test]
+    fn hkey_current_user_tem_sign_extension() {
+        assert_eq!(HKEY_CURRENT_USER as i64 as u64, 0xFFFF_FFFF_8000_0001u64);
+        assert_eq!(
+            0x8000_0001u32 as i32 as i64 as u64,
+            0xFFFF_FFFF_8000_0001u64
+        );
     }
 
     #[test]

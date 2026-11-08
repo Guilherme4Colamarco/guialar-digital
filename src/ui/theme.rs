@@ -7,6 +7,13 @@
 
 use crate::verify::ProtectionStatus;
 
+/// `true` se o nome de um tema GTK (ex.: `Adwaita-dark`, `Arc-Darker`) é escuro.
+#[cfg_attr(windows, allow(dead_code))]
+pub fn gtk_theme_is_dark(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    n.contains("dark") || n.contains("black")
+}
+
 /// Fotografia do sistema exibida na janela.
 #[derive(Debug, Clone)]
 pub struct Snapshot {
@@ -124,5 +131,23 @@ mod tests {
             browsers_summary(&[("Firefox", true), ("Brave", false), ("Edge", true)]),
             "Firefox, Edge"
         );
+    }
+
+    #[test]
+    fn nome_de_tema_gtk_escuro_ou_claro() {
+        assert!(gtk_theme_is_dark("Adwaita-dark"));
+        assert!(gtk_theme_is_dark("Arc-DARKER"));
+        assert!(gtk_theme_is_dark("Yaru:Black"));
+        assert!(!gtk_theme_is_dark("Adwaita"));
+        assert!(!gtk_theme_is_dark(""));
+    }
+
+    #[test]
+    fn hkey_current_user_estende_o_sinal() {
+        assert_eq!(
+            0x8000_0001u32 as i32 as i64 as u64,
+            0xFFFF_FFFF_8000_0001u64
+        );
+        assert_ne!(0x8000_0001u32 as u64, 0xFFFF_FFFF_8000_0001u64);
     }
 }

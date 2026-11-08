@@ -18,14 +18,12 @@ const ID_ACTIVATE: usize = 101;
 const ID_BROWSERS: usize = 102;
 const ID_CHECK: usize = 103;
 const ID_RESTORE: usize = 104;
-const ID_THEME: usize = 105;
 const WM_APP_DONE: u32 = 0x8001;
 const WM_APP_SNAPSHOT: u32 = 0x8002;
 const BCM_SETSHIELD: u32 = 0x160C;
 
 static MAIN_HWND: AtomicIsize = AtomicIsize::new(0);
 static DARK: AtomicBool = AtomicBool::new(false);
-static USER_TOGGLED: AtomicBool = AtomicBool::new(false);
 static STATE: Mutex<UiState> = Mutex::new(UiState {
     snapshot: None,
     message: String::new(),
@@ -46,7 +44,7 @@ struct Fonts {
 }
 
 static FONTS: Mutex<Option<[usize; 4]>> = Mutex::new(None);
-static BUTTONS: Mutex<[usize; 5]> = Mutex::new([0; 5]);
+static BUTTONS: Mutex<[usize; 4]> = Mutex::new([0; 4]);
 
 fn palette() -> Palette {
     if DARK.load(Ordering::Relaxed) {
@@ -56,24 +54,30 @@ fn palette() -> Palette {
     }
 }
 
-fn system_prefers_dark() -> bool {
+fn read_light_theme(value: &str) -> Option<u32> {
     let sub = w(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize");
-    let val = w("AppsUseLightTheme");
+    let val = w(value);
     let mut data: u32 = 1;
     let mut size: u32 = 4;
     // SAFETY: ponteiros válidos para a duração da chamada.
     let rc = unsafe {
         RegGetValueW(
-            0x8000_0001u32 as isize,
+            HKEY_CURRENT_USER,
             sub.as_ptr(),
             val.as_ptr(),
-            0x10,
+            RRF_RT_REG_DWORD,
             std::ptr::null_mut(),
             &mut data as *mut u32 as *mut c_void,
             &mut size,
         )
     };
-    rc == 0 && data == 0
+    (rc == 0).then_some(data)
+}
+
+/// Escuro quando `AppsUseLightTheme` (ou, na falta, `SystemUsesLightTheme`) vale 0.
+fn system_prefers_dark() -> bool {
+    read_light_theme("AppsUseLightTheme").or_else(|| read_light_theme("SystemUsesLightTheme"))
+        == Some(0)
 }
 
 fn dp(px: i32, dpi: u32) -> i32 {
@@ -207,7 +211,14 @@ fn apply_theme(hwnd: HWND) {
     let corner: i32 = 2; // DWMWCP_ROUND
                          // SAFETY: ponteiros para inteiros locais; falhas (Windows antigo) são ignoradas.
     unsafe {
+        let p = palette();
+        let caption = rgb(p.background);
+        let text = rgb(p.text);
+        allow_dark_mode_for_window(hwnd, dark == 1);
         DwmSetWindowAttribute(hwnd, 20, &dark as *const i32 as *const c_void, 4);
+        DwmSetWindowAttribute(hwnd, 19, &dark as *const i32 as *const c_void, 4);
+        DwmSetWindowAttribute(hwnd, 35, &caption as *const u32 as *const c_void, 4);
+        DwmSetWindowAttribute(hwnd, 36, &text as *const u32 as *const c_void, 4);
         DwmSetWindowAttribute(hwnd, 38, &backdrop as *const i32 as *const c_void, 4);
         DwmSetWindowAttribute(hwnd, 33, &corner as *const i32 as *const c_void, 4);
         let theme = w(if dark == 1 {
@@ -216,7 +227,9 @@ fn apply_theme(hwnd: HWND) {
             "Explorer"
         });
         for b in BUTTONS.lock().unwrap().iter().filter(|b| **b != 0) {
+            allow_dark_mode_for_window(*b as HWND, dark == 1);
             SetWindowTheme(*b as HWND, theme.as_ptr(), std::ptr::null());
+            InvalidateRect(*b as HWND, std::ptr::null(), 1);
         }
     }
 }
@@ -251,21 +264,11 @@ fn place_buttons(hwnd: HWND) {
     };
     let l = layout(rc.right, dpi);
     let b = *BUTTONS.lock().unwrap();
-    let spec: [(usize, RECT, i32); 5] = [
+    let spec: [(usize, RECT, i32); 4] = [
         (b[0], button_rect(&l.cards[0], dpi, 170), 0),
         (b[1], button_rect(&l.cards[1], dpi, 170), 0),
         (b[2], button_rect(&l.cards[2], dpi, 170), 0),
         (b[3], button_rect(&l.cards[3], dpi, 170), 0),
-        (
-            b[4],
-            RECT {
-                left: l.header.right - dp(110, dpi),
-                top: l.header.top + dp(14, dpi),
-                right: l.header.right,
-                bottom: l.header.top + dp(14, dpi) + dp(34, dpi),
-            },
-            0,
-        ),
     ];
     for (h, r, _) in spec {
         // SAFETY: handles criados em WM_CREATE.
@@ -285,10 +288,9 @@ fn place_buttons(hwnd: HWND) {
 fn set_busy(hwnd: HWND, busy: bool) {
     STATE.lock().unwrap().busy = busy;
     for (i, b) in BUTTONS.lock().unwrap().iter().enumerate() {
-        if i < 4 {
-            // SAFETY: handles de botões filhos.
-            unsafe { EnableWindow(*b as HWND, (!busy) as i32) };
-        }
+        let _ = i;
+        // SAFETY: handles de botões filhos.
+        unsafe { EnableWindow(*b as HWND, (!busy) as i32) };
     }
     // SAFETY: janela principal.
     unsafe { InvalidateRect(hwnd, std::ptr::null(), 0) };
@@ -557,7 +559,6 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: usize, lp: isize) ->
             b[1] = create_button(hwnd, ID_BROWSERS, "Proteger Navegadores", false) as usize;
             b[2] = create_button(hwnd, ID_CHECK, "Verificar Agora", false) as usize;
             b[3] = create_button(hwnd, ID_RESTORE, "Restaurar Padrão", false) as usize;
-            b[4] = create_button(hwnd, ID_THEME, "Alternar tema", false) as usize;
             SendMessageW(b[0] as HWND, BCM_SETSHIELD, 0, 1); // escudo UAC
             SendMessageW(b[3] as HWND, BCM_SETSHIELD, 0, 1);
             drop(b);
@@ -595,13 +596,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: usize, lp: isize) ->
             place_buttons(hwnd);
             0
         }
-        0x001A => {
-            // WM_SETTINGCHANGE: segue o tema do Windows enquanto o usuário não alternar.
-            if !USER_TOGGLED.load(Ordering::Relaxed) {
-                DARK.store(system_prefers_dark(), Ordering::Relaxed);
-                apply_theme(hwnd);
-                InvalidateRect(hwnd, std::ptr::null(), 0);
-            }
+        0x001A | 0x031A => {
+            // WM_SETTINGCHANGE / WM_THEMECHANGED: segue o tema do Windows ao vivo.
+            DARK.store(system_prefers_dark(), Ordering::Relaxed);
+            apply_theme(hwnd);
+            InvalidateRect(hwnd, std::ptr::null(), 1);
             DefWindowProcW(hwnd, msg, wp, lp)
         }
         0x0111 => {
@@ -615,12 +614,6 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: usize, lp: isize) ->
                     STATE.lock().unwrap().snapshot = None;
                     InvalidateRect(hwnd, std::ptr::null(), 0);
                     spawn_snapshot();
-                }
-                ID_THEME => {
-                    USER_TOGGLED.store(true, Ordering::Relaxed);
-                    DARK.fetch_xor(true, Ordering::Relaxed);
-                    apply_theme(hwnd);
-                    InvalidateRect(hwnd, std::ptr::null(), 0);
                 }
                 _ => {}
             }
@@ -655,6 +648,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: usize, lp: isize) ->
 }
 
 pub fn run() -> Result<()> {
+    enable_dark_mode_for_process();
     DARK.store(system_prefers_dark(), Ordering::Relaxed);
     let class = w("GuiaLarDigitalWindow");
     // SAFETY: registro e criação de janela Win32 na thread principal.
