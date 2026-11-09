@@ -260,7 +260,29 @@ mod imp {
         }
     }
 
+    /// Mostra só os botões válidos para o estado (sem "Restaurar" sem proteção).
+    fn show_actions(status: Option<&ProtectionStatus>) {
+        use crate::ui::theme::Action;
+        let u = ui();
+        let visible = theme::visible_actions(status);
+        for (action, idx) in [
+            (Action::Activate, 0),
+            (Action::Restore, 1),
+            (Action::Browsers, 2),
+            (Action::Check, 3),
+        ] {
+            // SAFETY: thread principal.
+            unsafe {
+                (api().gtk_widget_set_visible)(
+                    u.buttons[idx] as P,
+                    visible.contains(&action) as c_int,
+                );
+            }
+        }
+    }
+
     fn apply_snapshot(s: &Snapshot) {
+        show_actions(Some(&s.status));
         let u = ui();
         let a = api();
         // SAFETY: thread principal; ponteiros guardados em UI.
@@ -483,6 +505,7 @@ mod imp {
             spinner: spinner as usize,
             buttons: [b_on as usize, b_off as usize, b_br as usize, b_chk as usize],
         });
+        show_actions(None);
         (a.gtk_window_present)(win);
         refresh();
     }
