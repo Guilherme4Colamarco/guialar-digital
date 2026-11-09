@@ -213,7 +213,7 @@ fn layout(client_w: i32, dpi: u32, n_cards: usize) -> Layout {
         left: m,
         top: details_toggle.bottom + dp(6, dpi),
         right: m + wd,
-        bottom: details_toggle.bottom + dp(6 + 150, dpi),
+        bottom: details_toggle.bottom + dp(6 + 176, dpi),
     };
     Layout {
         margin: m,
@@ -341,7 +341,7 @@ fn place_buttons(hwnd: HWND) {
         unsafe {
             match pos {
                 Some(k) => {
-                    let r = button_rect(&l.cards[k], dpi, 190);
+                    let r = button_rect(&l.cards[k], dpi, 220);
                     MoveWindow(
                         *h as HWND,
                         r.left,
@@ -458,6 +458,10 @@ fn post(msg: u32, lparam: isize) {
 }
 
 fn text(dc: HDC, font: HGDIOBJ, color: u32, s: &str, r: &mut RECT, fmt: u32) {
+    // DrawTextW com ponteiro dangling (string vazia) derruba o processo.
+    if s.is_empty() {
+        return;
+    }
     // SAFETY: `dc` válido durante WM_PAINT.
     unsafe {
         SelectObject(dc, font);
@@ -645,7 +649,7 @@ fn draw(dc: HDC, rc: &RECT, dpi: u32) {
         .unwrap_or_default();
     for (c, a) in l.cards.iter().zip(actions.iter()) {
         card_frame(dc, c, &p, dpi);
-        let right = c.right - dp(16 + 190 + 16, dpi);
+        let right = c.right - dp(16 + 220 + 16, dpi);
         let mut r = RECT {
             left: c.left + dp(20, dpi),
             top: c.top + dp(12, dpi),
@@ -912,6 +916,14 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: usize, lp: isize) ->
 }
 
 pub fn run() -> Result<()> {
+    // Sem console, um pânico some em silêncio: grava em %LOCALAPPDATA%\GuiaLar\panic.log.
+    std::panic::set_hook(Box::new(|info| {
+        if let Some(dir) = std::env::var_os("LOCALAPPDATA") {
+            let dir = std::path::Path::new(&dir).join("GuiaLar");
+            let _ = std::fs::create_dir_all(&dir);
+            let _ = std::fs::write(dir.join("panic.log"), format!("{info}\n"));
+        }
+    }));
     enable_dark_mode_for_process();
     DARK.store(system_prefers_dark(), Ordering::Relaxed);
     let class = w("GuiaLarDigitalWindow");
@@ -942,8 +954,8 @@ pub fn run() -> Result<()> {
             0x00CF_0000, // WS_OVERLAPPEDWINDOW
             0x8000_0000u32 as i32,
             0x8000_0000u32 as i32,
-            700,
-            700,
+            740,
+            740,
             std::ptr::null_mut(),
             std::ptr::null_mut(),
             inst,
@@ -958,8 +970,8 @@ pub fn run() -> Result<()> {
             std::ptr::null_mut(),
             0,
             0,
-            dp(700, dpi),
-            dp(700, dpi),
+            dp(740, dpi),
+            dp(740, dpi),
             0x2 | 0x4 | 0x10,
         ); // NOMOVE|NOZORDER|NOACTIVATE
         ShowWindow(hwnd, SW_SHOWNORMAL);

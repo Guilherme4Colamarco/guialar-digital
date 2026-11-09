@@ -124,9 +124,7 @@ pub fn card_title(action: Action) -> &'static str {
 
 pub fn card_subtitle(action: Action, missing: &[String]) -> String {
     match action {
-        Action::Activate => {
-            "Bloqueia sites perigosos e adultos e instala o bloqueador de anúncios".into()
-        }
+        Action::Activate => "Bloqueia sites perigosos e adultos e os anúncios".into(),
         Action::Browsers => format!("Falta o bloqueador em: {}", missing.join(", ")),
         Action::Check => "Testa a conexão agora".into(),
         Action::Restore => "Desfaz a proteção e remove o bloqueador de anúncios".into(),
