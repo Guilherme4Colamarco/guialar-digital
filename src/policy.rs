@@ -83,6 +83,18 @@ pub fn remove_firefox_policy(existing: &str) -> Result<Option<String>> {
     Ok(Some(serde_json::to_string_pretty(&root)?))
 }
 
+/// Navegadores instalados que ainda não receberam o bloqueador (só Windows).
+pub fn browsers_without_blocker() -> Vec<String> {
+    #[cfg(windows)]
+    {
+        win::browsers_without_blocker()
+    }
+    #[cfg(not(windows))]
+    {
+        Vec::new()
+    }
+}
+
 #[cfg(windows)]
 pub use win::{install_all, revert_all};
 
@@ -134,6 +146,48 @@ mod win {
             done.push("Firefox: uBlock Origin instalado ao reabrir o navegador".into());
         }
         Ok(done)
+    }
+
+    pub fn browsers_without_blocker() -> Vec<String> {
+        let mut out = Vec::new();
+        let candidates = [
+            ("Google Chrome", r"Google\Chrome\Application\chrome.exe"),
+            ("Microsoft Edge", r"Microsoft\Edge\Application\msedge.exe"),
+            (
+                "Brave",
+                r"BraveSoftware\Brave-Browser\Application\brave.exe",
+            ),
+        ];
+        for (name, rel) in candidates {
+            if find_exe(rel).is_none() {
+                continue;
+            }
+            let Some((_, key, _)) = chromium_policies().into_iter().find(|p| p.0 == name) else {
+                continue;
+            };
+            let has = hidden(Command::new("reg").args(["query", key, "/v", POLICY_VALUE_NAME]))
+                .output()
+                .map(|o| {
+                    o.status.success()
+                        && String::from_utf8_lossy(&o.stdout).contains(UBOL_CHROMIUM_ID)
+                })
+                .unwrap_or(false);
+            if !has {
+                out.push(name.to_string());
+            }
+        }
+        if let Some(exe) = find_exe(r"Mozilla Firefox\firefox.exe") {
+            let file = exe
+                .parent()
+                .map(|d| d.join("distribution").join("policies.json"));
+            let has = file
+                .and_then(|f| std::fs::read_to_string(f).ok())
+                .is_some_and(|t| t.contains(FIREFOX_UBO_ID));
+            if !has {
+                out.push("Firefox".to_string());
+            }
+        }
+        out
     }
 
     /// Remove as políticas gravadas pelo GuiaLar. Chaves/valores ausentes não são erro.

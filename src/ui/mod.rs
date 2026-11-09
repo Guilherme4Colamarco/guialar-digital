@@ -65,6 +65,7 @@ pub fn snapshot() -> Snapshot {
             .into_iter()
             .map(|b| (b.name, b.is_installed))
             .collect(),
+        missing_blocker: crate::policy::browsers_without_blocker(),
         manifest_path: DnsStateManifest::file_path()
             .map(|p| p.display().to_string())
             .unwrap_or_default(),

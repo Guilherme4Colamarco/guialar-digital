@@ -11,29 +11,43 @@ use std::sync::Mutex;
 use anyhow::{bail, Result};
 
 use super::theme::{self, Palette, Snapshot};
-use crate::verify::ProtectionStatus;
 use crate::win32::*;
 
 const ID_ACTIVATE: usize = 101;
 const ID_BROWSERS: usize = 102;
 const ID_CHECK: usize = 103;
 const ID_RESTORE: usize = 104;
+const ID_DETAILS: usize = 106;
+const ID_COPY: usize = 107;
+const TIMER_PROGRESS: usize = 1;
 const WM_APP_DONE: u32 = 0x8001;
 const WM_APP_SNAPSHOT: u32 = 0x8002;
 const BCM_SETSHIELD: u32 = 0x160C;
 
 static MAIN_HWND: AtomicIsize = AtomicIsize::new(0);
 static DARK: AtomicBool = AtomicBool::new(false);
-static STATE: Mutex<UiState> = Mutex::new(UiState {
+static STATE: Mutex<AppState> = Mutex::new(AppState {
     snapshot: None,
     message: String::new(),
+    error_detail: String::new(),
     busy: false,
+    details_open: false,
+    tick: 0,
 });
 
-struct UiState {
+struct AppState {
     snapshot: Option<Snapshot>,
     message: String,
+    /// Cadeia técnica do último erro (vai só para "Detalhes").
+    error_detail: String,
     busy: bool,
+    details_open: bool,
+    tick: u32,
+}
+
+struct Done {
+    message: String,
+    detail: String,
 }
 
 struct Fonts {
@@ -45,6 +59,8 @@ struct Fonts {
 
 static FONTS: Mutex<Option<[usize; 4]>> = Mutex::new(None);
 static BUTTONS: Mutex<[usize; 4]> = Mutex::new([0; 4]);
+/// [alternar detalhes, copiar detalhes]
+static EXTRA: Mutex<[usize; 2]> = Mutex::new([0; 2]);
 
 fn palette() -> Palette {
     if DARK.load(Ordering::Relaxed) {
@@ -148,6 +164,8 @@ struct Layout {
     hero: RECT,
     cards: Vec<RECT>,
     status: RECT,
+    details_toggle: RECT,
+    details_panel: RECT,
 }
 
 fn layout(client_w: i32, dpi: u32, n_cards: usize) -> Layout {
@@ -174,7 +192,7 @@ fn layout(client_w: i32, dpi: u32, n_cards: usize) -> Layout {
             left: m,
             top: y,
             right: m + wd,
-            bottom: y + dp(68, dpi),
+            bottom: y + dp(76, dpi),
         };
         y = c.bottom + dp(8, dpi);
         cards.push(c);
@@ -183,7 +201,19 @@ fn layout(client_w: i32, dpi: u32, n_cards: usize) -> Layout {
         left: m,
         top: y + dp(4, dpi),
         right: m + wd,
-        bottom: y + dp(52, dpi),
+        bottom: y + dp(48, dpi),
+    };
+    let details_toggle = RECT {
+        left: m,
+        top: status.bottom + dp(4, dpi),
+        right: m + dp(200, dpi),
+        bottom: status.bottom + dp(4 + 36, dpi),
+    };
+    let details_panel = RECT {
+        left: m,
+        top: details_toggle.bottom + dp(6, dpi),
+        right: m + wd,
+        bottom: details_toggle.bottom + dp(6 + 150, dpi),
     };
     Layout {
         margin: m,
@@ -191,12 +221,14 @@ fn layout(client_w: i32, dpi: u32, n_cards: usize) -> Layout {
         hero,
         cards,
         status,
+        details_toggle,
+        details_panel,
     }
 }
 
 fn button_rect(card: &RECT, dpi: u32, wide: i32) -> RECT {
     let bw = dp(wide, dpi);
-    let bh = dp(34, dpi);
+    let bh = dp(38, dpi);
     let cy = (card.top + card.bottom) / 2;
     RECT {
         left: card.right - dp(16, dpi) - bw,
@@ -227,7 +259,9 @@ fn apply_theme(hwnd: HWND) {
         } else {
             "Explorer"
         });
-        for b in BUTTONS.lock().unwrap().iter().filter(|b| **b != 0) {
+        let mut all: Vec<usize> = BUTTONS.lock().unwrap().to_vec();
+        all.extend(EXTRA.lock().unwrap().iter());
+        for b in all.iter().filter(|b| **b != 0) {
             allow_dark_mode_for_window(*b as HWND, dark == 1);
             SetWindowTheme(*b as HWND, theme.as_ptr(), std::ptr::null());
             InvalidateRect(*b as HWND, std::ptr::null(), 1);
@@ -256,6 +290,27 @@ fn create_button(parent: HWND, id: usize, text: &str, primary: bool) -> HWND {
     }
 }
 
+fn actions_of(snapshot: &Option<Snapshot>) -> Vec<theme::Action> {
+    let state = theme::ui_state(snapshot.as_ref(), false);
+    let missing = snapshot
+        .as_ref()
+        .is_some_and(|s| !s.missing_blocker.is_empty());
+    theme::actions_for(state, missing)
+}
+
+fn current_actions() -> Vec<theme::Action> {
+    actions_of(&STATE.lock().unwrap().snapshot)
+}
+
+fn action_id(a: theme::Action) -> usize {
+    match a {
+        theme::Action::Activate => ID_ACTIVATE,
+        theme::Action::Browsers => ID_BROWSERS,
+        theme::Action::Check => ID_CHECK,
+        theme::Action::Restore => ID_RESTORE,
+    }
+}
+
 fn place_buttons(hwnd: HWND) {
     let mut rc = RECT::default();
     // SAFETY: `hwnd` é a janela principal.
@@ -263,16 +318,30 @@ fn place_buttons(hwnd: HWND) {
         GetClientRect(hwnd, &mut rc);
         GetDpiForWindow(hwnd).max(96)
     };
-    let actions = current_actions();
+    let (actions, ui_st, open) = {
+        let st = STATE.lock().unwrap();
+        let a = actions_of(&st.snapshot);
+        (
+            a,
+            theme::ui_state(st.snapshot.as_ref(), false),
+            st.details_open,
+        )
+    };
     let l = layout(rc.right, dpi, actions.len());
     let b = *BUTTONS.lock().unwrap();
+    let all = [
+        theme::Action::Activate,
+        theme::Action::Browsers,
+        theme::Action::Check,
+        theme::Action::Restore,
+    ];
     for (i, h) in b.iter().enumerate() {
         let pos = actions.iter().position(|a| *a as usize == i);
         // SAFETY: handles criados em WM_CREATE.
         unsafe {
             match pos {
                 Some(k) => {
-                    let r = button_rect(&l.cards[k], dpi, 170);
+                    let r = button_rect(&l.cards[k], dpi, 190);
                     MoveWindow(
                         *h as HWND,
                         r.left,
@@ -281,6 +350,9 @@ fn place_buttons(hwnd: HWND) {
                         r.bottom - r.top,
                         1,
                     );
+                    SetWindowTextW(*h as HWND, w(theme::button_label(all[i], ui_st)).as_ptr());
+                    // Primeira ação = primária: botão padrão (Enter).
+                    SendMessageW(*h as HWND, 0x00F4, (k == 0) as usize, 1); // BM_SETSTYLE
                     ShowWindow(*h as HWND, 5); // SW_SHOW
                 }
                 None => {
@@ -289,11 +361,44 @@ fn place_buttons(hwnd: HWND) {
             }
         }
     }
-}
-
-fn current_actions() -> Vec<theme::Action> {
-    let st = STATE.lock().unwrap();
-    theme::visible_actions(st.snapshot.as_ref().map(|s| &s.status))
+    let e = *EXTRA.lock().unwrap();
+    let t = l.details_toggle;
+    let panel = l.details_panel;
+    let cw = dp(170, dpi);
+    let ch = dp(34, dpi);
+    // SAFETY: handles criados em WM_CREATE.
+    unsafe {
+        MoveWindow(
+            e[0] as HWND,
+            t.left,
+            t.top,
+            t.right - t.left,
+            t.bottom - t.top,
+            1,
+        );
+        SetWindowTextW(
+            e[0] as HWND,
+            w(if open {
+                "Detalhes técnicos  \u{25B4}"
+            } else {
+                "Detalhes técnicos  \u{25BE}"
+            })
+            .as_ptr(),
+        );
+        MoveWindow(
+            e[1] as HWND,
+            panel.right - dp(12, dpi) - cw,
+            panel.bottom - dp(10, dpi) - ch,
+            cw,
+            ch,
+            1,
+        );
+        ShowWindow(e[1] as HWND, if open { 5 } else { SW_HIDE });
+        if let Some(first) = actions.first() {
+            let idx = *first as usize;
+            let _ = SetFocus(b[idx] as HWND);
+        }
+    }
 }
 
 fn set_busy(hwnd: HWND, busy: bool) {
@@ -303,7 +408,15 @@ fn set_busy(hwnd: HWND, busy: bool) {
         unsafe { EnableWindow(*b as HWND, (!busy) as i32) };
     }
     // SAFETY: janela principal.
-    unsafe { InvalidateRect(hwnd, std::ptr::null(), 0) };
+    unsafe {
+        EnableWindow(EXTRA.lock().unwrap()[1] as HWND, (!busy) as i32);
+        if busy {
+            SetTimer(hwnd, TIMER_PROGRESS, 40, std::ptr::null());
+        } else {
+            KillTimer(hwnd, TIMER_PROGRESS);
+        }
+        InvalidateRect(hwnd, std::ptr::null(), 0);
+    }
 }
 
 fn spawn_snapshot() {
@@ -318,14 +431,23 @@ fn spawn_action(hwnd: HWND, f: fn() -> Result<String>) {
         return;
     }
     STATE.lock().unwrap().message =
-        "Trabalhando… confirme a janela de permissão, se aparecer.".into();
+        "Se aparecer a janela de permissão do Windows, escolha Sim.".into();
     set_busy(hwnd, true);
     std::thread::spawn(move || {
-        let msg = match f() {
-            Ok(m) => m,
-            Err(e) => format!("Não foi possível concluir: {e:#}"),
+        let done = match f() {
+            Ok(m) => Done {
+                message: m,
+                detail: String::new(),
+            },
+            Err(e) => {
+                let (short, detail) = theme::humanize_error(&format!("{e:#}"));
+                Done {
+                    message: short,
+                    detail,
+                }
+            }
         };
-        post(WM_APP_DONE, Box::into_raw(Box::new(msg)) as isize);
+        post(WM_APP_DONE, Box::into_raw(Box::new(done)) as isize);
     });
 }
 
@@ -386,13 +508,19 @@ fn paint(hwnd: HWND) {
 fn draw(dc: HDC, rc: &RECT, dpi: u32) {
     let p = palette();
     let Some(f) = current_fonts() else { return };
-    let actions =
-        theme::visible_actions(STATE.lock().unwrap().snapshot.as_ref().map(|s| &s.status));
-    let l = layout(rc.right, dpi, actions.len());
-    let (snapshot, message, busy) = {
+    let (snapshot, message, busy, tick, open, err) = {
         let s = STATE.lock().unwrap();
-        (s.snapshot.clone(), s.message.clone(), s.busy)
+        (
+            s.snapshot.clone(),
+            s.message.clone(),
+            s.busy,
+            s.tick,
+            s.details_open,
+            s.error_detail.clone(),
+        )
     };
+    let actions = actions_of(&snapshot);
+    let l = layout(rc.right, dpi, actions.len());
     // SAFETY: GDI no DC em memória desta pintura.
     unsafe {
         let bg = CreateSolidBrush(rgb(p.background));
@@ -451,24 +579,25 @@ fn draw(dc: HDC, rc: &RECT, dpi: u32) {
     );
 
     // Hero de status.
+    let ui_st = theme::ui_state(snapshot.as_ref(), busy);
     card_frame(dc, &l.hero, &p, dpi);
-    let (head, desc, color, glyph) = match &snapshot {
-        Some(s) => (
-            theme::headline(&s.status).to_string(),
-            theme::description(&s.status),
-            theme::status_color(&p, &s.status),
-            match s.status {
-                ProtectionStatus::Protected => "\u{E73E}",
-                ProtectionStatus::PartiallyConfigured(_) => "\u{E7BA}",
-                ProtectionStatus::Unprotected => "\u{E783}",
-            },
-        ),
-        None => (
-            "Verificando…".into(),
-            "Lendo o estado da proteção deste computador.".into(),
-            p.text_secondary,
-            "\u{E895}",
-        ),
+    let color = theme::state_color(&p, ui_st);
+    let glyph = match ui_st {
+        theme::UiState::Protegido => "\u{E73E}",
+        theme::UiState::Parcial => "\u{E7BA}",
+        theme::UiState::Desprotegido => "\u{E783}",
+        theme::UiState::Trabalhando => "\u{E895}",
+    };
+    let (head, desc) = if snapshot.is_none() && !busy {
+        (
+            "Verificando…".to_string(),
+            "Lendo o estado deste computador.".to_string(),
+        )
+    } else {
+        (
+            theme::headline(ui_st).to_string(),
+            theme::description(ui_st, snapshot.as_ref()),
+        )
     };
     let d = dp(60, dpi);
     let (bx, by) = (
@@ -509,59 +638,126 @@ fn draw(dc: HDC, rc: &RECT, dpi: u32) {
     };
     text(dc, f.body, p.text_secondary, &desc, &mut r, DT_LEFT_WORD);
 
-    // Cartões de ação.
-    let browsers = snapshot
+    // Cartões: só as ações do estado (primária primeiro).
+    let missing = snapshot
         .as_ref()
-        .map(|s| theme::browsers_summary(&s.browsers))
-        .unwrap_or_else(|| "Procurando navegadores…".into());
-    let info = |a: theme::Action| -> (&str, String) {
-        match a {
-            theme::Action::Activate => (
-                "Ativar proteção",
-                "Bloqueia sites perigosos e adultos e instala o bloqueador de anúncios".into(),
-            ),
-            theme::Action::Browsers => {
-                ("Bloqueador de anúncios", format!("Navegadores: {browsers}"))
-            }
-            theme::Action::Check => (
-                "Verificar agora",
-                "Testa se a rede está usando o filtro familiar".into(),
-            ),
-            theme::Action::Restore => (
-                "Desativar proteção",
-                "Volta ao DNS original e remove o bloqueador de anúncios".into(),
-            ),
-        }
-    };
+        .map(|s| s.missing_blocker.clone())
+        .unwrap_or_default();
     for (c, a) in l.cards.iter().zip(actions.iter()) {
-        let (title, sub) = info(*a);
         card_frame(dc, c, &p, dpi);
-        let right = c.right - dp(16 + 170 + 16, dpi);
+        let right = c.right - dp(16 + 190 + 16, dpi);
         let mut r = RECT {
             left: c.left + dp(20, dpi),
-            top: c.top + dp(10, dpi),
+            top: c.top + dp(12, dpi),
             right,
-            bottom: c.top + dp(36, dpi),
+            bottom: c.top + dp(40, dpi),
         };
-        text(dc, f.subtitle, p.text, title, &mut r, DT_ONE_LINE);
+        text(
+            dc,
+            f.subtitle,
+            p.text,
+            theme::card_title(*a),
+            &mut r,
+            DT_ONE_LINE,
+        );
         let mut r = RECT {
             left: c.left + dp(20, dpi),
-            top: c.top + dp(37, dpi),
+            top: c.top + dp(42, dpi),
             right,
-            bottom: c.bottom - dp(6, dpi),
+            bottom: c.bottom - dp(8, dpi),
         };
-        text(dc, f.body, p.text_secondary, &sub, &mut r, DT_ONE_LINE);
+        text(
+            dc,
+            f.body,
+            p.text_secondary,
+            &theme::card_subtitle(*a, &missing),
+            &mut r,
+            DT_ONE_LINE,
+        );
     }
 
-    // Barra de status.
-    let msg = if message.is_empty() && !busy {
-        theme::next_step(snapshot.as_ref().map(|s| &s.status)).to_string()
-    } else {
-        message
+    // Progresso indeterminado (N1) + mensagem de resultado.
+    if busy {
+        let track = RECT {
+            left: l.status.left,
+            top: l.status.top,
+            right: l.status.right,
+            bottom: l.status.top + dp(4, dpi),
+        };
+        let seg = (track.right - track.left) / 4;
+        let span = (track.right - track.left) + seg;
+        let x = track.left - seg + (tick as i32 * dp(10, dpi)) % span;
+        let seg_rc = RECT {
+            left: x.max(track.left),
+            top: track.top,
+            right: (x + seg).min(track.right),
+            bottom: track.bottom,
+        };
+        // SAFETY: GDI.
+        unsafe {
+            let bt = CreateSolidBrush(rgb(p.border));
+            FillRect(dc, &track, bt);
+            DeleteObject(bt);
+            if seg_rc.right > seg_rc.left {
+                let bs = CreateSolidBrush(rgb(if DARK.load(Ordering::Relaxed) {
+                    0x60CDFF
+                } else {
+                    0x0067C0
+                }));
+                FillRect(dc, &seg_rc, bs);
+                DeleteObject(bs);
+            }
+        }
+    }
+    let mut r = RECT {
+        left: l.status.left,
+        top: l.status.top + dp(10, dpi),
+        right: l.status.right,
+        bottom: l.status.bottom,
     };
-    let mut r = l.status;
-    text(dc, f.body, p.text_secondary, &msg, &mut r, DT_LEFT_WORD);
+    text(dc, f.body, p.text_secondary, &message, &mut r, DT_LEFT_WORD);
+
+    // Detalhes técnicos (recolhível): jargão só aqui.
+    if open {
+        card_frame(dc, &l.details_panel, &p, dpi);
+        let body = snapshot
+            .as_ref()
+            .map(|s| theme::technical_details(s, &err))
+            .unwrap_or_else(|| err.clone());
+        let mut r = RECT {
+            left: l.details_panel.left + dp(16, dpi),
+            top: l.details_panel.top + dp(10, dpi),
+            right: l.details_panel.right - dp(16, dpi),
+            bottom: l.details_panel.bottom - dp(54, dpi),
+        };
+        text(dc, f.body, p.text_secondary, &body, &mut r, DT_LEFT_WORD);
+    }
     let _ = l.margin;
+}
+
+/// Copia os detalhes técnicos para a área de transferência (via `clip.exe`, UTF-16).
+fn copy_details() {
+    use std::io::Write;
+    use std::os::windows::process::CommandExt;
+    let text = {
+        let st = STATE.lock().unwrap();
+        match &st.snapshot {
+            Some(s) => theme::technical_details(s, &st.error_detail),
+            None => st.error_detail.clone(),
+        }
+    };
+    let mut bytes = vec![0xFF, 0xFE];
+    bytes.extend(text.encode_utf16().flat_map(u16::to_le_bytes));
+    if let Ok(mut child) = std::process::Command::new("clip")
+        .creation_flags(0x0800_0000)
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+    {
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(&bytes);
+        }
+        let _ = child.wait();
+    }
 }
 
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: usize, lp: isize) -> isize {
@@ -572,13 +768,17 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: usize, lp: isize) ->
             let dpi = GetDpiForWindow(hwnd).max(96);
             load_fonts(dpi);
             let mut b = BUTTONS.lock().unwrap();
-            b[0] = create_button(hwnd, ID_ACTIVATE, "Ativar proteção", true) as usize;
-            b[1] = create_button(hwnd, ID_BROWSERS, "Instalar bloqueador", false) as usize;
-            b[2] = create_button(hwnd, ID_CHECK, "Verificar agora", false) as usize;
+            b[0] = create_button(hwnd, ID_ACTIVATE, "Proteger este computador", true) as usize;
+            b[1] = create_button(hwnd, ID_BROWSERS, "Proteger navegadores", false) as usize;
+            b[2] = create_button(hwnd, ID_CHECK, "Verificar", false) as usize;
             b[3] = create_button(hwnd, ID_RESTORE, "Desativar proteção", false) as usize;
             SendMessageW(b[0] as HWND, BCM_SETSHIELD, 0, 1); // escudo UAC
             SendMessageW(b[3] as HWND, BCM_SETSHIELD, 0, 1);
             drop(b);
+            let mut e = EXTRA.lock().unwrap();
+            e[0] = create_button(hwnd, ID_DETAILS, "Detalhes técnicos", false) as usize;
+            e[1] = create_button(hwnd, ID_COPY, "Copiar detalhes", false) as usize;
+            drop(e);
             apply_theme(hwnd);
             place_buttons(hwnd);
             spawn_snapshot();
@@ -620,25 +820,70 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: usize, lp: isize) ->
             InvalidateRect(hwnd, std::ptr::null(), 1);
             DefWindowProcW(hwnd, msg, wp, lp)
         }
+        0x0400 => {
+            // DM_GETDEFID: Enter aciona a ação primária.
+            match current_actions().first() {
+                Some(a) => ((0x534Bu32 << 16) | action_id(*a) as u32) as isize,
+                None => 0,
+            }
+        }
+        0x0113 => {
+            // WM_TIMER: anima a barra de progresso.
+            let mut st = STATE.lock().unwrap();
+            st.tick = st.tick.wrapping_add(1);
+            drop(st);
+            InvalidateRect(hwnd, std::ptr::null(), 0);
+            0
+        }
         0x0111 => {
             // WM_COMMAND
-            match wp & 0xFFFF {
+            let mut id = wp & 0xFFFF;
+            if id == 1 {
+                // IDOK: Enter fora de um botão = ação primária.
+                id = current_actions()
+                    .first()
+                    .map(|a| action_id(*a))
+                    .unwrap_or(0);
+            }
+            match id {
                 ID_ACTIVATE => spawn_action(hwnd, super::action_activate),
                 ID_BROWSERS => spawn_action(hwnd, super::action_browsers),
                 ID_RESTORE => spawn_action(hwnd, super::action_restore),
                 ID_CHECK => {
-                    STATE.lock().unwrap().message = "Verificando…".into();
-                    STATE.lock().unwrap().snapshot = None;
+                    if !STATE.lock().unwrap().busy {
+                        STATE.lock().unwrap().message = "Verificando…".into();
+                        set_busy(hwnd, true);
+                        spawn_snapshot();
+                    }
+                }
+                ID_DETAILS => {
+                    {
+                        let mut st = STATE.lock().unwrap();
+                        st.details_open = !st.details_open;
+                    }
+                    place_buttons(hwnd);
                     InvalidateRect(hwnd, std::ptr::null(), 0);
-                    spawn_snapshot();
+                }
+                ID_COPY => {
+                    copy_details();
+                    STATE.lock().unwrap().message = "Detalhes copiados.".into();
+                    InvalidateRect(hwnd, std::ptr::null(), 0);
+                }
+                2 => {
+                    PostMessageW(hwnd, 0x0010, 0, 0); // IDCANCEL (Esc) -> WM_CLOSE
                 }
                 _ => {}
             }
             0
         }
         WM_APP_DONE => {
-            let m = Box::from_raw(lp as *mut String);
-            STATE.lock().unwrap().message = *m;
+            let d = Box::from_raw(lp as *mut Done);
+            {
+                let mut st = STATE.lock().unwrap();
+                st.message = d.message;
+                st.details_open = !d.detail.is_empty();
+                st.error_detail = d.detail;
+            }
             set_busy(hwnd, false);
             spawn_snapshot();
             0
@@ -652,6 +897,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: usize, lp: isize) ->
                     st.message = "Verificação concluída.".into();
                 }
             }
+            set_busy(hwnd, false);
             place_buttons(hwnd);
             InvalidateRect(hwnd, std::ptr::null(), 0);
             0
@@ -721,6 +967,15 @@ pub fn run() -> Result<()> {
         SetForegroundWindow(hwnd);
         let mut msg: MSG = std::mem::zeroed();
         while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
+            // Ctrl+R = verificar.
+            if msg.message == 0x0100 && msg.wParam == 0x52 && GetKeyState(0x11) < 0 {
+                PostMessageW(hwnd, 0x0111, ID_CHECK, 0);
+                continue;
+            }
+            // Tab/Shift+Tab/Enter/Esc como em um diálogo.
+            if IsDialogMessageW(hwnd, &msg) != 0 {
+                continue;
+            }
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }

@@ -225,6 +225,12 @@ extern "system" {
     ) -> i32;
     pub fn GetDpiForWindow(h: HWND) -> u32;
     pub fn SetForegroundWindow(h: HWND) -> i32;
+    pub fn SetTimer(h: HWND, id: usize, ms: u32, f: *const c_void) -> usize;
+    pub fn KillTimer(h: HWND, id: usize) -> i32;
+    pub fn IsDialogMessageW(h: HWND, m: *const MSG) -> i32;
+    pub fn GetKeyState(vk: i32) -> i16;
+    pub fn SetFocus(h: HWND) -> HWND;
+    pub fn SetWindowTextW(h: HWND, text: *const u16) -> i32;
 }
 
 #[link(name = "gdi32")]

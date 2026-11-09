@@ -15,12 +15,12 @@ pub use imp::run;
 #[cfg(target_env = "gnu")]
 mod imp {
     use std::ffi::{c_char, c_int, c_uint, c_void, CString};
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Mutex, OnceLock};
 
     use anyhow::Result;
 
     use crate::ui::theme::{self, Snapshot};
-    use crate::verify::ProtectionStatus;
 
     type P = *mut c_void;
 
@@ -80,7 +80,6 @@ mod imp {
         adw_status_page_set_title: unsafe extern "C" fn(P, *const c_char),
         adw_status_page_set_description: unsafe extern "C" fn(P, *const c_char),
         adw_preferences_group_new: unsafe extern "C" fn() -> P,
-        adw_preferences_group_set_title: unsafe extern "C" fn(P, *const c_char),
         adw_preferences_group_add: unsafe extern "C" fn(P, P),
         adw_action_row_new: unsafe extern "C" fn() -> P,
         adw_action_row_set_subtitle: unsafe extern "C" fn(P, *const c_char),
@@ -99,8 +98,6 @@ mod imp {
         gtk_button_new_with_label: unsafe extern "C" fn(*const c_char) -> P,
         gtk_scrolled_window_new: unsafe extern "C" fn() -> P,
         gtk_scrolled_window_set_child: unsafe extern "C" fn(P, P),
-        gtk_spinner_new: unsafe extern "C" fn() -> P,
-        gtk_spinner_set_spinning: unsafe extern "C" fn(P, c_int),
         gtk_widget_set_valign: unsafe extern "C" fn(P, c_int),
         gtk_widget_set_vexpand: unsafe extern "C" fn(P, c_int),
         gtk_widget_set_sensitive: unsafe extern "C" fn(P, c_int),
@@ -114,6 +111,17 @@ mod imp {
         gtk_window_set_default_size: unsafe extern "C" fn(P, c_int, c_int),
         gtk_window_set_icon_name: unsafe extern "C" fn(P, *const c_char),
         gtk_window_present: unsafe extern "C" fn(P),
+        gtk_window_set_default_widget: unsafe extern "C" fn(P, P),
+        gtk_widget_remove_css_class: unsafe extern "C" fn(P, *const c_char),
+        gtk_button_set_label: unsafe extern "C" fn(P, *const c_char),
+        gtk_progress_bar_new: unsafe extern "C" fn() -> P,
+        gtk_progress_bar_pulse: unsafe extern "C" fn(P),
+        gtk_widget_get_clipboard: unsafe extern "C" fn(P) -> P,
+        gdk_clipboard_set_text: unsafe extern "C" fn(P, *const c_char),
+        g_timeout_add: unsafe extern "C" fn(c_uint, unsafe extern "C" fn(P) -> c_int, P) -> c_uint,
+        g_simple_action_new: unsafe extern "C" fn(*const c_char, P) -> P,
+        g_action_map_add_action: unsafe extern "C" fn(P, P),
+        gtk_application_set_accels_for_action: unsafe extern "C" fn(P, *const c_char, *const *const c_char),
     }
 
     static API: OnceLock<Api> = OnceLock::new();
@@ -128,11 +136,16 @@ mod imp {
         row_dns: usize,
         row_browsers: usize,
         row_manifest: usize,
-        row_log: usize,
         toasts: usize,
-        spinner: usize,
+        progress: usize,
+        window: usize,
+        row_check: usize,
         buttons: [usize; 4], // ativar, restaurar, navegadores, verificar
     }
+
+    static BUSY: AtomicBool = AtomicBool::new(false);
+    static LAST: Mutex<Option<Snapshot>> = Mutex::new(None);
+    static ERR_DETAIL: Mutex<String> = Mutex::new(String::new());
 
     static UI: Mutex<Option<Ui>> = Mutex::new(None);
 
@@ -252,69 +265,135 @@ mod imp {
         unsafe { (api().adw_action_row_set_subtitle)(row as P, cs(text).as_ptr()) };
     }
 
-    fn pick_icon(status: &ProtectionStatus) -> &'static str {
-        match status {
-            ProtectionStatus::Protected => "security-high-symbolic",
-            ProtectionStatus::PartiallyConfigured(_) => "security-medium-symbolic",
-            ProtectionStatus::Unprotected => "security-low-symbolic",
+    fn pick_icon(state: theme::UiState) -> &'static str {
+        match state {
+            theme::UiState::Protegido => "security-high-symbolic",
+            theme::UiState::Parcial => "security-medium-symbolic",
+            theme::UiState::Desprotegido => "security-low-symbolic",
+            theme::UiState::Trabalhando => "emblem-synchronizing-symbolic",
         }
     }
 
-    /// Mostra só os botões válidos para o estado (sem "Restaurar" sem proteção).
-    fn show_actions(status: Option<&ProtectionStatus>) {
-        use crate::ui::theme::Action;
-        let u = ui();
-        let visible = theme::visible_actions(status);
-        for (action, idx) in [
-            (Action::Activate, 0),
-            (Action::Restore, 1),
-            (Action::Browsers, 2),
-            (Action::Check, 3),
-        ] {
-            // SAFETY: thread principal.
-            unsafe {
-                (api().gtk_widget_set_visible)(
-                    u.buttons[idx] as P,
-                    visible.contains(&action) as c_int,
-                );
-            }
-        }
-    }
-
-    fn apply_snapshot(s: &Snapshot) {
-        show_actions(Some(&s.status));
+    /// Redesenha tudo a partir do estado (ADR-020): só a tabela de `theme` decide.
+    fn render() {
+        use theme::Action;
         let u = ui();
         let a = api();
+        let busy = BUSY.load(Ordering::Relaxed);
+        let snap = LAST.lock().unwrap().clone();
+        let state = theme::ui_state(snap.as_ref(), busy);
+        let layout_state = theme::ui_state(snap.as_ref(), false);
+        let missing_list = snap
+            .as_ref()
+            .map(|s| s.missing_blocker.clone())
+            .unwrap_or_default();
+        let actions = theme::actions_for(layout_state, !missing_list.is_empty());
+        let (head, desc) = if snap.is_none() {
+            (
+                "Verificando…",
+                "Lendo o estado deste computador.".to_string(),
+            )
+        } else {
+            (
+                theme::headline(state),
+                theme::description(state, snap.as_ref()),
+            )
+        };
         // SAFETY: thread principal; ponteiros guardados em UI.
         unsafe {
-            (a.adw_status_page_set_icon_name)(
-                u.status_page as P,
-                cs(pick_icon(&s.status)).as_ptr(),
-            );
-            (a.adw_status_page_set_title)(
-                u.status_page as P,
-                cs(theme::headline(&s.status)).as_ptr(),
-            );
-            (a.adw_status_page_set_description)(
-                u.status_page as P,
-                cs(&theme::description(&s.status)).as_ptr(),
-            );
+            (a.adw_status_page_set_icon_name)(u.status_page as P, cs(pick_icon(state)).as_ptr());
+            (a.adw_status_page_set_title)(u.status_page as P, cs(head).as_ptr());
+            (a.adw_status_page_set_description)(u.status_page as P, cs(&desc).as_ptr());
+            for (action, idx) in [
+                (Action::Activate, 0),
+                (Action::Restore, 1),
+                (Action::Browsers, 2),
+                (Action::Check, 3),
+            ] {
+                let b = u.buttons[idx] as P;
+                let pos = actions.iter().position(|x| *x == action);
+                (a.gtk_widget_set_visible)(b, pos.is_some() as c_int);
+                (a.gtk_widget_set_sensitive)(b, (!busy) as c_int);
+                (a.gtk_button_set_label)(b, cs(theme::button_label(action, layout_state)).as_ptr());
+                let accent = cs("suggested-action");
+                if pos == Some(0) {
+                    (a.gtk_widget_add_css_class)(b, accent.as_ptr());
+                    (a.gtk_window_set_default_widget)(u.window as P, b); // Enter
+                } else {
+                    (a.gtk_widget_remove_css_class)(b, accent.as_ptr());
+                }
+            }
+            (a.gtk_widget_set_visible)(u.progress as P, busy as c_int);
         }
-        set_row_subtitle(u.row_dns, &format!("Backend detectado: {}", s.backend));
-        set_row_subtitle(u.row_browsers, &theme::browsers_summary(&s.browsers));
-        set_row_subtitle(u.row_manifest, &s.manifest_path);
+        // Linhas: título descreve, botão age.
+        let protect_row_action = if actions.contains(&Action::Restore) {
+            Action::Restore
+        } else {
+            Action::Activate
+        };
+        // SAFETY: thread principal.
+        unsafe {
+            (a.adw_preferences_row_set_title)(
+                u.row_dns as P,
+                cs(theme::card_title(protect_row_action)).as_ptr(),
+            );
+            let show_dns =
+                actions.contains(&Action::Activate) || actions.contains(&Action::Restore);
+            (a.gtk_widget_set_visible)(u.row_dns as P, show_dns as c_int);
+            (a.gtk_widget_set_visible)(
+                u.row_browsers as P,
+                actions.contains(&Action::Browsers) as c_int,
+            );
+            (a.gtk_widget_set_visible)(u.row_check as P, actions.contains(&Action::Check) as c_int);
+        }
+        set_row_subtitle(
+            u.row_dns,
+            &theme::card_subtitle(protect_row_action, &missing_list),
+        );
+        set_row_subtitle(
+            u.row_browsers,
+            &theme::card_subtitle(Action::Browsers, &missing_list),
+        );
+        let err = ERR_DETAIL.lock().unwrap().clone();
+        let details = snap
+            .as_ref()
+            .map(|s| theme::technical_details(s, &err))
+            .unwrap_or(err);
+        set_row_subtitle(u.row_manifest, details.trim_end());
     }
 
     fn set_busy(busy: bool) {
+        BUSY.store(busy, Ordering::Relaxed);
+        render();
+    }
+
+    unsafe extern "C" fn pulse_tick(_d: P) -> c_int {
+        if BUSY.load(Ordering::Relaxed) {
+            (api().gtk_progress_bar_pulse)(ui().progress as P);
+        }
+        1
+    }
+
+    unsafe extern "C" fn on_copy_btn(_b: P, _d: P) {
         let u = ui();
         let a = api();
-        // SAFETY: thread principal.
-        unsafe {
-            for b in u.buttons {
-                (a.gtk_widget_set_sensitive)(b as P, (!busy) as c_int);
+        let text = {
+            let err = ERR_DETAIL.lock().unwrap().clone();
+            match LAST.lock().unwrap().as_ref() {
+                Some(s) => theme::technical_details(s, &err),
+                None => err,
             }
-            (a.gtk_widget_set_visible)(u.spinner as P, busy as c_int);
-            (a.gtk_spinner_set_spinning)(u.spinner as P, busy as c_int);
+        };
+        (a.gdk_clipboard_set_text)(
+            (a.gtk_widget_get_clipboard)(u.window as P),
+            cs(&text).as_ptr(),
+        );
+        toast("Detalhes copiados.");
+    }
+
+    unsafe extern "C" fn on_verify_shortcut(_a: P, _p: P, _d: P) {
+        if !BUSY.load(Ordering::Relaxed) {
+            refresh();
         }
     }
 
@@ -325,19 +404,19 @@ mod imp {
         unsafe {
             (a.adw_toast_overlay_add_toast)(u.toasts as P, (a.adw_toast_new)(cs(msg).as_ptr()));
         }
-        set_row_subtitle(u.row_log, msg);
     }
 
     unsafe extern "C" fn idle_snapshot(data: P) -> c_int {
         let s = Box::from_raw(data as *mut Snapshot);
-        apply_snapshot(&s);
+        *LAST.lock().unwrap() = Some(*s);
         set_busy(false);
         0
     }
 
     unsafe extern "C" fn idle_done(data: P) -> c_int {
-        let m = Box::from_raw(data as *mut String);
-        toast(&m);
+        let (short, detail) = *Box::from_raw(data as *mut (String, String));
+        *ERR_DETAIL.lock().unwrap() = detail;
+        toast(&short);
         0
     }
 
@@ -353,12 +432,12 @@ mod imp {
     fn run_action(f: fn() -> Result<String>) {
         set_busy(true);
         std::thread::spawn(move || {
-            let msg = match f() {
-                Ok(m) => m,
-                Err(e) => format!("Não foi possível concluir: {e:#}"),
+            let pair = match f() {
+                Ok(m) => (m, String::new()),
+                Err(e) => theme::humanize_error(&format!("{e:#}")),
             };
             // SAFETY: ver `refresh`.
-            unsafe { (api().g_idle_add)(idle_done, Box::into_raw(Box::new(msg)) as P) };
+            unsafe { (api().g_idle_add)(idle_done, Box::into_raw(Box::new(pair)) as P) };
             let snap = Box::new(crate::ui::snapshot());
             unsafe { (api().g_idle_add)(idle_snapshot, Box::into_raw(snap) as P) };
         });
@@ -441,46 +520,33 @@ mod imp {
         );
         (a.gtk_box_append)(content, status);
 
-        let b_on = button("Ativar", Some("suggested-action"), on_activate_btn);
-        let b_off = button("Restaurar", None, on_restore_btn);
-        let b_br = button("Proteger Navegadores", None, on_browsers_btn);
-        let b_chk = button("Verificar Agora", None, on_check_btn);
-        let spinner = (a.gtk_spinner_new)();
-        (a.gtk_widget_set_valign)(spinner, 3);
-        (a.gtk_widget_set_visible)(spinner, 0);
+        let b_on = button("Proteger este computador", None, on_activate_btn);
+        let b_off = button("Desativar proteção", None, on_restore_btn);
+        let b_br = button("Proteger navegadores", None, on_browsers_btn);
+        let b_chk = button("Verificar", None, on_check_btn);
+        let progress = (a.gtk_progress_bar_new)();
+        (a.gtk_widget_set_visible)(progress, 0);
 
         let group = (a.adw_preferences_group_new)();
-        (a.adw_preferences_group_set_title)(group, cs("Ações de Proteção").as_ptr());
-        let row_dns = row(
-            "Filtro de Rede (DNS Seguro)",
-            "Cloudflare for Families (1.1.1.3 / 1.0.0.3)",
-            &[b_off, b_on],
-        );
-        let row_br = row(
-            "Bloqueador de Anúncios (uBlock Origin)",
-            "Procurando navegadores…",
-            &[b_br],
-        );
+        let row_dns = row("Proteja a família em um passo", "", &[b_off, b_on]);
+        let row_br = row("Anúncios ainda podem aparecer", "", &[b_br]);
         let row_chk = row(
-            "Diagnóstico da Rede",
-            "Testa se o filtro familiar está respondendo",
-            &[spinner, b_chk],
+            "Conferir se está funcionando",
+            "Testa a conexão agora",
+            &[b_chk],
         );
         for r in [row_dns, row_br, row_chk] {
             (a.adw_preferences_group_add)(group, r);
         }
+        (a.gtk_box_append)(content, progress);
         (a.gtk_box_append)(content, group);
 
         let details = (a.adw_preferences_group_new)();
         let expander = (a.adw_expander_row_new)();
-        (a.adw_preferences_row_set_title)(
-            expander,
-            cs("Detalhes Técnicos e Registro de Eventos").as_ptr(),
-        );
-        let row_manifest = row("Manifesto de reversão", "—", &[]);
-        let row_log = row("Última ação", "Nenhuma ainda", &[]);
+        (a.adw_preferences_row_set_title)(expander, cs("Detalhes técnicos").as_ptr());
+        let b_copy = button("Copiar detalhes", None, on_copy_btn);
+        let row_manifest = row("Informações do sistema e do último erro", "—", &[b_copy]);
         (a.adw_expander_row_add_row)(expander, row_manifest);
-        (a.adw_expander_row_add_row)(expander, row_log);
         (a.adw_preferences_group_add)(details, expander);
         (a.gtk_box_append)(content, details);
 
@@ -500,12 +566,28 @@ mod imp {
             row_dns: row_dns as usize,
             row_browsers: row_br as usize,
             row_manifest: row_manifest as usize,
-            row_log: row_log as usize,
             toasts: toasts as usize,
-            spinner: spinner as usize,
+            progress: progress as usize,
+            window: win as usize,
+            row_check: row_chk as usize,
             buttons: [b_on as usize, b_off as usize, b_br as usize, b_chk as usize],
         });
-        show_actions(None);
+        // Ctrl+R = verificar.
+        let act = (a.g_simple_action_new)(cs("verify").as_ptr(), std::ptr::null_mut());
+        (a.g_signal_connect_data)(
+            act,
+            cs("activate").as_ptr(),
+            on_verify_shortcut as P,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            0,
+        );
+        (a.g_action_map_add_action)(app, act);
+        let accels = [cs("<Control>r"), cs("F5")];
+        let ptrs: [*const c_char; 3] = [accels[0].as_ptr(), accels[1].as_ptr(), std::ptr::null()];
+        (a.gtk_application_set_accels_for_action)(app, cs("app.verify").as_ptr(), ptrs.as_ptr());
+        (a.g_timeout_add)(120, pulse_tick, std::ptr::null_mut());
+        render();
         (a.gtk_window_present)(win);
         refresh();
     }

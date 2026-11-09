@@ -48,9 +48,11 @@ pub struct Snapshot {
     pub status: ProtectionStatus,
     /// (nome, instalado)
     pub browsers: Vec<(&'static str, bool)>,
+    /// Navegadores instalados que ainda não têm o bloqueador de anúncios (só Windows).
+    pub missing_blocker: Vec<String>,
     #[cfg_attr(windows, allow(dead_code))]
     pub manifest_path: String,
-    /// Backend de DNS detectado (só Linux).
+    /// Backend de DNS detectado.
     #[cfg_attr(windows, allow(dead_code))]
     pub backend: String,
 }
@@ -64,52 +66,146 @@ pub enum Action {
     Restore = 3,
 }
 
-/// Só mostra o que faz sentido: sem proteção não há o que desativar; com proteção
-/// não há o que ativar. Enquanto carrega, nenhuma ação.
-pub fn visible_actions(status: Option<&ProtectionStatus>) -> Vec<Action> {
-    match status {
-        None => vec![],
-        Some(ProtectionStatus::Unprotected) => {
-            vec![Action::Activate, Action::Browsers, Action::Check]
-        }
-        Some(ProtectionStatus::Protected) | Some(ProtectionStatus::PartiallyConfigured(_)) => {
-            vec![Action::Browsers, Action::Check, Action::Restore]
-        }
+/// Estado da tela (ADR-020): a lógica fica aqui; Linux e Windows só desenham.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UiState {
+    Desprotegido,
+    Protegido,
+    /// Proteção incompleta: falta o bloqueador num navegador ou o teste não respondeu.
+    Parcial,
+    Trabalhando,
+}
+
+pub fn ui_state(snapshot: Option<&Snapshot>, busy: bool) -> UiState {
+    if busy {
+        return UiState::Trabalhando;
+    }
+    match snapshot.map(|s| (&s.status, !s.missing_blocker.is_empty())) {
+        None => UiState::Trabalhando,
+        Some((ProtectionStatus::Unprotected, _)) => UiState::Desprotegido,
+        Some((ProtectionStatus::PartiallyConfigured(_), _)) => UiState::Parcial,
+        Some((ProtectionStatus::Protected, true)) => UiState::Parcial,
+        Some((ProtectionStatus::Protected, false)) => UiState::Protegido,
     }
 }
 
-/// Próximo passo sugerido, em linguagem simples.
-pub fn next_step(status: Option<&ProtectionStatus>) -> &'static str {
-    match status {
-        None => "Verificando…",
-        Some(ProtectionStatus::Unprotected) => "Clique em \"Ativar proteção\" para começar.",
-        Some(ProtectionStatus::Protected) => "Tudo certo: este computador está protegido.",
-        Some(ProtectionStatus::PartiallyConfigured(_)) => {
-            "A proteção está ativa, mas não respondeu ao teste. Clique em \"Verificar agora\"."
-        }
+/// Ações visíveis: `[primária, secundária]` (no máximo duas). `Trabalhando` não tem
+/// ação: os botões do último estado ficam desabilitados.
+pub fn actions_for(state: UiState, missing_blocker: bool) -> Vec<Action> {
+    match state {
+        UiState::Desprotegido => vec![Action::Activate, Action::Check],
+        UiState::Protegido => vec![Action::Check, Action::Restore],
+        UiState::Parcial if missing_blocker => vec![Action::Browsers, Action::Restore],
+        UiState::Parcial => vec![Action::Check, Action::Restore],
+        UiState::Trabalhando => vec![],
     }
 }
 
-pub fn headline(status: &ProtectionStatus) -> &'static str {
-    match status {
-        ProtectionStatus::Protected => "Proteção Familiar Ativa",
-        ProtectionStatus::PartiallyConfigured(_) => "Configuração Parcial",
-        ProtectionStatus::Unprotected => "Computador Desprotegido",
+/// Rótulo do botão: verbo + objeto, nunca igual ao título do cartão.
+pub fn button_label(action: Action, state: UiState) -> &'static str {
+    match (action, state) {
+        (Action::Activate, _) => "Proteger este computador",
+        (Action::Browsers, _) => "Proteger navegadores",
+        (Action::Check, UiState::Protegido) => "Verificar novamente",
+        (Action::Check, _) => "Verificar",
+        (Action::Restore, _) => "Desativar proteção",
     }
 }
 
-pub fn description(status: &ProtectionStatus) -> String {
-    match status {
-        ProtectionStatus::Protected => {
-            "Filtro Cloudflare for Families ativo (1.1.1.3 / 1.0.0.3): bloqueia malware e conteúdo adulto."
-                .into()
-        }
-        ProtectionStatus::PartiallyConfigured(msg) => msg.clone(),
-        ProtectionStatus::Unprotected => {
-            "Este computador usa o DNS padrão da rede. Ative a proteção para filtrar malware e conteúdo adulto."
-                .into()
-        }
+/// Título do cartão: descreve, não repete o botão.
+pub fn card_title(action: Action) -> &'static str {
+    match action {
+        Action::Activate => "Proteja a família em um passo",
+        Action::Browsers => "Anúncios ainda podem aparecer",
+        Action::Check => "Conferir se está funcionando",
+        Action::Restore => "Voltar ao normal",
     }
+}
+
+pub fn card_subtitle(action: Action, missing: &[String]) -> String {
+    match action {
+        Action::Activate => {
+            "Bloqueia sites perigosos e adultos e instala o bloqueador de anúncios".into()
+        }
+        Action::Browsers => format!("Falta o bloqueador em: {}", missing.join(", ")),
+        Action::Check => "Testa a conexão agora".into(),
+        Action::Restore => "Desfaz a proteção e remove o bloqueador de anúncios".into(),
+    }
+}
+
+pub fn headline(state: UiState) -> &'static str {
+    match state {
+        UiState::Desprotegido => "Este computador ainda não está protegido",
+        UiState::Protegido => "Computador protegido",
+        UiState::Parcial => "Proteção incompleta",
+        UiState::Trabalhando => "Aplicando…",
+    }
+}
+
+pub fn description(state: UiState, snapshot: Option<&Snapshot>) -> String {
+    match state {
+        UiState::Desprotegido => "Ative a proteção para bloquear sites perigosos e adultos.".into(),
+        UiState::Protegido => "Sites perigosos e adultos estão bloqueados neste computador.".into(),
+        UiState::Parcial => match snapshot {
+            Some(s) if !s.missing_blocker.is_empty() => format!(
+                "Falta o bloqueador de anúncios em: {}.",
+                s.missing_blocker.join(", ")
+            ),
+            _ => "A proteção está ativa, mas o teste de conexão não respondeu.".into(),
+        },
+        UiState::Trabalhando => "Aguarde, isto leva alguns segundos.".into(),
+    }
+}
+
+/// Cor do estado (não é a única pista: ícone e texto acompanham).
+pub fn state_color(p: &Palette, state: UiState) -> u32 {
+    match state {
+        UiState::Protegido => p.ok,
+        UiState::Parcial => p.warn,
+        UiState::Desprotegido => p.bad,
+        UiState::Trabalhando => p.text_secondary,
+    }
+}
+
+/// Texto de detalhes técnicos (jargão fica só aqui).
+pub fn technical_details(s: &Snapshot, last_error: &str) -> String {
+    let mut t = format!(
+        "Backend de DNS: {}\nFiltro: Cloudflare for Families (1.1.1.3 / 1.0.0.3)\nManifesto: {}\nNavegadores: {}\n",
+        s.backend,
+        s.manifest_path,
+        browsers_summary(&s.browsers)
+    );
+    if !s.missing_blocker.is_empty() {
+        t.push_str(&format!(
+            "Sem bloqueador: {}\n",
+            s.missing_blocker.join(", ")
+        ));
+    }
+    if let ProtectionStatus::PartiallyConfigured(m) = &s.status {
+        t.push_str(&format!("Aviso: {m}\n"));
+    }
+    if !last_error.is_empty() {
+        t.push_str(&format!("Último erro: {last_error}\n"));
+    }
+    t
+}
+
+/// Erro em frase humana + detalhe técnico separado (N9).
+pub fn humanize_error(technical: &str) -> (String, String) {
+    let low = technical.to_lowercase();
+    let short = if low.contains("negada")
+        || low.contains("denied")
+        || low.contains("dismissed")
+        || low.contains("cancel")
+        || low.contains("not authorized")
+    {
+        "A permissão de administrador não foi concedida. Nada foi alterado. Tente de novo e escolha Sim."
+    } else if low.contains("não foi possível abrir") || low.contains("nenhum navegador") {
+        "Não consegui abrir o navegador. Abra-o e tente de novo."
+    } else {
+        "Não foi possível concluir. Tente de novo; se continuar, copie os detalhes."
+    };
+    (short.into(), technical.to_string())
 }
 
 pub fn browsers_summary(browsers: &[(&'static str, bool)]) -> String {
@@ -156,32 +252,89 @@ pub const DARK: Palette = Palette {
     bad: 0xFF99A4,
 };
 
-pub fn status_color(p: &Palette, status: &ProtectionStatus) -> u32 {
-    match status {
-        ProtectionStatus::Protected => p.ok,
-        ProtectionStatus::PartiallyConfigured(_) => p.warn,
-        ProtectionStatus::Unprotected => p.bad,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn snap(status: ProtectionStatus, missing: &[&str]) -> Snapshot {
+        Snapshot {
+            status,
+            browsers: vec![("Edge", true)],
+            missing_blocker: missing.iter().map(|s| s.to_string()).collect(),
+            manifest_path: String::new(),
+            backend: String::new(),
+        }
+    }
+
     #[test]
-    fn titulos_por_estado() {
-        assert_eq!(
-            headline(&ProtectionStatus::Protected),
-            "Proteção Familiar Ativa"
-        );
-        assert_eq!(
-            headline(&ProtectionStatus::Unprotected),
-            "Computador Desprotegido"
-        );
-        assert_eq!(
-            headline(&ProtectionStatus::PartiallyConfigured("x".into())),
-            "Configuração Parcial"
-        );
+    fn estados_a_partir_do_snapshot() {
+        let un = snap(ProtectionStatus::Unprotected, &[]);
+        let on = snap(ProtectionStatus::Protected, &[]);
+        let on_sem = snap(ProtectionStatus::Protected, &["Edge"]);
+        let part = snap(ProtectionStatus::PartiallyConfigured("x".into()), &[]);
+        assert_eq!(ui_state(Some(&un), false), UiState::Desprotegido);
+        assert_eq!(ui_state(Some(&on), false), UiState::Protegido);
+        assert_eq!(ui_state(Some(&on_sem), false), UiState::Parcial);
+        assert_eq!(ui_state(Some(&part), false), UiState::Parcial);
+        assert_eq!(ui_state(Some(&on), true), UiState::Trabalhando);
+        assert_eq!(ui_state(None, false), UiState::Trabalhando);
+    }
+
+    /// Tabela da seção 3 do ADR-020: primária primeiro, no máximo duas ações.
+    #[test]
+    fn tabela_de_acoes_do_adr_020() {
+        use Action::*;
+        assert_eq!(actions_for(UiState::Desprotegido, false), [Activate, Check]);
+        assert_eq!(actions_for(UiState::Protegido, false), [Check, Restore]);
+        assert_eq!(actions_for(UiState::Parcial, true), [Browsers, Restore]);
+        assert_eq!(actions_for(UiState::Parcial, false), [Check, Restore]);
+        assert!(actions_for(UiState::Trabalhando, false).is_empty());
+        for st in [UiState::Desprotegido, UiState::Protegido, UiState::Parcial] {
+            for miss in [false, true] {
+                let a = actions_for(st, miss);
+                assert!(a.len() <= 2);
+                // nunca Restaurar sem proteção, nunca Proteger com proteção
+                assert_eq!(a.contains(&Restore), st != UiState::Desprotegido);
+                assert_eq!(a.contains(&Activate), st == UiState::Desprotegido);
+            }
+        }
+    }
+
+    #[test]
+    fn rotulo_do_botao_difere_do_titulo_do_cartao() {
+        for a in [
+            Action::Activate,
+            Action::Browsers,
+            Action::Check,
+            Action::Restore,
+        ] {
+            for st in [UiState::Desprotegido, UiState::Protegido, UiState::Parcial] {
+                assert_ne!(button_label(a, st), card_title(a));
+            }
+        }
+    }
+
+    #[test]
+    fn erro_humano_sem_cadeia_crua() {
+        let (curto, detalhe) =
+            humanize_error("a permissão de administrador foi negada: os error 5");
+        assert!(curto.contains("permissão"));
+        assert!(!curto.contains("os error"));
+        assert!(detalhe.contains("os error 5"));
+        let (curto, _) = humanize_error("falha qualquer: Caused by: x");
+        assert!(!curto.contains("Caused by"));
+    }
+
+    #[test]
+    fn jargao_so_nos_detalhes() {
+        let s = snap(ProtectionStatus::Unprotected, &[]);
+        for st in [UiState::Desprotegido, UiState::Protegido, UiState::Parcial] {
+            let txt = format!("{} {}", headline(st), description(st, Some(&s)));
+            for j in ["DNS", "Cloudflare", "uBlock", "manifesto"] {
+                assert!(!txt.contains(j), "{j} em {txt}");
+            }
+        }
+        assert!(technical_details(&s, "").contains("Cloudflare"));
     }
 
     #[test]
@@ -237,20 +390,5 @@ mod tests {
             Some("[Settings]\ngtk-theme-name=Adwaita\n")
         ));
         assert!(!desktop_prefers_dark(None, None, None, None));
-    }
-
-    #[test]
-    fn acoes_visiveis_por_estado() {
-        use Action::*;
-        assert!(visible_actions(None).is_empty());
-        assert_eq!(
-            visible_actions(Some(&ProtectionStatus::Unprotected)),
-            [Activate, Browsers, Check]
-        );
-        assert!(!visible_actions(Some(&ProtectionStatus::Unprotected)).contains(&Restore));
-        let on = visible_actions(Some(&ProtectionStatus::Protected));
-        assert!(on.contains(&Restore) && !on.contains(&Activate));
-        let part = visible_actions(Some(&ProtectionStatus::PartiallyConfigured("x".into())));
-        assert!(part.contains(&Restore) && !part.contains(&Activate));
     }
 }
