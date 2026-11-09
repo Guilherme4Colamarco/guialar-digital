@@ -61,6 +61,8 @@ static FONTS: Mutex<Option<[usize; 4]>> = Mutex::new(None);
 static BUTTONS: Mutex<[usize; 4]> = Mutex::new([0; 4]);
 /// [alternar detalhes, copiar detalhes]
 static EXTRA: Mutex<[usize; 2]> = Mutex::new([0; 2]);
+/// Controle de texto real só para leitores de tela (o status é desenhado em GDI).
+static STATUS_LABEL: AtomicIsize = AtomicIsize::new(0);
 
 fn palette() -> Palette {
     if DARK.load(Ordering::Relaxed) {
@@ -360,6 +362,20 @@ fn place_buttons(hwnd: HWND) {
                 }
             }
         }
+    }
+    // Nome acessível do estado para o Narrador/UIA.
+    let snapshot = STATE.lock().unwrap().snapshot.clone();
+    let label = format!(
+        "{}. {}",
+        theme::headline(ui_st),
+        theme::description(ui_st, snapshot.as_ref())
+    );
+    // SAFETY: handle criado em WM_CREATE.
+    unsafe {
+        SetWindowTextW(
+            STATUS_LABEL.load(Ordering::Relaxed) as HWND,
+            w(&label).as_ptr(),
+        );
     }
     let e = *EXTRA.lock().unwrap();
     let t = l.details_toggle;
@@ -789,9 +805,32 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: usize, lp: isize) ->
             e[0] = create_button(hwnd, ID_DETAILS, "Detalhes técnicos", false) as usize;
             e[1] = create_button(hwnd, ID_COPY, "Copiar detalhes", false) as usize;
             drop(e);
+            let label = CreateWindowExW(
+                0,
+                w("STATIC").as_ptr(),
+                w("Verificando…").as_ptr(),
+                0x5000_0000,
+                0,
+                0,
+                1,
+                1,
+                hwnd,
+                std::ptr::null_mut(),
+                GetModuleHandleW(std::ptr::null()),
+                std::ptr::null_mut(),
+            );
+            STATUS_LABEL.store(label as isize, Ordering::Relaxed);
             apply_theme(hwnd);
             place_buttons(hwnd);
             spawn_snapshot();
+            0
+        }
+        0x0024 => {
+            // WM_GETMINMAXINFO: tamanho mínimo da janela (E9).
+            let dpi = GetDpiForWindow(hwnd).max(96);
+            let mm = lp as *mut i32;
+            *mm.add(6) = dp(620, dpi); // ptMinTrackSize.x
+            *mm.add(7) = dp(560, dpi); // ptMinTrackSize.y
             0
         }
         0x0005 => {

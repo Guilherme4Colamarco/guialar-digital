@@ -61,6 +61,13 @@ pub fn merge_firefox_policies(existing: Option<&str>) -> Result<String> {
     Ok(serde_json::to_string_pretty(&root)?)
 }
 
+/// `true` se o JSON é só `{"policies":{}}`: sobra de uma instalação feita do zero.
+pub fn is_empty_policies(json: &str) -> bool {
+    serde_json::from_str::<Value>(json)
+        .map(|v| v == json!({ "policies": {} }))
+        .unwrap_or(false)
+}
+
 /// Remove só a entrada do GuiaLar de um `policies.json`; `None` = nada a gravar/remover.
 pub fn remove_firefox_policy(existing: &str) -> Result<Option<String>> {
     let mut root: Value =
@@ -216,7 +223,12 @@ mod win {
                 .join("policies.json");
             if let Ok(current) = std::fs::read_to_string(&file) {
                 if let Some(novo) = remove_firefox_policy(&current)? {
-                    std::fs::write(&file, novo).context("gravando policies.json do Firefox")?;
+                    if is_empty_policies(&novo) {
+                        // Criado só por nós: não deixa arquivo vazio para trás.
+                        std::fs::remove_file(&file).context("removendo policies.json vazio")?;
+                    } else {
+                        std::fs::write(&file, novo).context("gravando policies.json do Firefox")?;
+                    }
                 }
             }
         }
@@ -319,5 +331,17 @@ mod tests {
         let v: Value =
             serde_json::from_str(&remove_firefox_policy(&so_nosso).unwrap().unwrap()).unwrap();
         assert!(v["policies"].get("ExtensionSettings").is_none());
+    }
+
+    #[test]
+    fn policies_vazio_e_detectado() {
+        assert!(is_empty_policies(r#"{"policies":{}}"#));
+        assert!(!is_empty_policies(
+            r#"{"policies":{"DisableTelemetry":true}}"#
+        ));
+        assert!(!is_empty_policies("nao json"));
+        let so_nosso = merge_firefox_policies(None).unwrap();
+        let novo = remove_firefox_policy(&so_nosso).unwrap().unwrap();
+        assert!(is_empty_policies(&novo));
     }
 }

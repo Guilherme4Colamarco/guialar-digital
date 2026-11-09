@@ -87,7 +87,12 @@ impl DnsStateManifest {
         let content = fs::read_to_string(&path)
             .with_context(|| format!("Falha ao ler manifesto em {:?}", path))?;
         let manifest: Self = serde_json::from_str(&content)
-            .with_context(|| "Formato de manifesto corrompido ou inválido")?;
+            .with_context(|| {
+                format!(
+                    "Formato de manifesto corrompido ou inválido em {:?} (apague esse arquivo e rode 'guialar apply' de novo)",
+                    path
+                )
+            })?;
         Ok(Some(manifest))
     }
 
