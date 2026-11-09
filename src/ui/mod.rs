@@ -8,6 +8,8 @@
 )]
 
 pub mod theme;
+#[allow(unused_imports)]
+pub use theme::{actions_for, UiState};
 
 #[cfg(target_os = "linux")]
 mod linux_gtk;
@@ -106,8 +108,26 @@ pub fn action_browsers() -> Result<String> {
     Ok("Bloqueador de anúncios configurado. Reabra o navegador.".into())
 }
 
+/// O arquivo existe mas não é um manifesto válido.
+fn is_corrupt_manifest(path: &std::path::Path) -> bool {
+    std::fs::read_to_string(path)
+        .map(|t| serde_json::from_str::<DnsStateManifest>(&t).is_err())
+        .unwrap_or(false)
+}
+
 /// Desfaz DNS (e políticas do uBlock no Windows).
 pub fn action_restore() -> Result<String> {
+    // Arquivo de estado ilegível: "Desativar" nunca poderia funcionar. Remove-o e
+    // orienta a proteger de novo (a pessoa não fica sem saída).
+    if let Ok(path) = DnsStateManifest::file_path() {
+        if is_corrupt_manifest(&path) {
+            std::fs::remove_file(&path)?;
+            return Ok(
+            "O registro da proteção estava danificado e foi removido. Clique em \"Proteger este computador\" para começar de novo."
+                .into(),
+            );
+        }
+    }
     crate::handle_revert()?;
     Ok("Configurações de rede restauradas.".into())
 }
@@ -123,5 +143,18 @@ mod tests {
         assert!(!has_display(Some(OsStr::new("")), Some(OsStr::new(""))));
         assert!(has_display(Some(OsStr::new(":0")), None));
         assert!(has_display(None, Some(OsStr::new("wayland-0"))));
+    }
+
+    /// E3: com o arquivo de estado corrompido, "Desativar" não pode ficar sem saída.
+    #[test]
+    fn manifesto_corrompido_e_removido() {
+        let dir = std::env::temp_dir().join(format!("guialar-ui-corrupt-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("state.json");
+        std::fs::write(&f, "{ quebrado").unwrap();
+        assert!(is_corrupt_manifest(&f));
+        std::fs::write(&f, r#"{"backend":"DirectResolvConf","applied_at_utc":"1","connections":[],"previous_resolv_conf":null}"#).unwrap();
+        assert!(!is_corrupt_manifest(&f));
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

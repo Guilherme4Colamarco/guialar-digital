@@ -70,6 +70,12 @@ fn main() -> ExitCode {
             }
             Err(err) => {
                 eprintln!("\n❌ Erro ao abrir a janela: {:#}", err);
+                #[cfg(windows)]
+                win32::message_box(
+                    &format!("Não foi possível abrir a janela do GuiaLar Digital.\n\n{err:#}"),
+                    "GuiaLar Digital",
+                    0x10,
+                );
                 if !sem_comando {
                     return ExitCode::FAILURE;
                 }

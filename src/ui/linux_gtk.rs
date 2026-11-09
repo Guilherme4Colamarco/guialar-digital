@@ -144,6 +144,7 @@ mod imp {
     }
 
     static BUSY: AtomicBool = AtomicBool::new(false);
+    static ARMED: AtomicBool = AtomicBool::new(false);
     static LAST: Mutex<Option<Snapshot>> = Mutex::new(None);
     static ERR_DETAIL: Mutex<String> = Mutex::new(String::new());
 
@@ -314,7 +315,12 @@ mod imp {
                 let pos = actions.iter().position(|x| *x == action);
                 (a.gtk_widget_set_visible)(b, pos.is_some() as c_int);
                 (a.gtk_widget_set_sensitive)(b, (!busy) as c_int);
-                (a.gtk_button_set_label)(b, cs(theme::button_label(action, layout_state)).as_ptr());
+                let label = if action == Action::Restore && ARMED.load(Ordering::Relaxed) {
+                    "Confirmar desativação"
+                } else {
+                    theme::button_label(action, layout_state)
+                };
+                (a.gtk_button_set_label)(b, cs(label).as_ptr());
                 let accent = cs("suggested-action");
                 if pos == Some(0) {
                     (a.gtk_widget_add_css_class)(b, accent.as_ptr());
@@ -446,8 +452,22 @@ mod imp {
     unsafe extern "C" fn on_activate_btn(_b: P, _d: P) {
         run_action(crate::ui::action_activate);
     }
+    /// Desativar pede confirmação (E5): o 1º clique arma, o 2º executa; desarma em 5 s.
     unsafe extern "C" fn on_restore_btn(_b: P, _d: P) {
-        run_action(crate::ui::action_restore);
+        if ARMED.swap(false, Ordering::Relaxed) {
+            render();
+            run_action(crate::ui::action_restore);
+        } else {
+            ARMED.store(true, Ordering::Relaxed);
+            render();
+            toast("Clique de novo em \"Confirmar desativação\" para desligar a proteção.");
+            (api().g_timeout_add)(5000, disarm, std::ptr::null_mut());
+        }
+    }
+    unsafe extern "C" fn disarm(_d: P) -> c_int {
+        ARMED.store(false, Ordering::Relaxed);
+        render();
+        0
     }
     unsafe extern "C" fn on_browsers_btn(_b: P, _d: P) {
         run_action(crate::ui::action_browsers);

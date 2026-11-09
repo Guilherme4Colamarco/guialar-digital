@@ -625,7 +625,13 @@ fn draw(dc: HDC, rc: &RECT, dpi: u32) {
         right: bx + d,
         bottom: by + d,
     };
-    text(dc, f.icons, 0xFFFFFF, glyph, &mut gr, 0x1 | 0x20 | 0x4); // CENTER|SINGLELINE|VCENTER
+    // Contraste (WCAG 1.4.11): no escuro o círculo é claro, o glifo precisa ser escuro.
+    let glyph_color = if DARK.load(Ordering::Relaxed) {
+        0x1B1B1B
+    } else {
+        0xFFFFFF
+    };
+    text(dc, f.icons, glyph_color, glyph, &mut gr, 0x1 | 0x20 | 0x4); // CENTER|SINGLELINE|VCENTER
     let hx = bx + d + dp(18, dpi);
     let mut r = RECT {
         left: hx,
@@ -852,7 +858,18 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: usize, lp: isize) ->
             match id {
                 ID_ACTIVATE => spawn_action(hwnd, super::action_activate),
                 ID_BROWSERS => spawn_action(hwnd, super::action_browsers),
-                ID_RESTORE => spawn_action(hwnd, super::action_restore),
+                ID_RESTORE => {
+                    // Desativar tira a proteção da família: pede confirmação (E5).
+                    // 0x24 = MB_YESNO | MB_ICONQUESTION; 6 = IDYES.
+                    let ok = message_box(
+                        "Desativar a proteção deste computador? Sites perigosos e adultos deixarão de ser bloqueados.",
+                        "GuiaLar Digital",
+                        0x24,
+                    );
+                    if ok == 6 {
+                        spawn_action(hwnd, super::action_restore);
+                    }
+                }
                 ID_CHECK => {
                     if !STATE.lock().unwrap().busy {
                         STATE.lock().unwrap().message = "Verificando…".into();

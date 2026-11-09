@@ -225,6 +225,7 @@ extern "system" {
     ) -> i32;
     pub fn GetDpiForWindow(h: HWND) -> u32;
     pub fn SetForegroundWindow(h: HWND) -> i32;
+    pub fn MessageBoxW(h: HWND, text: *const u16, caption: *const u16, kind: u32) -> i32;
     pub fn SetTimer(h: HWND, id: usize, ms: u32, f: *const c_void) -> usize;
     pub fn KillTimer(h: HWND, id: usize) -> i32;
     pub fn IsDialogMessageW(h: HWND, m: *const MSG) -> i32;
@@ -379,6 +380,19 @@ pub fn attach_parent_console() {
                 }
             }
         }
+    }
+}
+
+/// Caixa de mensagem simples (o app não tem console para mostrar erros).
+pub fn message_box(text: &str, caption: &str, kind: u32) -> i32 {
+    // SAFETY: strings UTF-16 terminadas em zero vivem até o fim da chamada.
+    unsafe {
+        MessageBoxW(
+            std::ptr::null_mut(),
+            w(text).as_ptr(),
+            w(caption).as_ptr(),
+            kind,
+        )
     }
 }
 
