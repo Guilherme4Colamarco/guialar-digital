@@ -120,8 +120,9 @@ pub fn revert_dns(manifest: &DnsStateManifest) -> Result<()> {
                 .iter()
                 .map(|ip| format!("'{ip}'"))
                 .collect();
+            // ResetServerAddresses antes: senão o DNS IPv6 da Cloudflare ficaria na interface.
             format!(
-                "Set-DnsClientServerAddress -InterfaceAlias '{}' -ServerAddresses @({})",
+                "Set-DnsClientServerAddress -InterfaceAlias '{0}' -ResetServerAddresses; Set-DnsClientServerAddress -InterfaceAlias '{0}' -ServerAddresses @({1})",
                 conn.id,
                 ips.join(",")
             )

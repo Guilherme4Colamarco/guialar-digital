@@ -55,6 +55,41 @@ pub struct Snapshot {
     pub backend: String,
 }
 
+/// Ações da janela. O número é o índice do botão.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Action {
+    Activate = 0,
+    Browsers = 1,
+    Check = 2,
+    Restore = 3,
+}
+
+/// Só mostra o que faz sentido: sem proteção não há o que desativar; com proteção
+/// não há o que ativar. Enquanto carrega, nenhuma ação.
+pub fn visible_actions(status: Option<&ProtectionStatus>) -> Vec<Action> {
+    match status {
+        None => vec![],
+        Some(ProtectionStatus::Unprotected) => {
+            vec![Action::Activate, Action::Browsers, Action::Check]
+        }
+        Some(ProtectionStatus::Protected) | Some(ProtectionStatus::PartiallyConfigured(_)) => {
+            vec![Action::Browsers, Action::Check, Action::Restore]
+        }
+    }
+}
+
+/// Próximo passo sugerido, em linguagem simples.
+pub fn next_step(status: Option<&ProtectionStatus>) -> &'static str {
+    match status {
+        None => "Verificando…",
+        Some(ProtectionStatus::Unprotected) => "Clique em \"Ativar proteção\" para começar.",
+        Some(ProtectionStatus::Protected) => "Tudo certo: este computador está protegido.",
+        Some(ProtectionStatus::PartiallyConfigured(_)) => {
+            "A proteção está ativa, mas não respondeu ao teste. Clique em \"Verificar agora\"."
+        }
+    }
+}
+
 pub fn headline(status: &ProtectionStatus) -> &'static str {
     match status {
         ProtectionStatus::Protected => "Proteção Familiar Ativa",
@@ -202,5 +237,20 @@ mod tests {
             Some("[Settings]\ngtk-theme-name=Adwaita\n")
         ));
         assert!(!desktop_prefers_dark(None, None, None, None));
+    }
+
+    #[test]
+    fn acoes_visiveis_por_estado() {
+        use Action::*;
+        assert!(visible_actions(None).is_empty());
+        assert_eq!(
+            visible_actions(Some(&ProtectionStatus::Unprotected)),
+            [Activate, Browsers, Check]
+        );
+        assert!(!visible_actions(Some(&ProtectionStatus::Unprotected)).contains(&Restore));
+        let on = visible_actions(Some(&ProtectionStatus::Protected));
+        assert!(on.contains(&Restore) && !on.contains(&Activate));
+        let part = visible_actions(Some(&ProtectionStatus::PartiallyConfigured("x".into())));
+        assert!(part.contains(&Restore) && !part.contains(&Activate));
     }
 }

@@ -146,11 +146,11 @@ struct Layout {
     margin: i32,
     header: RECT,
     hero: RECT,
-    cards: [RECT; 4],
+    cards: Vec<RECT>,
     status: RECT,
 }
 
-fn layout(client_w: i32, dpi: u32) -> Layout {
+fn layout(client_w: i32, dpi: u32, n_cards: usize) -> Layout {
     let m = dp(24, dpi);
     let wd = client_w - 2 * m;
     let mut y = dp(16, dpi);
@@ -168,15 +168,16 @@ fn layout(client_w: i32, dpi: u32) -> Layout {
         bottom: y + dp(112, dpi),
     };
     y = hero.bottom + dp(14, dpi);
-    let mut cards = [RECT::default(); 4];
-    for c in cards.iter_mut() {
-        *c = RECT {
+    let mut cards = Vec::with_capacity(n_cards);
+    for _ in 0..n_cards {
+        let c = RECT {
             left: m,
             top: y,
             right: m + wd,
             bottom: y + dp(68, dpi),
         };
         y = c.bottom + dp(8, dpi);
+        cards.push(c);
     }
     let status = RECT {
         left: m,
@@ -262,27 +263,37 @@ fn place_buttons(hwnd: HWND) {
         GetClientRect(hwnd, &mut rc);
         GetDpiForWindow(hwnd).max(96)
     };
-    let l = layout(rc.right, dpi);
+    let actions = current_actions();
+    let l = layout(rc.right, dpi, actions.len());
     let b = *BUTTONS.lock().unwrap();
-    let spec: [(usize, RECT, i32); 4] = [
-        (b[0], button_rect(&l.cards[0], dpi, 170), 0),
-        (b[1], button_rect(&l.cards[1], dpi, 170), 0),
-        (b[2], button_rect(&l.cards[2], dpi, 170), 0),
-        (b[3], button_rect(&l.cards[3], dpi, 170), 0),
-    ];
-    for (h, r, _) in spec {
+    for (i, h) in b.iter().enumerate() {
+        let pos = actions.iter().position(|a| *a as usize == i);
         // SAFETY: handles criados em WM_CREATE.
         unsafe {
-            MoveWindow(
-                h as HWND,
-                r.left,
-                r.top,
-                r.right - r.left,
-                r.bottom - r.top,
-                1,
-            )
-        };
+            match pos {
+                Some(k) => {
+                    let r = button_rect(&l.cards[k], dpi, 170);
+                    MoveWindow(
+                        *h as HWND,
+                        r.left,
+                        r.top,
+                        r.right - r.left,
+                        r.bottom - r.top,
+                        1,
+                    );
+                    ShowWindow(*h as HWND, 5); // SW_SHOW
+                }
+                None => {
+                    ShowWindow(*h as HWND, SW_HIDE);
+                }
+            }
+        }
     }
+}
+
+fn current_actions() -> Vec<theme::Action> {
+    let st = STATE.lock().unwrap();
+    theme::visible_actions(st.snapshot.as_ref().map(|s| &s.status))
 }
 
 fn set_busy(hwnd: HWND, busy: bool) {
@@ -375,7 +386,9 @@ fn paint(hwnd: HWND) {
 fn draw(dc: HDC, rc: &RECT, dpi: u32) {
     let p = palette();
     let Some(f) = current_fonts() else { return };
-    let l = layout(rc.right, dpi);
+    let actions =
+        theme::visible_actions(STATE.lock().unwrap().snapshot.as_ref().map(|s| &s.status));
+    let l = layout(rc.right, dpi, actions.len());
     let (snapshot, message, busy) = {
         let s = STATE.lock().unwrap();
         (s.snapshot.clone(), s.message.clone(), s.busy)
@@ -501,22 +514,27 @@ fn draw(dc: HDC, rc: &RECT, dpi: u32) {
         .as_ref()
         .map(|s| theme::browsers_summary(&s.browsers))
         .unwrap_or_else(|| "Procurando navegadores…".into());
-    let cards: [(&str, String); 4] = [
-        (
-            "Ativar Proteção Completa",
-            "DNS seguro (Cloudflare Family) + bloqueador de anúncios uBlock".into(),
-        ),
-        ("Proteger Navegadores", format!("Detectados: {browsers}")),
-        (
-            "Verificar Agora",
-            "Testa se a rede está usando o filtro familiar".into(),
-        ),
-        (
-            "Restaurar Padrão da Rede",
-            "Desfaz o DNS e remove o bloqueador instalado pelo GuiaLar".into(),
-        ),
-    ];
-    for (c, (title, sub)) in l.cards.iter().zip(cards.iter()) {
+    let info = |a: theme::Action| -> (&str, String) {
+        match a {
+            theme::Action::Activate => (
+                "Ativar proteção",
+                "Bloqueia sites perigosos e adultos e instala o bloqueador de anúncios".into(),
+            ),
+            theme::Action::Browsers => {
+                ("Bloqueador de anúncios", format!("Navegadores: {browsers}"))
+            }
+            theme::Action::Check => (
+                "Verificar agora",
+                "Testa se a rede está usando o filtro familiar".into(),
+            ),
+            theme::Action::Restore => (
+                "Desativar proteção",
+                "Volta ao DNS original e remove o bloqueador de anúncios".into(),
+            ),
+        }
+    };
+    for (c, a) in l.cards.iter().zip(actions.iter()) {
+        let (title, sub) = info(*a);
         card_frame(dc, c, &p, dpi);
         let right = c.right - dp(16 + 170 + 16, dpi);
         let mut r = RECT {
@@ -532,12 +550,12 @@ fn draw(dc: HDC, rc: &RECT, dpi: u32) {
             right,
             bottom: c.bottom - dp(6, dpi),
         };
-        text(dc, f.body, p.text_secondary, sub, &mut r, DT_ONE_LINE);
+        text(dc, f.body, p.text_secondary, &sub, &mut r, DT_ONE_LINE);
     }
 
     // Barra de status.
     let msg = if message.is_empty() && !busy {
-        "Pronto.".to_string()
+        theme::next_step(snapshot.as_ref().map(|s| &s.status)).to_string()
     } else {
         message
     };
@@ -554,10 +572,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: usize, lp: isize) ->
             let dpi = GetDpiForWindow(hwnd).max(96);
             load_fonts(dpi);
             let mut b = BUTTONS.lock().unwrap();
-            b[0] = create_button(hwnd, ID_ACTIVATE, "Ativar Proteção", true) as usize;
-            b[1] = create_button(hwnd, ID_BROWSERS, "Proteger Navegadores", false) as usize;
-            b[2] = create_button(hwnd, ID_CHECK, "Verificar Agora", false) as usize;
-            b[3] = create_button(hwnd, ID_RESTORE, "Restaurar Padrão", false) as usize;
+            b[0] = create_button(hwnd, ID_ACTIVATE, "Ativar proteção", true) as usize;
+            b[1] = create_button(hwnd, ID_BROWSERS, "Instalar bloqueador", false) as usize;
+            b[2] = create_button(hwnd, ID_CHECK, "Verificar agora", false) as usize;
+            b[3] = create_button(hwnd, ID_RESTORE, "Desativar proteção", false) as usize;
             SendMessageW(b[0] as HWND, BCM_SETSHIELD, 0, 1); // escudo UAC
             SendMessageW(b[3] as HWND, BCM_SETSHIELD, 0, 1);
             drop(b);
@@ -634,6 +652,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: usize, lp: isize) ->
                     st.message = "Verificação concluída.".into();
                 }
             }
+            place_buttons(hwnd);
             InvalidateRect(hwnd, std::ptr::null(), 0);
             0
         }

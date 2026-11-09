@@ -91,6 +91,9 @@ fn backend_name() -> String {
 
 /// Ativa o DNS seguro e o bloqueador de anúncios.
 pub fn action_activate() -> Result<String> {
+    if DnsStateManifest::load()?.is_some() {
+        return Ok("A proteção já está ativa. Use \"Desativar\" antes de ativar de novo.".into());
+    }
     crate::platform::apply_dns()?;
     let extra = action_browsers().unwrap_or_else(|e| format!("Navegadores: {e:#}"));
     Ok(format!("Proteção ativada. {extra}"))
