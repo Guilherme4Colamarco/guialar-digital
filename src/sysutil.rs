@@ -81,21 +81,88 @@ pub fn home_from_passwd(passwd_text: &str, user: &str) -> Option<PathBuf> {
         .map(|f| PathBuf::from(f[5]))
 }
 
-/// Home efetivo para o manifesto: sob `sudo`, o do usuário que chamou (não `/root`).
-pub fn effective_home() -> Option<PathBuf> {
-    if is_root() {
-        if let Ok(user) = std::env::var("SUDO_USER") {
-            if user != "root" {
-                if let Some(h) = std::fs::read_to_string("/etc/passwd")
-                    .ok()
-                    .and_then(|p| home_from_passwd(&p, &user))
-                {
-                    return Some(h);
-                }
-            }
+/// Entrada de `/etc/passwd`: (usuário, uid, gid, home).
+pub type PasswdEntry = (String, u32, u32, PathBuf);
+
+fn parse_passwd_line(l: &str) -> Option<PasswdEntry> {
+    let f: Vec<&str> = l.split(':').collect();
+    if f.len() < 6 {
+        return None;
+    }
+    Some((
+        f[0].to_string(),
+        f[2].parse().ok()?,
+        f[3].parse().ok()?,
+        PathBuf::from(f[5]),
+    ))
+}
+
+pub fn passwd_by_name(passwd: &str, user: &str) -> Option<PasswdEntry> {
+    passwd
+        .lines()
+        .filter_map(parse_passwd_line)
+        .find(|e| e.0 == user)
+}
+
+pub fn passwd_by_uid(passwd: &str, uid: u32) -> Option<PasswdEntry> {
+    passwd
+        .lines()
+        .filter_map(parse_passwd_line)
+        .find(|e| e.1 == uid)
+}
+
+/// Usuário real por trás de `sudo`/`pkexec` (nunca root). Puro: recebe o ambiente.
+pub fn caller_from_env(
+    sudo_uid: Option<&str>,
+    sudo_gid: Option<&str>,
+    sudo_user: Option<&str>,
+    pkexec_uid: Option<&str>,
+    passwd: &str,
+) -> Option<PasswdEntry> {
+    let entry = if let Some(uid) = pkexec_uid.and_then(|v| v.parse::<u32>().ok()) {
+        passwd_by_uid(passwd, uid)
+    } else if let Some(uid) = sudo_uid.and_then(|v| v.parse::<u32>().ok()) {
+        let mut e = passwd_by_uid(passwd, uid)?;
+        if let Some(g) = sudo_gid.and_then(|v| v.parse::<u32>().ok()) {
+            e.2 = g;
         }
+        Some(e)
+    } else {
+        sudo_user.and_then(|u| passwd_by_name(passwd, u))
+    }?;
+    (entry.1 != 0).then_some(entry)
+}
+
+/// Usuário que chamou `sudo`/`pkexec`, lido do ambiente do processo (só quando root).
+pub fn caller() -> Option<PasswdEntry> {
+    if !is_root() {
+        return None;
+    }
+    let passwd = std::fs::read_to_string("/etc/passwd").ok()?;
+    let get = |k: &str| std::env::var(k).ok();
+    caller_from_env(
+        get("SUDO_UID").as_deref(),
+        get("SUDO_GID").as_deref(),
+        get("SUDO_USER").as_deref(),
+        get("PKEXEC_UID").as_deref(),
+        &passwd,
+    )
+}
+
+/// Home efetivo para o manifesto: sob `sudo`/`pkexec`, o do usuário que chamou (não `/root`).
+pub fn effective_home() -> Option<PathBuf> {
+    if let Some(c) = caller() {
+        return Some(c.3);
     }
     std::env::var_os("HOME").map(PathBuf::from)
+}
+
+/// Devolve a posse de `path` ao usuário real quando rodando como root via sudo/pkexec.
+#[cfg(unix)]
+pub fn give_to_caller(path: &Path) {
+    if let Some((_, uid, gid, _)) = caller() {
+        let _ = std::os::unix::fs::chown(path, Some(uid), Some(gid));
+    }
 }
 
 /// Codifica um script para `powershell -EncodedCommand` (UTF-16LE em base64).
@@ -230,5 +297,20 @@ mod tests {
         assert!(OpLock::acquire_in(&f).is_err());
         drop(a);
         assert!(OpLock::acquire_in(&f).is_ok());
+    }
+
+    #[test]
+    fn usuario_real_por_sudo_e_pkexec() {
+        let p = "root:x:0:0::/root:/bin/sh\nqa:x:1000:1001::/home/qa:/bin/sh\n";
+        let e = caller_from_env(Some("1000"), Some("1001"), Some("qa"), None, p).unwrap();
+        assert_eq!((e.1, e.2, e.3), (1000, 1001, PathBuf::from("/home/qa")));
+        let e = caller_from_env(None, None, None, Some("1000"), p).unwrap();
+        assert_eq!((e.0.as_str(), e.2), ("qa", 1001));
+        let e = caller_from_env(None, None, Some("qa"), None, p).unwrap();
+        assert_eq!(e.1, 1000);
+        // root nunca é "o chamador"
+        assert!(caller_from_env(Some("0"), Some("0"), Some("root"), None, p).is_none());
+        assert!(caller_from_env(None, None, None, None, p).is_none());
+        assert!(caller_from_env(None, None, None, Some("4242"), p).is_none());
     }
 }

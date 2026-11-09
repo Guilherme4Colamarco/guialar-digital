@@ -73,6 +73,21 @@ pub fn apply_dns() -> Result<()> {
     if elevate_if_needed("internal-apply")? {
         return Ok(());
     }
+    apply_core()
+}
+
+/// DNS + políticas dos navegadores com um único prompt de UAC.
+pub fn apply_all() -> Result<()> {
+    if elevate_if_needed("internal-setup")? {
+        return Ok(());
+    }
+    apply_core()?;
+    crate::policy::install_all()?;
+    Ok(())
+}
+
+/// Já elevado: grava o DNS e o manifesto.
+fn apply_core() -> Result<()> {
     let interfaces = list_active_interfaces()?;
     if interfaces.is_empty() {
         bail!("Nenhuma interface de rede ativa encontrada no Windows");

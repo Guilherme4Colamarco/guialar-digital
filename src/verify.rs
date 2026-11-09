@@ -15,12 +15,23 @@ pub enum ProtectionStatus {
     Unprotected,
 }
 
+/// Falta de permissão NÃO é arquivo corrompido (o arquivo pode ser de root).
+pub fn describe_load_error(e: &anyhow::Error) -> String {
+    let denied = e.chain().any(|c| {
+        c.downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::PermissionDenied)
+    });
+    if denied {
+        format!("Sem permissão para ler o registro da proteção ({e:#}). Rode: sudo chown -R $USER ~/.config/guialar")
+    } else {
+        format!("Manifesto corrompido: {e}")
+    }
+}
+
 pub fn check_status() -> ProtectionStatus {
     let manifest_opt = match DnsStateManifest::load() {
         Ok(m) => m,
-        Err(e) => {
-            return ProtectionStatus::PartiallyConfigured(format!("Manifesto corrompido: {}", e))
-        }
+        Err(e) => return ProtectionStatus::PartiallyConfigured(describe_load_error(&e)),
     };
 
     if manifest_opt.is_none() {
@@ -167,5 +178,14 @@ mod qa_tests {
             "127.0.0.1".parse().unwrap(),
             "1.0.0.3".parse().unwrap()
         ]));
+    }
+
+    #[test]
+    fn permissao_negada_nao_e_corrompido() {
+        let io = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        let e = anyhow::Error::new(io).context("Falha ao ler manifesto");
+        assert!(!describe_load_error(&e).starts_with("Manifesto corrompido"));
+        let e = anyhow::anyhow!("json ruim");
+        assert!(describe_load_error(&e).starts_with("Manifesto corrompido"));
     }
 }

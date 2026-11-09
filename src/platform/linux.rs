@@ -42,8 +42,51 @@ pub fn detect_active_backend() -> BackendKind {
     BackendKind::DirectResolvConf
 }
 
+/// Reexecuta este programa elevado **uma única vez** (um só pedido de senha) com
+/// `internal-apply` / `internal-revert`. Dentro de um AppImage usa o caminho do
+/// AppImage (o ponto de montagem FUSE não é acessível ao root).
+fn elevate_self(subcommand: &str) -> Result<()> {
+    let appimage = std::env::var_os("APPIMAGE").filter(|v| !v.is_empty());
+    let exe = match &appimage {
+        Some(a) => std::path::PathBuf::from(a),
+        None => std::env::current_exe().context("não foi possível localizar o executável")?,
+    };
+    let prefix = crate::sysutil::current_privilege_prefix();
+    let mut cmd = match prefix.split_first() {
+        Some((tool, rest)) => {
+            let mut c = Command::new(tool);
+            c.args(rest);
+            c
+        }
+        None => bail!("elevação indisponível"),
+    };
+    if appimage.is_some() {
+        // root não acessa o mount FUSE do usuário: extrai e roda.
+        cmd.args(["env", "APPIMAGE_EXTRACT_AND_RUN=1"]);
+    }
+    let status = cmd
+        .arg(&exe)
+        .arg(subcommand)
+        .status()
+        .context("Falha ao pedir permissão de administrador")?;
+    match status.code() {
+        Some(0) => Ok(()),
+        Some(126) | Some(127) => {
+            bail!(
+                "a permissão de administrador foi negada (código {:?})",
+                status.code()
+            )
+        }
+        code => bail!("a operação com privilégios falhou (código {code:?})"),
+    }
+}
+
 /// Aplica a proteção familiar conforme o backend detectado.
 pub fn apply_dns() -> Result<()> {
+    if !crate::sysutil::is_root() {
+        return elevate_self("internal-apply");
+    }
+    let _lock = crate::sysutil::OpLock::acquire()?;
     let backend = detect_active_backend();
     let mut manifest = DnsStateManifest::new(backend.clone());
 
@@ -71,6 +114,10 @@ pub fn apply_dns() -> Result<()> {
 
 /// Reverte as configurações para o estado original utilizando o manifesto.
 pub fn revert_dns(manifest: &DnsStateManifest) -> Result<()> {
+    if !crate::sysutil::is_root() {
+        return elevate_self("internal-revert");
+    }
+    let _lock = crate::sysutil::OpLock::acquire()?;
     match manifest.backend {
         BackendKind::NetworkManager => {
             revert_network_manager(manifest)?;

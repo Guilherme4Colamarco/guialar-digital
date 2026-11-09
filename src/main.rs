@@ -6,6 +6,7 @@
 
 mod browser;
 mod config;
+mod integration;
 mod platform;
 mod policy;
 mod sysutil;
@@ -50,6 +51,8 @@ enum Commands {
     InternalRevert,
     #[command(hide = true)]
     InternalBrowser,
+    #[command(hide = true)]
+    InternalSetup,
 }
 
 fn main() -> ExitCode {
@@ -60,6 +63,13 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
 
     let sem_comando = cli.command.is_none();
+    #[cfg(target_os = "linux")]
+    if matches!(
+        cli.command,
+        None | Some(Commands::Gui) | Some(Commands::Apply) | Some(Commands::Setup)
+    ) {
+        integration::ensure_desktop_integration();
+    }
     if matches!(cli.command, None | Some(Commands::Gui)) {
         match ui::run() {
             Ok(true) => return ExitCode::SUCCESS,
@@ -86,6 +96,7 @@ fn main() -> ExitCode {
         Commands::Status | Commands::Gui => handle_status(),
         Commands::Setup => handle_setup(false),
         Commands::InternalBrowser => handle_internal_browser(),
+        Commands::InternalSetup => handle_internal_setup(),
         Commands::Apply => handle_apply(),
         Commands::Revert => handle_revert(),
         Commands::Browser { install_all } => handle_browser(install_all),
@@ -117,7 +128,8 @@ fn handle_setup(interativo: bool) -> anyhow::Result<()> {
                 return Ok(());
             }
         }
-        handle_apply()?;
+        apply_flow(true)?;
+        #[cfg(not(windows))]
         handle_browser(true)?;
         println!("\n✅ Pronto. Reabra o navegador para o bloqueador aparecer.");
         println!("   Para desfazer o DNS: guialar revert");
@@ -182,12 +194,21 @@ fn handle_status() -> anyhow::Result<()> {
 }
 
 fn handle_apply() -> anyhow::Result<()> {
+    apply_flow(false)
+}
+
+/// `with_browsers`: no Windows faz DNS + navegadores com um único UAC.
+fn apply_flow(with_browsers: bool) -> anyhow::Result<()> {
     if DnsStateManifest::load()?.is_some() {
         println!("ℹ️  A proteção já está ativa. Use 'guialar revert' antes de aplicar de novo.");
         return Ok(());
     }
     println!("⚙️  Aplicando proteção familiar no sistema...");
-    platform::apply_dns()?;
+    if with_browsers {
+        platform::apply_all()?;
+    } else {
+        platform::apply_dns()?;
+    }
     println!("✅ Proteção familiar ativada com sucesso!");
     println!("🔍 Validando conexão com smoke test...");
 
@@ -275,6 +296,10 @@ fn open_store_pages(install_all: bool) -> anyhow::Result<()> {
         );
     }
     Ok(())
+}
+
+fn handle_internal_setup() -> anyhow::Result<()> {
+    platform::apply_all()
 }
 
 fn handle_internal_apply() -> anyhow::Result<()> {

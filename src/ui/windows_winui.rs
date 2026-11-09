@@ -318,13 +318,14 @@ fn place_buttons(hwnd: HWND) {
         GetClientRect(hwnd, &mut rc);
         GetDpiForWindow(hwnd).max(96)
     };
-    let (actions, ui_st, open) = {
+    let (actions, ui_st, open, busy) = {
         let st = STATE.lock().unwrap();
         let a = actions_of(&st.snapshot);
         (
             a,
             theme::ui_state(st.snapshot.as_ref(), false),
             st.details_open,
+            st.busy,
         )
     };
     let l = layout(rc.right, dpi, actions.len());
@@ -354,6 +355,8 @@ fn place_buttons(hwnd: HWND) {
                     // Primeira ação = primária: botão padrão (Enter).
                     SendMessageW(*h as HWND, 0x00F4, (k == 0) as usize, 1); // BM_SETSTYLE
                     ShowWindow(*h as HWND, 5); // SW_SHOW
+                                               // Durante "Aplicando…" nenhum botão fica clicável (ADR-020).
+                    EnableWindow(*h as HWND, (!busy) as i32);
                 }
                 None => {
                     ShowWindow(*h as HWND, SW_HIDE);
@@ -408,9 +411,13 @@ fn place_buttons(hwnd: HWND) {
             1,
         );
         ShowWindow(e[1] as HWND, if open { 5 } else { SW_HIDE });
-        if let Some(first) = actions.first() {
-            let idx = *first as usize;
-            let _ = SetFocus(b[idx] as HWND);
+        EnableWindow(e[1] as HWND, (!busy) as i32);
+        EnableWindow(e[0] as HWND, 1);
+        if !busy {
+            if let Some(first) = actions.first() {
+                let idx = *first as usize;
+                let _ = SetFocus(b[idx] as HWND);
+            }
         }
     }
 }
@@ -789,6 +796,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: usize, lp: isize) ->
         0x0001 => {
             // WM_CREATE
             MAIN_HWND.store(hwnd as isize, Ordering::Relaxed);
+            set_owner(hwnd);
             let dpi = GetDpiForWindow(hwnd).max(96);
             load_fonts(dpi);
             let mut b = BUTTONS.lock().unwrap();

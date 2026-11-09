@@ -97,9 +97,14 @@ pub fn action_activate() -> Result<String> {
     if DnsStateManifest::load()?.is_some() {
         return Ok("A proteção já está ativa. Use \"Desativar\" antes de ativar de novo.".into());
     }
-    crate::platform::apply_dns()?;
-    let extra = action_browsers().unwrap_or_else(|e| format!("Navegadores: {e:#}"));
-    Ok(format!("Proteção ativada. {extra}"))
+    // Uma única elevação (um só UAC / uma só senha). No Linux não abre o navegador por
+    // cima da janela de senha: o bloqueador é um passo à parte.
+    crate::platform::apply_all()?;
+    if cfg!(windows) {
+        Ok("Proteção ativada. Bloqueador de anúncios configurado. Reabra o navegador.".into())
+    } else {
+        Ok("Proteção ativada.".into())
+    }
 }
 
 /// Instala/abre o bloqueador de anúncios nos navegadores.

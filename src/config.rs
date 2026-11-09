@@ -135,6 +135,23 @@ impl DnsStateManifest {
 
         fs::rename(&temp_path, &target_path)
             .with_context(|| format!("Falha ao renomear {:?} para {:?}", temp_path, target_path))?;
+        // Via sudo/pkexec o arquivo nasceria root:root 0600 e o usuário comum não o leria.
+        #[cfg(unix)]
+        {
+            crate::sysutil::give_to_caller(parent);
+            if let Some(config_dir) = parent.parent() {
+                let root_owned = {
+                    use std::os::unix::fs::MetadataExt;
+                    fs::metadata(config_dir)
+                        .map(|m| m.uid() == 0)
+                        .unwrap_or(false)
+                };
+                if root_owned {
+                    crate::sysutil::give_to_caller(config_dir);
+                }
+            }
+            crate::sysutil::give_to_caller(&target_path);
+        }
         Ok(())
     }
 

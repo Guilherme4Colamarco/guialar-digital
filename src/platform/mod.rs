@@ -16,9 +16,6 @@ pub fn apply_dns() -> Result<()> {
         println!("ℹ️  A proteção já está ativa. Use 'guialar revert' antes de aplicar de novo.");
         return Ok(());
     }
-    // Windows: a instância elevada (UAC) reentra aqui; a trava seria dela mesma.
-    #[cfg(target_os = "linux")]
-    let _lock = crate::sysutil::OpLock::acquire()?;
     #[cfg(target_os = "linux")]
     {
         linux::apply_dns()
@@ -36,8 +33,6 @@ pub fn apply_dns() -> Result<()> {
 }
 
 pub fn revert_dns(manifest: &DnsStateManifest) -> Result<()> {
-    #[cfg(target_os = "linux")]
-    let _lock = crate::sysutil::OpLock::acquire()?;
     #[cfg(target_os = "linux")]
     {
         linux::revert_dns(manifest)
@@ -59,4 +54,21 @@ pub fn revert_dns(manifest: &DnsStateManifest) -> Result<()> {
 #[cfg(target_os = "windows")]
 pub fn elevate_if_needed(subcomando: &str) -> Result<bool> {
     windows::elevate_if_needed(subcomando)
+}
+
+/// Windows: DNS + políticas dos navegadores numa **única** elevação (um só UAC).
+/// Linux: só o DNS (o bloqueador é um passo separado, "Proteger navegadores").
+pub fn apply_all() -> Result<()> {
+    if DnsStateManifest::load()?.is_some() {
+        println!("ℹ️  A proteção já está ativa. Use 'guialar revert' antes de aplicar de novo.");
+        return Ok(());
+    }
+    #[cfg(target_os = "windows")]
+    {
+        windows::apply_all()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        apply_dns()
+    }
 }

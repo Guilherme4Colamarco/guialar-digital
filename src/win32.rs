@@ -87,7 +87,6 @@ pub struct SHELLEXECUTEINFOW {
 pub const SEE_MASK_NOCLOSEPROCESS: u32 = 0x40;
 pub const SW_HIDE: i32 = 0;
 pub const SW_SHOWNORMAL: i32 = 1;
-pub const INFINITE: u32 = 0xFFFF_FFFF;
 pub const ATTACH_PARENT_PROCESS: u32 = 0xFFFF_FFFF;
 
 #[link(name = "kernel32")]
@@ -317,6 +316,16 @@ pub fn rgb(c: u32) -> u32 {
     ((c & 0xFF) << 16) | (c & 0xFF00) | ((c >> 16) & 0xFF)
 }
 
+/// Janela principal: dona do diálogo de UAC (nunca fica atrás nem órfã).
+static OWNER: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+
+pub fn set_owner(h: HWND) {
+    OWNER.store(h as isize, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Limite de espera da operação elevada (o worker nunca congela para sempre).
+const ELEVATED_TIMEOUT_MS: u32 = 120_000;
+
 /// Executa `exe args` elevado (UAC), sem janela, esperando o fim. Devolve o exit code.
 pub fn run_elevated_hidden(exe: &str, args: &str) -> Result<u32, String> {
     let verb = w("runas");
@@ -325,7 +334,7 @@ pub fn run_elevated_hidden(exe: &str, args: &str) -> Result<u32, String> {
     let mut info = SHELLEXECUTEINFOW {
         cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
         fMask: SEE_MASK_NOCLOSEPROCESS,
-        hwnd: std::ptr::null_mut(),
+        hwnd: OWNER.load(std::sync::atomic::Ordering::Relaxed) as HWND,
         lpVerb: verb.as_ptr(),
         lpFile: file.as_ptr(),
         lpParameters: params.as_ptr(),
@@ -344,7 +353,11 @@ pub fn run_elevated_hidden(exe: &str, args: &str) -> Result<u32, String> {
         if ShellExecuteExW(&mut info) == 0 || info.hProcess.is_null() {
             return Err("a permissão de administrador foi negada".into());
         }
-        WaitForSingleObject(info.hProcess, INFINITE);
+        // WAIT_TIMEOUT = 0x102
+        if WaitForSingleObject(info.hProcess, ELEVATED_TIMEOUT_MS) == 0x102 {
+            CloseHandle(info.hProcess);
+            return Err("a operação com permissão de administrador demorou demais".into());
+        }
         let mut code = 1u32;
         GetExitCodeProcess(info.hProcess, &mut code);
         CloseHandle(info.hProcess);
