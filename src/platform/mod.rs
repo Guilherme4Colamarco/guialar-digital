@@ -16,6 +16,9 @@ pub fn apply_dns() -> Result<()> {
         println!("ℹ️  A proteção já está ativa. Use 'guialar revert' antes de aplicar de novo.");
         return Ok(());
     }
+    // Windows: a instância elevada (UAC) reentra aqui; a trava seria dela mesma.
+    #[cfg(target_os = "linux")]
+    let _lock = crate::sysutil::OpLock::acquire()?;
     #[cfg(target_os = "linux")]
     {
         linux::apply_dns()
@@ -33,6 +36,8 @@ pub fn apply_dns() -> Result<()> {
 }
 
 pub fn revert_dns(manifest: &DnsStateManifest) -> Result<()> {
+    #[cfg(target_os = "linux")]
+    let _lock = crate::sysutil::OpLock::acquire()?;
     #[cfg(target_os = "linux")]
     {
         linux::revert_dns(manifest)

@@ -209,8 +209,6 @@ fn handle_apply() -> anyhow::Result<()> {
 }
 
 fn handle_revert() -> anyhow::Result<()> {
-    println!("🔄 Restaurando configurações originais de DNS...");
-
     let Some(manifest) = DnsStateManifest::load()? else {
         #[cfg(windows)]
         {
@@ -224,6 +222,7 @@ fn handle_revert() -> anyhow::Result<()> {
         return Ok(());
     };
 
+    println!("🔄 Restaurando configurações originais de DNS...");
     platform::revert_dns(&manifest)?;
     println!("✅ Configurações de DNS restauradas com sucesso para o estado anterior.");
     Ok(())
@@ -258,9 +257,9 @@ fn open_store_pages(install_all: bool) -> anyhow::Result<()> {
     for b in &browsers {
         if b.is_installed {
             println!("Abrindo página de instalação para {}...", b.name);
-            if let Err(e) = browser::open_extension_page(b.extension_store_url) {
+            if browser::open_extension_page(b.extension_store_url).is_err() {
                 anyhow::bail!(
-                    "Não foi possível abrir a página. Abra manualmente: {} ({e})",
+                    "Não consegui abrir o navegador. Abra manualmente: {}",
                     b.extension_store_url
                 );
             }

@@ -294,9 +294,7 @@ fn create_button(parent: HWND, id: usize, text: &str, primary: bool) -> HWND {
 
 fn actions_of(snapshot: &Option<Snapshot>) -> Vec<theme::Action> {
     let state = theme::ui_state(snapshot.as_ref(), false);
-    let missing = snapshot
-        .as_ref()
-        .is_some_and(|s| !s.missing_blocker.is_empty());
+    let missing = snapshot.as_ref().is_some_and(|s| s.needs_blocker());
     theme::actions_for(state, missing)
 }
 
@@ -825,6 +823,20 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: usize, lp: isize) ->
             spawn_snapshot();
             0
         }
+        0x0010 => {
+            // WM_CLOSE: nunca fecha no meio de uma ação (o processo morreria no meio do DNS).
+            if STATE.lock().unwrap().busy {
+                message_box_owned(
+                    hwnd,
+                    "Aguarde: o GuiaLar ainda está trabalhando. Feche a janela quando terminar.",
+                    "GuiaLar Digital",
+                    0x40, // MB_ICONINFORMATION
+                );
+                return 0;
+            }
+            DestroyWindow(hwnd);
+            0
+        }
         0x0024 => {
             // WM_GETMINMAXINFO: tamanho mínimo da janela (E9).
             let dpi = GetDpiForWindow(hwnd).max(96);
@@ -900,7 +912,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: usize, lp: isize) ->
                 ID_RESTORE => {
                     // Desativar tira a proteção da família: pede confirmação (E5).
                     // 0x24 = MB_YESNO | MB_ICONQUESTION; 6 = IDYES.
-                    let ok = message_box(
+                    let ok = message_box_owned(
+                        hwnd,
                         "Desativar a proteção deste computador? Sites perigosos e adultos deixarão de ser bloqueados.",
                         "GuiaLar Digital",
                         0x24,
@@ -954,7 +967,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: usize, lp: isize) ->
                 let mut st = STATE.lock().unwrap();
                 st.snapshot = Some(*s);
                 if st.message.starts_with("Verificando") {
-                    st.message = "Verificação concluída.".into();
+                    let state = theme::ui_state(st.snapshot.as_ref(), false);
+                    st.message = theme::verdict(state, st.snapshot.as_ref());
                 }
             }
             set_busy(hwnd, false);

@@ -145,6 +145,8 @@ mod imp {
 
     static BUSY: AtomicBool = AtomicBool::new(false);
     static ARMED: AtomicBool = AtomicBool::new(false);
+    /// Verificação pedida pelo usuário: ao terminar, mostra o veredito.
+    static CHECKING: AtomicBool = AtomicBool::new(false);
     static LAST: Mutex<Option<Snapshot>> = Mutex::new(None);
     static ERR_DETAIL: Mutex<String> = Mutex::new(String::new());
 
@@ -288,7 +290,10 @@ mod imp {
             .as_ref()
             .map(|s| s.missing_blocker.clone())
             .unwrap_or_default();
-        let actions = theme::actions_for(layout_state, !missing_list.is_empty());
+        let actions = theme::actions_for(
+            layout_state,
+            snap.as_ref().is_some_and(|s| s.needs_blocker()),
+        );
         let (head, desc) = if snap.is_none() {
             (
                 "Verificando…",
@@ -399,6 +404,7 @@ mod imp {
 
     unsafe extern "C" fn on_verify_shortcut(_a: P, _p: P, _d: P) {
         if !BUSY.load(Ordering::Relaxed) {
+            CHECKING.store(true, Ordering::Relaxed);
             refresh();
         }
     }
@@ -416,6 +422,11 @@ mod imp {
         let s = Box::from_raw(data as *mut Snapshot);
         *LAST.lock().unwrap() = Some(*s);
         set_busy(false);
+        if CHECKING.swap(false, Ordering::Relaxed) {
+            let snap = LAST.lock().unwrap().clone();
+            let state = theme::ui_state(snap.as_ref(), false);
+            toast(&theme::verdict(state, snap.as_ref()));
+        }
         0
     }
 
@@ -473,6 +484,7 @@ mod imp {
         run_action(crate::ui::action_browsers);
     }
     unsafe extern "C" fn on_check_btn(_b: P, _d: P) {
+        CHECKING.store(true, Ordering::Relaxed);
         refresh();
     }
 

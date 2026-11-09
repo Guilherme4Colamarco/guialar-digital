@@ -225,6 +225,7 @@ extern "system" {
     ) -> i32;
     pub fn GetDpiForWindow(h: HWND) -> u32;
     pub fn SetForegroundWindow(h: HWND) -> i32;
+    pub fn DestroyWindow(h: HWND) -> i32;
     pub fn MessageBoxW(h: HWND, text: *const u16, caption: *const u16, kind: u32) -> i32;
     pub fn SetTimer(h: HWND, id: usize, ms: u32, f: *const c_void) -> usize;
     pub fn KillTimer(h: HWND, id: usize) -> i32;
@@ -380,6 +381,20 @@ pub fn attach_parent_console() {
                 }
             }
         }
+    }
+}
+
+/// Caixa modal presa à janela `owner`, sempre à frente (nunca some atrás dela).
+pub fn message_box_owned(owner: HWND, text: &str, caption: &str, kind: u32) -> i32 {
+    // MB_SETFOREGROUND (0x10000) | MB_TOPMOST (0x40000)
+    // SAFETY: strings UTF-16 terminadas em zero vivem até o fim da chamada.
+    unsafe {
+        MessageBoxW(
+            owner,
+            w(text).as_ptr(),
+            w(caption).as_ptr(),
+            kind | 0x10000 | 0x40000,
+        )
     }
 }
 

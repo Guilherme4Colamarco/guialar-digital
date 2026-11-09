@@ -2,7 +2,10 @@
 #![cfg_attr(not(unix), allow(dead_code))]
 #![cfg_attr(unix, allow(dead_code))]
 
+use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
+
+use anyhow::{bail, Context, Result};
 
 /// Executável existe no `PATH` (sem criar processo `which`).
 pub fn command_exists(command: &str) -> bool {
@@ -130,6 +133,45 @@ pub fn is_safe_ps_alias(value: &str) -> bool {
             .all(|c| c.is_alphanumeric() || matches!(c, ' ' | '-' | '_' | '.' | '(' | ')' | '#'))
 }
 
+/// Trava de operação: impede dois `apply`/`revert` ao mesmo tempo (o NetworkManager
+/// quebra com ativações paralelas). Trava velha (>120 s) é considerada abandonada.
+pub struct OpLock(PathBuf);
+
+impl OpLock {
+    pub fn acquire() -> Result<Self> {
+        let dir = std::env::temp_dir();
+        Self::acquire_in(&dir.join("guialar-op.lock"))
+    }
+
+    pub fn acquire_in(path: &Path) -> Result<Self> {
+        for _ in 0..2 {
+            match OpenOptions::new().write(true).create_new(true).open(path) {
+                Ok(_) => return Ok(Self(path.to_path_buf())),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    let velha = std::fs::metadata(path)
+                        .and_then(|m| m.modified())
+                        .ok()
+                        .and_then(|t| t.elapsed().ok())
+                        .is_some_and(|d| d.as_secs() > 120);
+                    if velha {
+                        let _ = std::fs::remove_file(path);
+                        continue;
+                    }
+                    bail!("Outra operação do GuiaLar já está em andamento. Aguarde terminar e tente de novo.");
+                }
+                Err(e) => return Err(e).context("não foi possível criar a trava de operação"),
+            }
+        }
+        bail!("não foi possível obter a trava de operação")
+    }
+}
+
+impl Drop for OpLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -178,5 +220,15 @@ mod tests {
         }
         assert!(is_safe_ps_alias("Conexão Local"));
         assert!(is_safe_ps_alias("Ethernet (Realtek PCIe)"));
+    }
+
+    #[test]
+    fn trava_impede_operacao_paralela() {
+        let f = std::env::temp_dir().join(format!("guialar-lock-test-{}", std::process::id()));
+        let _ = std::fs::remove_file(&f);
+        let a = OpLock::acquire_in(&f).unwrap();
+        assert!(OpLock::acquire_in(&f).is_err());
+        drop(a);
+        assert!(OpLock::acquire_in(&f).is_ok());
     }
 }

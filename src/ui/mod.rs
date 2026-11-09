@@ -110,8 +110,9 @@ pub fn action_browsers() -> Result<String> {
 
 /// O arquivo existe mas não é um manifesto válido.
 fn is_corrupt_manifest(path: &std::path::Path) -> bool {
-    std::fs::read_to_string(path)
-        .map(|t| serde_json::from_str::<DnsStateManifest>(&t).is_err())
+    // Bytes (não texto): UTF-8 inválido também é "corrompido".
+    std::fs::read(path)
+        .map(|b| serde_json::from_slice::<DnsStateManifest>(&b).is_err())
         .unwrap_or(false)
 }
 
@@ -152,6 +153,8 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let f = dir.join("state.json");
         std::fs::write(&f, "{ quebrado").unwrap();
+        assert!(is_corrupt_manifest(&f));
+        std::fs::write(&f, [0xff, 0xfe, 0x00, 0x80]).unwrap();
         assert!(is_corrupt_manifest(&f));
         std::fs::write(&f, r#"{"backend":"DirectResolvConf","applied_at_utc":"1","connections":[],"previous_resolv_conf":null}"#).unwrap();
         assert!(!is_corrupt_manifest(&f));

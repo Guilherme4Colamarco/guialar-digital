@@ -57,6 +57,30 @@ pub struct Snapshot {
     pub backend: String,
 }
 
+impl Snapshot {
+    /// Manifesto ilegível: o estado "Parcial" não é por falta de bloqueador.
+    pub fn manifest_corrupt(&self) -> bool {
+        matches!(&self.status, ProtectionStatus::PartiallyConfigured(m) if m.starts_with("Manifesto corrompido"))
+    }
+
+    /// Falta bloqueador em algum navegador (e o motivo do Parcial é só esse).
+    pub fn needs_blocker(&self) -> bool {
+        !self.missing_blocker.is_empty() && !self.manifest_corrupt()
+    }
+}
+
+/// Resultado de "Verificar", com veredito (nunca só "concluída").
+pub fn verdict(state: UiState, snapshot: Option<&Snapshot>) -> String {
+    match state {
+        UiState::Protegido => "Verificação concluída: este computador está protegido.".into(),
+        UiState::Desprotegido => {
+            "Verificação concluída: este computador não está protegido.".into()
+        }
+        UiState::Parcial => format!("Verificação concluída: {}", description(state, snapshot)),
+        UiState::Trabalhando => "Verificando…".into(),
+    }
+}
+
 /// Ações da janela. O número é o índice do botão.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
@@ -80,7 +104,7 @@ pub fn ui_state(snapshot: Option<&Snapshot>, busy: bool) -> UiState {
     if busy {
         return UiState::Trabalhando;
     }
-    match snapshot.map(|s| (&s.status, !s.missing_blocker.is_empty())) {
+    match snapshot.map(|s| (&s.status, s.needs_blocker())) {
         None => UiState::Trabalhando,
         Some((ProtectionStatus::Unprotected, _)) => UiState::Desprotegido,
         Some((ProtectionStatus::PartiallyConfigured(_), _)) => UiState::Parcial,
@@ -145,7 +169,11 @@ pub fn description(state: UiState, snapshot: Option<&Snapshot>) -> String {
         UiState::Desprotegido => "Ative a proteção para bloquear sites perigosos e adultos.".into(),
         UiState::Protegido => "Sites perigosos e adultos estão bloqueados neste computador.".into(),
         UiState::Parcial => match snapshot {
-            Some(s) if !s.missing_blocker.is_empty() => format!(
+            Some(s) if s.manifest_corrupt() => {
+                "O registro da proteção está danificado. Clique em \"Desativar proteção\" para limpar e começar de novo."
+                    .into()
+            }
+            Some(s) if s.needs_blocker() => format!(
                 "Falta o bloqueador de anúncios em: {}.",
                 s.missing_blocker.join(", ")
             ),
@@ -167,12 +195,16 @@ pub fn state_color(p: &Palette, state: UiState) -> u32 {
 
 /// Texto de detalhes técnicos (jargão fica só aqui).
 pub fn technical_details(s: &Snapshot, last_error: &str) -> String {
-    let mut t = format!(
-        "Backend de DNS: {}\nFiltro: Cloudflare for Families (1.1.1.3 / 1.0.0.3)\nManifesto: {}\nNavegadores: {}\n",
-        s.backend,
+    let mut t = format!("Backend de DNS: {}\n", s.backend);
+    // O filtro só é citado quando há proteção gravada.
+    if !matches!(s.status, ProtectionStatus::Unprotected) {
+        t.push_str("Filtro: Cloudflare for Families (1.1.1.3 / 1.0.0.3)\n");
+    }
+    t.push_str(&format!(
+        "Manifesto: {}\nNavegadores: {}\n",
         s.manifest_path,
         browsers_summary(&s.browsers)
-    );
+    ));
     if !s.missing_blocker.is_empty() {
         t.push_str(&format!(
             "Sem bloqueador: {}\n",
@@ -332,7 +364,9 @@ mod tests {
                 assert!(!txt.contains(j), "{j} em {txt}");
             }
         }
-        assert!(technical_details(&s, "").contains("Cloudflare"));
+        let protegido = snap(ProtectionStatus::Protected, &[]);
+        assert!(technical_details(&protegido, "").contains("Cloudflare"));
+        assert!(!technical_details(&s, "").contains("Cloudflare"));
     }
 
     #[test]
@@ -388,5 +422,26 @@ mod tests {
             Some("[Settings]\ngtk-theme-name=Adwaita\n")
         ));
         assert!(!desktop_prefers_dark(None, None, None, None));
+    }
+
+    #[test]
+    fn manifesto_corrompido_nao_vira_falta_de_bloqueador() {
+        let s = snap(
+            ProtectionStatus::PartiallyConfigured("Manifesto corrompido: x".into()),
+            &["Edge"],
+        );
+        assert!(s.manifest_corrupt() && !s.needs_blocker());
+        assert_eq!(
+            actions_for(ui_state(Some(&s), false), s.needs_blocker()),
+            [Action::Check, Action::Restore]
+        );
+        assert!(description(UiState::Parcial, Some(&s)).contains("danificado"));
+    }
+
+    #[test]
+    fn verificar_sempre_tem_veredito() {
+        let un = snap(ProtectionStatus::Unprotected, &[]);
+        assert!(verdict(UiState::Desprotegido, Some(&un)).contains("não está protegido"));
+        assert!(verdict(UiState::Protegido, None).contains("está protegido"));
     }
 }
