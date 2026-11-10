@@ -267,9 +267,7 @@ fn apply_flow(with_browsers: bool) -> anyhow::Result<()> {
 
     match verify::check_status() {
         ProtectionStatus::Protected => {
-            println!(
-                "🎉 Conexão validada: A rede já está navegando com filtros familiares ativos."
-            );
+            println!("🎉 Conexão validada: A rede já está navegando com o filtro ativo.");
         }
         ProtectionStatus::PartiallyConfigured(msg) => {
             eprintln!("⚠️  Aviso pós-aplicação: {}", msg);
