@@ -85,6 +85,11 @@ fn run_dns_smoke_test(mode: FilterMode) -> bool {
     false
 }
 
+/// WSANO_DATA: nome válido, sem registro (como o Windows relata uma resposta 0.0.0.0).
+fn is_blocked_error(e: &std::io::Error) -> bool {
+    cfg!(windows) && e.raw_os_error() == Some(11004)
+}
+
 const SMOKE_ATTEMPTS: u32 = 6;
 const SMOKE_RETRY_DELAY: Duration = Duration::from_millis(500);
 
@@ -92,10 +97,13 @@ fn smoke_once(mode: FilterMode) -> bool {
     let (tx, rx) = mpsc::channel::<Vec<IpAddr>>();
     let target = format!("{}:53", mode.probe_host());
     std::thread::spawn(move || {
-        let addrs = target
-            .to_socket_addrs()
-            .map(|it| it.map(|a| a.ip()).collect::<Vec<_>>())
-            .unwrap_or_default();
+        let addrs = match target.to_socket_addrs() {
+            Ok(it) => it.map(|a| a.ip()).collect::<Vec<_>>(),
+            // Windows: o getaddrinfo descarta a resposta 0.0.0.0 do filtro e devolve
+            // WSANO_DATA (11004). "Domínio existe mas sem dados" = bloqueado pelo filtro.
+            Err(e) if is_blocked_error(&e) => vec![IpAddr::from([0, 0, 0, 0])],
+            Err(_) => Vec::new(),
+        };
         let _ = tx.send(addrs);
     });
     rx.recv_timeout(RESOLUTION_TIMEOUT)
@@ -220,5 +228,12 @@ mod qa_tests {
     fn dominios_de_teste_por_modo() {
         assert_eq!(FilterMode::Family.probe_host(), "malware.testcategory.com");
         assert_eq!(FilterMode::AdsOnly.probe_host(), "doubleclick.net");
+    }
+
+    #[test]
+    fn wsa_no_data_so_conta_no_windows() {
+        let e = std::io::Error::from_raw_os_error(11004);
+        assert_eq!(is_blocked_error(&e), cfg!(windows));
+        assert!(!is_blocked_error(&std::io::Error::from_raw_os_error(11001)));
     }
 }
