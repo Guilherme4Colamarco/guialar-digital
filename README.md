@@ -63,7 +63,7 @@ O binário Linux usa glibc (necessário para carregar GTK em tempo de execução
 
 ## Licença
 
-MIT — veja [LICENSE](LICENSE).
+Licença dupla: [MIT](LICENSE-MIT) ou [Apache-2.0](LICENSE-APACHE), à sua escolha.
 
 ## Autor
 

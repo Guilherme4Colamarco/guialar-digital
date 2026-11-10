@@ -1,1 +1,7 @@
 /target
+/dist
+*.exe
+*.AppImage
+*.bundle
+*.log
+.DS_Store

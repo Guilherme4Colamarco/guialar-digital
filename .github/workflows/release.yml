@@ -1,0 +1,82 @@
+# Gate 7 da ADR-023: release v* com AppImage + exe + SHA256SUMS gerados pela CI.
+# Só dispara em tag. Não publique a tag antes da aprovação final e da main Rust.
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  APPIMAGE_EXTRACT_AND_RUN: "1"
+  APPIMAGETOOL_URL: https://github.com/AppImage/appimagetool/releases/download/1.9.0/appimagetool-x86_64.AppImage
+  APPIMAGETOOL_SHA256: 46fdd785094c7f6e545b61afcfb0f3d98d8eab243f644b4b17698c01d06083d1
+
+jobs:
+  linux:
+    name: AppImage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build release gnu
+        run: cargo build --locked --release
+      - name: appimagetool
+        run: |
+          curl -sSfL -o /tmp/appimagetool "$APPIMAGETOOL_URL"
+          echo "$APPIMAGETOOL_SHA256  /tmp/appimagetool" | sha256sum -c -
+          chmod +x /tmp/appimagetool
+          sudo install -m 755 /tmp/appimagetool /usr/local/bin/appimagetool
+      - name: Empacotar AppImage
+        run: |
+          bash scripts/package-appimage.sh
+          ls -lh dist/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-appimage
+          path: dist/*
+          if-no-files-found: error
+
+  windows:
+    name: Windows exe
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build release
+        run: cargo build --locked --release
+      - name: Nomear artefato
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp target/release/guialar.exe dist/guialar-0.3.0-windows.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-exe
+          path: dist/guialar-0.3.0-windows.exe
+          if-no-files-found: error
+
+  publish:
+    name: GitHub Release
+    needs: [linux, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+          path: dist
+      - name: SHA256SUMS
+        run: |
+          cd dist
+          sha256sum * | tee SHA256SUMS
+          ls -lh
+      - name: Criar release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true

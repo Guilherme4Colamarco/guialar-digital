@@ -1,0 +1,71 @@
+# Gate 2 da ADR-023: fmt, clippy, test, build Linux + Windows.
+# Substitui os workflows Ant (build-and-test.yml / quick-check.yml) quando a main for Rust.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  linux-gnu:
+    name: Linux gnu (fmt clippy test build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Formato
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Testes
+        run: cargo test --locked
+      - name: Build release
+        run: cargo build --locked --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: guialar-linux-gnu
+          path: target/release/guialar
+          if-no-files-found: error
+
+  linux-musl:
+    name: Linux musl (clippy test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+          components: clippy
+      - name: musl-tools
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Clippy musl
+        run: cargo clippy --locked --all-targets --target x86_64-unknown-linux-musl -- -D warnings
+      - name: Testes musl
+        run: cargo test --locked --target x86_64-unknown-linux-musl
+
+  windows:
+    name: Windows (clippy test build)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Testes
+        run: cargo test --locked
+      - name: Build release
+        run: cargo build --locked --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: guialar-windows
+          path: target/release/guialar.exe
+          if-no-files-found: error
