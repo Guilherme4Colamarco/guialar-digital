@@ -147,6 +147,8 @@ mod imp {
     static ARMED: AtomicBool = AtomicBool::new(false);
     /// Verificação pedida pelo usuário: ao terminar, mostra o veredito.
     static CHECKING: AtomicBool = AtomicBool::new(false);
+    /// Último veredito de "Verificar": fica na tela (o toast some sozinho).
+    static LAST_VERDICT: Mutex<Option<String>> = Mutex::new(None);
     static LAST: Mutex<Option<Snapshot>> = Mutex::new(None);
     static ERR_DETAIL: Mutex<String> = Mutex::new(String::new());
 
@@ -305,6 +307,11 @@ mod imp {
                 theme::description(state, snap.as_ref()),
             )
         };
+        let verdict = LAST_VERDICT.lock().unwrap().clone();
+        let desc = match &verdict {
+            Some(v) if !busy => format!("{desc}\n\nÚltima verificação: {v}"),
+            _ => desc,
+        };
         // SAFETY: thread principal; ponteiros guardados em UI.
         unsafe {
             (a.adw_status_page_set_icon_name)(u.status_page as P, cs(pick_icon(state)).as_ptr());
@@ -357,6 +364,10 @@ mod imp {
             );
             (a.gtk_widget_set_visible)(u.row_check as P, actions.contains(&Action::Check) as c_int);
         }
+        set_row_subtitle(
+            u.row_check,
+            verdict.as_deref().unwrap_or("Testa a conexão agora"),
+        );
         set_row_subtitle(
             u.row_dns,
             &theme::card_subtitle(protect_row_action, &missing_list),
@@ -421,11 +432,18 @@ mod imp {
     unsafe extern "C" fn idle_snapshot(data: P) -> c_int {
         let s = Box::from_raw(data as *mut Snapshot);
         *LAST.lock().unwrap() = Some(*s);
-        set_busy(false);
-        if CHECKING.swap(false, Ordering::Relaxed) {
+        let checked = CHECKING.swap(false, Ordering::Relaxed);
+        let mut verdict = None;
+        if checked {
             let snap = LAST.lock().unwrap().clone();
             let state = theme::ui_state(snap.as_ref(), false);
-            toast(&theme::verdict(state, snap.as_ref()));
+            let v = theme::verdict(state, snap.as_ref());
+            *LAST_VERDICT.lock().unwrap() = Some(v.clone());
+            verdict = Some(v);
+        }
+        set_busy(false); // redesenha já com o veredito persistente
+        if let Some(v) = verdict {
+            toast(&v);
         }
         0
     }
@@ -447,6 +465,7 @@ mod imp {
     }
 
     fn run_action(f: fn() -> Result<String>) {
+        *LAST_VERDICT.lock().unwrap() = None; // resultado velho não vale depois de uma ação
         set_busy(true);
         std::thread::spawn(move || {
             let pair = match f() {

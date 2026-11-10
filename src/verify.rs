@@ -60,6 +60,22 @@ pub fn resolution_is_family(addrs: &[IpAddr]) -> bool {
 
 /// Smoke test com timeout: rede quebrada não pode travar a CLI.
 fn run_dns_smoke_test() -> bool {
+    // Logo após `apply` o resolvedor leva algumas centenas de ms para estabilizar.
+    for attempt in 0..SMOKE_ATTEMPTS {
+        if attempt > 0 {
+            std::thread::sleep(SMOKE_RETRY_DELAY);
+        }
+        if smoke_once() {
+            return true;
+        }
+    }
+    false
+}
+
+const SMOKE_ATTEMPTS: u32 = 3;
+const SMOKE_RETRY_DELAY: Duration = Duration::from_millis(350);
+
+fn smoke_once() -> bool {
     let (tx, rx) = mpsc::channel::<Vec<IpAddr>>();
     std::thread::spawn(move || {
         let addrs = "family.cloudflare-dns.com:53"

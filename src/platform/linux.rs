@@ -51,24 +51,47 @@ fn elevate_self(subcommand: &str) -> Result<()> {
         Some(a) => std::path::PathBuf::from(a),
         None => std::env::current_exe().context("não foi possível localizar o executável")?,
     };
-    let prefix = crate::sysutil::current_privilege_prefix();
-    let mut cmd = match prefix.split_first() {
-        Some((tool, rest)) => {
-            let mut c = Command::new(tool);
-            c.args(rest);
-            c
+    let args_for = |tool: &str| -> Vec<std::ffi::OsString> {
+        let mut v: Vec<std::ffi::OsString> = Vec::new();
+        if tool == "sudo" {
+            v.push("-n".into()); // nunca pede senha sem TTY
         }
-        None => bail!("elevação indisponível"),
+        if appimage.is_some() {
+            // root não acessa o mount FUSE do usuário: extrai e roda.
+            v.extend(["env".into(), "APPIMAGE_EXTRACT_AND_RUN=1".into()]);
+        }
+        v.push(exe.clone().into_os_string());
+        v.push(subcommand.into());
+        v
     };
-    if appimage.is_some() {
-        // root não acessa o mount FUSE do usuário: extrai e roda.
-        cmd.args(["env", "APPIMAGE_EXTRACT_AND_RUN=1"]);
+    let run = |tool: &str| -> Option<std::process::ExitStatus> {
+        Command::new(tool).args(args_for(tool)).status().ok()
+    };
+    let have_pkexec = crate::sysutil::command_exists("pkexec");
+    // 1º `sudo -n` (NOPASSWD/credencial em cache, funciona sem TTY nem polkit gráfico);
+    // 2º `pkexec` (janela de senha do polkit para o usuário comum de desktop).
+    // Sonda `sudo -n true`: só usa sudo se ele realmente dispensa senha; assim uma falha
+    // do próprio comando não dispara um segundo pedido via pkexec.
+    let sudo_ok = crate::sysutil::command_exists("sudo")
+        && Command::new("sudo")
+            .args(["-n", "true"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+    if sudo_ok {
+        let st = run("sudo").context("Falha ao executar sudo")?;
+        return match st.code() {
+            Some(0) => Ok(()),
+            code => bail!("a operação com privilégios falhou (código {code:?})"),
+        };
     }
-    let status = cmd
-        .arg(&exe)
-        .arg(subcommand)
-        .status()
-        .context("Falha ao pedir permissão de administrador")?;
+    if !have_pkexec {
+        bail!("elevação indisponível: instale pkexec (polkit) ou configure sudo");
+    }
+    let status = run("pkexec").context("Falha ao pedir permissão de administrador")?;
     match status.code() {
         Some(0) => Ok(()),
         Some(126) | Some(127) => {
