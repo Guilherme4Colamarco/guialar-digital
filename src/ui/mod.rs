@@ -61,13 +61,21 @@ pub fn run() -> Result<bool> {
 
 /// Lê o estado atual (pode demorar até o timeout do teste DNS: chame fora da thread de UI).
 pub fn snapshot() -> Snapshot {
+    let mode = crate::verify::active_mode();
+    // Modo só anúncios não mexe nos navegadores: nada "falta".
+    let missing = if mode == Some(crate::config::FilterMode::AdsOnly) {
+        Vec::new()
+    } else {
+        crate::policy::browsers_without_blocker()
+    };
     Snapshot {
+        mode,
         status: crate::verify::check_status(),
         browsers: crate::browser::detect_browsers()
             .into_iter()
             .map(|b| (b.name, b.is_installed))
             .collect(),
-        missing_blocker: crate::policy::browsers_without_blocker(),
+        missing_blocker: missing,
         manifest_path: DnsStateManifest::file_path()
             .map(|p| p.display().to_string())
             .unwrap_or_default(),
@@ -94,17 +102,22 @@ fn backend_name() -> String {
 
 /// Ativa o DNS seguro e o bloqueador de anúncios.
 pub fn action_activate() -> Result<String> {
-    if DnsStateManifest::load()?.is_some() {
+    let mode = crate::config::current_mode();
+    if DnsStateManifest::load()?.is_some_and(|m| m.mode == mode) {
         return Ok("A proteção já está ativa. Use \"Desativar\" antes de ativar de novo.".into());
     }
     // Uma única elevação (um só UAC / uma só senha). No Linux não abre o navegador por
     // cima da janela de senha: o bloqueador é um passo à parte.
     crate::platform::apply_all()?;
-    if cfg!(windows) {
-        Ok("Proteção ativada. Bloqueador de anúncios configurado. Reabra o navegador.".into())
-    } else {
-        Ok("Proteção ativada.".into())
-    }
+    Ok(match (mode, cfg!(windows)) {
+        (crate::config::FilterMode::AdsOnly, _) => {
+            "Anúncios e rastreadores bloqueados. Os navegadores não foram alterados.".into()
+        }
+        (_, true) => {
+            "Proteção ativada. Bloqueador de anúncios configurado. Reabra o navegador.".into()
+        }
+        (_, false) => "Proteção ativada.".into(),
+    })
 }
 
 /// Instala/abre o bloqueador de anúncios nos navegadores.

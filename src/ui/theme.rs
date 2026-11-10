@@ -52,6 +52,8 @@ pub struct Snapshot {
     pub missing_blocker: Vec<String>,
     #[cfg_attr(windows, allow(dead_code))]
     pub manifest_path: String,
+    /// Filtro gravado no manifesto (se houver proteção).
+    pub mode: Option<crate::config::FilterMode>,
     /// Backend de DNS detectado.
     #[cfg_attr(windows, allow(dead_code))]
     pub backend: String,
@@ -80,6 +82,48 @@ pub fn verdict(state: UiState, snapshot: Option<&Snapshot>) -> String {
         UiState::Trabalhando => "Verificando…".into(),
     }
 }
+
+/// Navegador recomendado (só informativo: o GuiaLar não instala nada).
+pub struct Recommended {
+    pub profile: &'static str,
+    pub name: &'static str,
+    pub note: &'static str,
+    pub url: &'static str,
+}
+
+/// Links conferidos nos sites/repositórios oficiais dos projetos (ADR-022).
+pub const RECOMMENDED_BROWSERS: [Recommended; 5] = [
+    Recommended {
+        profile: "Para o dia a dia",
+        name: "Brave",
+        note: "Bloqueia anúncios sozinho e é parecido com o Chrome.",
+        url: "https://brave.com/download/",
+    },
+    Recommended {
+        profile: "Mais minimalista",
+        name: "Helium",
+        note: "Enxuto, com o uBlock Origin já incluído.",
+        url: "https://helium.computer/",
+    },
+    Recommended {
+        profile: "Mais diferente",
+        name: "Zen Browser + uBlock Origin",
+        note: "Baseado no Firefox, com abas na lateral. Instale o uBlock Origin depois.",
+        url: "https://zen-browser.app/",
+    },
+    Recommended {
+        profile: "Extra: privacidade",
+        name: "Mullvad Browser",
+        note: "Dificulta o rastreamento e não pede conta.",
+        url: "https://mullvad.net/en/browser",
+    },
+    Recommended {
+        profile: "Extra: Firefox reforçado",
+        name: "LibreWolf",
+        note: "Firefox mais protegido, com o uBlock Origin incluído.",
+        url: "https://librewolf.net/",
+    },
+];
 
 /// Ações da janela. O número é o índice do botão.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -148,7 +192,7 @@ pub fn card_title(action: Action) -> &'static str {
 
 pub fn card_subtitle(action: Action, missing: &[String]) -> String {
     match action {
-        Action::Activate => "Bloqueia sites perigosos e adultos e os anúncios".into(),
+        Action::Activate => "Aplica o tipo de proteção escolhido acima".into(),
         Action::Browsers => format!("Falta o bloqueador em: {}", missing.join(", ")),
         Action::Check => "Testa a conexão agora".into(),
         Action::Restore => "Desfaz a proteção e remove o bloqueador de anúncios".into(),
@@ -167,7 +211,12 @@ pub fn headline(state: UiState) -> &'static str {
 pub fn description(state: UiState, snapshot: Option<&Snapshot>) -> String {
     match state {
         UiState::Desprotegido => "Ative a proteção para bloquear sites perigosos e adultos.".into(),
-        UiState::Protegido => "Sites perigosos e adultos estão bloqueados neste computador.".into(),
+        UiState::Protegido => match snapshot.and_then(|s| s.mode) {
+            Some(crate::config::FilterMode::AdsOnly) => {
+                "Anúncios e rastreadores estão bloqueados neste computador.".into()
+            }
+            _ => "Sites perigosos e adultos estão bloqueados neste computador.".into(),
+        },
         UiState::Parcial => match snapshot {
             Some(s) if s.manifest_corrupt() => {
                 "O registro da proteção está danificado. Clique em \"Desativar proteção\" para limpar e começar de novo."
@@ -198,7 +247,14 @@ pub fn technical_details(s: &Snapshot, last_error: &str) -> String {
     let mut t = format!("Backend de DNS: {}\n", s.backend);
     // O filtro só é citado quando há proteção gravada.
     if !matches!(s.status, ProtectionStatus::Unprotected) {
-        t.push_str("Filtro: Cloudflare for Families (1.1.1.3 / 1.0.0.3)\n");
+        match s.mode.unwrap_or_default() {
+            crate::config::FilterMode::Family => {
+                t.push_str("Filtro: Cloudflare for Families (1.1.1.3 / 1.0.0.3)\n")
+            }
+            crate::config::FilterMode::AdsOnly => {
+                t.push_str("Filtro: AdGuard DNS Padrão (94.140.14.14 / 94.140.15.15)\n")
+            }
+        }
     }
     t.push_str(&format!(
         "Manifesto: {}\nNavegadores: {}\n",
@@ -291,6 +347,7 @@ mod tests {
             status,
             browsers: vec![("Edge", true)],
             missing_blocker: missing.iter().map(|s| s.to_string()).collect(),
+            mode: None,
             manifest_path: String::new(),
             backend: String::new(),
         }
@@ -443,5 +500,39 @@ mod tests {
         let un = snap(ProtectionStatus::Unprotected, &[]);
         assert!(verdict(UiState::Desprotegido, Some(&un)).contains("não está protegido"));
         assert!(verdict(UiState::Protegido, None).contains("está protegido"));
+    }
+
+    #[test]
+    fn navegadores_recomendados_tem_links_oficiais() {
+        let nomes: Vec<&str> = RECOMMENDED_BROWSERS.iter().map(|r| r.name).collect();
+        assert_eq!(
+            nomes,
+            [
+                "Brave",
+                "Helium",
+                "Zen Browser + uBlock Origin",
+                "Mullvad Browser",
+                "LibreWolf"
+            ]
+        );
+        for r in &RECOMMENDED_BROWSERS {
+            assert!(
+                r.url.starts_with("https://") && !r.url.contains(' '),
+                "{}",
+                r.url
+            );
+            assert!(!r.note.is_empty() && !r.profile.is_empty());
+        }
+    }
+
+    #[test]
+    fn descricao_e_detalhes_por_modo() {
+        let mut s = snap(ProtectionStatus::Protected, &[]);
+        s.mode = Some(crate::config::FilterMode::AdsOnly);
+        assert!(description(UiState::Protegido, Some(&s)).contains("Anúncios"));
+        assert!(technical_details(&s, "").contains("AdGuard"));
+        assert!(!technical_details(&s, "").contains("Cloudflare"));
+        s.mode = Some(crate::config::FilterMode::Family);
+        assert!(technical_details(&s, "").contains("Cloudflare"));
     }
 }

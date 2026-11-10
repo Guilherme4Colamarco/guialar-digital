@@ -19,6 +19,10 @@ const ID_CHECK: usize = 103;
 const ID_RESTORE: usize = 104;
 const ID_DETAILS: usize = 106;
 const ID_COPY: usize = 107;
+const ID_MODE_FAMILY: usize = 108;
+const ID_MODE_ADS: usize = 109;
+const ID_RECS: usize = 110;
+const ID_OPEN_BASE: usize = 120; // 120..124: abrir site de cada navegador recomendado
 const TIMER_PROGRESS: usize = 1;
 const WM_APP_DONE: u32 = 0x8001;
 const WM_APP_SNAPSHOT: u32 = 0x8002;
@@ -32,6 +36,7 @@ static STATE: Mutex<AppState> = Mutex::new(AppState {
     error_detail: String::new(),
     busy: false,
     details_open: false,
+    recs_open: false,
     tick: 0,
 });
 
@@ -42,6 +47,8 @@ struct AppState {
     error_detail: String,
     busy: bool,
     details_open: bool,
+    /// Página "Navegadores recomendados" no lugar do painel principal.
+    recs_open: bool,
     tick: u32,
 }
 
@@ -63,6 +70,13 @@ static BUTTONS: Mutex<[usize; 4]> = Mutex::new([0; 4]);
 static EXTRA: Mutex<[usize; 2]> = Mutex::new([0; 2]);
 /// Controle de texto real só para leitores de tela (o status é desenhado em GDI).
 static STATUS_LABEL: AtomicIsize = AtomicIsize::new(0);
+/// Seletor de filtro: [família, só anúncios] e botão "Navegadores recomendados".
+static RADIOS: Mutex<[usize; 2]> = Mutex::new([0; 2]);
+static REC_TOGGLE: AtomicIsize = AtomicIsize::new(0);
+static REC_OPEN: Mutex<[usize; 5]> = Mutex::new([0; 5]);
+static MODE_ADS: AtomicBool = AtomicBool::new(false);
+/// Pincel de fundo para os rádios (a cor muda com o tema).
+static BG_BRUSH: AtomicIsize = AtomicIsize::new(0);
 
 fn palette() -> Palette {
     if DARK.load(Ordering::Relaxed) {
@@ -168,9 +182,14 @@ struct Layout {
     status: RECT,
     details_toggle: RECT,
     details_panel: RECT,
+    modes: [RECT; 2],
+    rec_toggle: RECT,
+    rec_panel: RECT,
+    rec_rows: [RECT; 5],
+    rec_back: RECT,
 }
 
-fn layout(client_w: i32, dpi: u32, n_cards: usize) -> Layout {
+fn layout(client_w: i32, dpi: u32, n_cards: usize, show_modes: bool) -> Layout {
     let m = dp(24, dpi);
     let wd = client_w - 2 * m;
     let mut y = dp(16, dpi);
@@ -185,9 +204,22 @@ fn layout(client_w: i32, dpi: u32, n_cards: usize) -> Layout {
         left: m,
         top: y,
         right: m + wd,
-        bottom: y + dp(112, dpi),
+        bottom: y + dp(100, dpi),
     };
-    y = hero.bottom + dp(14, dpi);
+    y = hero.bottom + dp(12, dpi);
+    let mut modes = [RECT::default(); 2];
+    if show_modes {
+        for r in modes.iter_mut() {
+            *r = RECT {
+                left: m + dp(8, dpi),
+                top: y,
+                right: m + wd,
+                bottom: y + dp(30, dpi),
+            };
+            y = r.bottom;
+        }
+        y += dp(10, dpi);
+    }
     let mut cards = Vec::with_capacity(n_cards);
     for _ in 0..n_cards {
         let c = RECT {
@@ -217,6 +249,35 @@ fn layout(client_w: i32, dpi: u32, n_cards: usize) -> Layout {
         right: m + wd,
         bottom: details_toggle.bottom + dp(6 + 176, dpi),
     };
+    let rec_toggle = RECT {
+        left: m + dp(212, dpi),
+        top: details_toggle.top,
+        right: m + dp(212 + 250, dpi),
+        bottom: details_toggle.bottom,
+    };
+    // Página "Navegadores recomendados": ocupa o lugar do painel principal.
+    let rec_panel = RECT {
+        left: m,
+        top: hero.top,
+        right: m + wd,
+        bottom: hero.top + dp(5 * 48 + 12, dpi),
+    };
+    let mut rec_rows = [RECT::default(); 5];
+    for (i, r) in rec_rows.iter_mut().enumerate() {
+        let top = rec_panel.top + dp(6 + i as i32 * 48, dpi);
+        *r = RECT {
+            left: rec_panel.left,
+            top,
+            right: rec_panel.right,
+            bottom: top + dp(48, dpi),
+        };
+    }
+    let rec_back = RECT {
+        left: m,
+        top: rec_panel.bottom + dp(12, dpi),
+        right: m + dp(200, dpi),
+        bottom: rec_panel.bottom + dp(12 + 36, dpi),
+    };
     Layout {
         margin: m,
         header,
@@ -225,6 +286,11 @@ fn layout(client_w: i32, dpi: u32, n_cards: usize) -> Layout {
         status,
         details_toggle,
         details_panel,
+        modes,
+        rec_toggle,
+        rec_panel,
+        rec_rows,
+        rec_back,
     }
 }
 
@@ -263,6 +329,19 @@ fn apply_theme(hwnd: HWND) {
         });
         let mut all: Vec<usize> = BUTTONS.lock().unwrap().to_vec();
         all.extend(EXTRA.lock().unwrap().iter());
+        all.push(REC_TOGGLE.load(Ordering::Relaxed) as usize);
+        all.extend(REC_OPEN.lock().unwrap().iter());
+        // Rádios: sem tema visual, para respeitar as cores do fundo escuro/claro.
+        for r in RADIOS.lock().unwrap().iter().filter(|r| **r != 0) {
+            SetWindowTheme(*r as HWND, w("").as_ptr(), w("").as_ptr());
+        }
+        let old = BG_BRUSH.swap(
+            CreateSolidBrush(rgb(p.background)) as isize,
+            Ordering::Relaxed,
+        );
+        if old != 0 {
+            DeleteObject(old as HGDIOBJ);
+        }
         for b in all.iter().filter(|b| **b != 0) {
             allow_dark_mode_for_window(*b as HWND, dark == 1);
             SetWindowTheme(*b as HWND, theme.as_ptr(), std::ptr::null());
@@ -318,17 +397,23 @@ fn place_buttons(hwnd: HWND) {
         GetClientRect(hwnd, &mut rc);
         GetDpiForWindow(hwnd).max(96)
     };
-    let (actions, ui_st, open, busy) = {
+    let (actions, ui_st, open, busy, recs) = {
         let st = STATE.lock().unwrap();
-        let a = actions_of(&st.snapshot);
+        let a = if st.recs_open {
+            Vec::new()
+        } else {
+            actions_of(&st.snapshot)
+        };
         (
             a,
             theme::ui_state(st.snapshot.as_ref(), false),
-            st.details_open,
+            st.details_open && !st.recs_open,
             st.busy,
+            st.recs_open,
         )
     };
-    let l = layout(rc.right, dpi, actions.len());
+    let show_modes = ui_st == theme::UiState::Desprotegido && !recs;
+    let l = layout(rc.right, dpi, actions.len(), show_modes);
     let b = *BUTTONS.lock().unwrap();
     let all = [
         theme::Action::Activate,
@@ -410,9 +495,60 @@ fn place_buttons(hwnd: HWND) {
             ch,
             1,
         );
-        ShowWindow(e[1] as HWND, if open { 5 } else { SW_HIDE });
+        ShowWindow(e[1] as HWND, if open && !recs { 5 } else { SW_HIDE });
         EnableWindow(e[1] as HWND, (!busy) as i32);
         EnableWindow(e[0] as HWND, 1);
+        ShowWindow(e[0] as HWND, if recs { SW_HIDE } else { 5 });
+        // Seletor de filtro (só desprotegido) e página de navegadores recomendados.
+        let radios = *RADIOS.lock().unwrap();
+        for (i, h) in radios.iter().enumerate() {
+            let r = l.modes[i];
+            MoveWindow(
+                *h as HWND,
+                r.left,
+                r.top,
+                r.right - r.left,
+                r.bottom - r.top,
+                1,
+            );
+            ShowWindow(*h as HWND, if show_modes { 5 } else { SW_HIDE });
+            EnableWindow(*h as HWND, (!busy) as i32);
+        }
+        let rt = REC_TOGGLE.load(Ordering::Relaxed) as HWND;
+        let rr = if recs { l.rec_back } else { l.rec_toggle };
+        MoveWindow(
+            rt,
+            rr.left,
+            rr.top,
+            rr.right - rr.left,
+            rr.bottom - rr.top,
+            1,
+        );
+        SetWindowTextW(
+            rt,
+            w(if recs {
+                "\u{2190}  Voltar"
+            } else {
+                "Navegadores recomendados"
+            })
+            .as_ptr(),
+        );
+        let opens = *REC_OPEN.lock().unwrap();
+        for (i, h) in opens.iter().enumerate() {
+            let r = l.rec_rows[i];
+            let bw = dp(110, dpi);
+            let bh = dp(32, dpi);
+            let cy = (r.top + r.bottom) / 2;
+            MoveWindow(
+                *h as HWND,
+                r.right - dp(12, dpi) - bw,
+                cy - bh / 2,
+                bw,
+                bh,
+                1,
+            );
+            ShowWindow(*h as HWND, if recs { 5 } else { SW_HIDE });
+        }
         if !busy {
             if let Some(first) = actions.first() {
                 let idx = *first as usize;
@@ -533,7 +669,7 @@ fn paint(hwnd: HWND) {
 fn draw(dc: HDC, rc: &RECT, dpi: u32) {
     let p = palette();
     let Some(f) = current_fonts() else { return };
-    let (snapshot, message, busy, tick, open, err) = {
+    let (snapshot, message, busy, tick, open, err, recs) = {
         let s = STATE.lock().unwrap();
         (
             s.snapshot.clone(),
@@ -542,10 +678,17 @@ fn draw(dc: HDC, rc: &RECT, dpi: u32) {
             s.tick,
             s.details_open,
             s.error_detail.clone(),
+            s.recs_open,
         )
     };
-    let actions = actions_of(&snapshot);
-    let l = layout(rc.right, dpi, actions.len());
+    let actions = if recs {
+        Vec::new()
+    } else {
+        actions_of(&snapshot)
+    };
+    let show_modes =
+        !recs && theme::ui_state(snapshot.as_ref(), false) == theme::UiState::Desprotegido;
+    let l = layout(rc.right, dpi, actions.len(), show_modes);
     // SAFETY: GDI no DC em memória desta pintura.
     unsafe {
         let bg = CreateSolidBrush(rgb(p.background));
@@ -603,6 +746,49 @@ fn draw(dc: HDC, rc: &RECT, dpi: u32) {
         DT_ONE_LINE,
     );
 
+    // Página "Navegadores recomendados": só informativa, nada é instalado.
+    if recs {
+        card_frame(dc, &l.rec_panel, &p, dpi);
+        for (r, rec) in l.rec_rows.iter().zip(theme::RECOMMENDED_BROWSERS.iter()) {
+            let right = r.right - dp(12 + 110 + 12, dpi);
+            let mut t = RECT {
+                left: r.left + dp(20, dpi),
+                top: r.top + dp(4, dpi),
+                right,
+                bottom: r.top + dp(26, dpi),
+            };
+            text(
+                dc,
+                f.body,
+                p.text,
+                &format!("{} — {}", rec.name, rec.profile),
+                &mut t,
+                DT_ONE_LINE,
+            );
+            let mut t = RECT {
+                left: r.left + dp(20, dpi),
+                top: r.top + dp(26, dpi),
+                right,
+                bottom: r.bottom - dp(2, dpi),
+            };
+            text(dc, f.body, p.text_secondary, rec.note, &mut t, DT_ONE_LINE);
+        }
+        let mut t = RECT {
+            left: l.rec_back.right + dp(12, dpi),
+            top: l.rec_back.top,
+            right: l.status.right,
+            bottom: l.rec_back.bottom,
+        };
+        text(
+            dc,
+            f.body,
+            p.text_secondary,
+            "Só informativo: o GuiaLar não instala nem altera nada.",
+            &mut t,
+            DT_ONE_LINE,
+        );
+        return;
+    }
     // Hero de status.
     let ui_st = theme::ui_state(snapshot.as_ref(), busy);
     card_frame(dc, &l.hero, &p, dpi);
@@ -826,6 +1012,45 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: usize, lp: isize) ->
                 std::ptr::null_mut(),
             );
             STATUS_LABEL.store(label as isize, Ordering::Relaxed);
+            {
+                // Seletor de filtro (rádios) e página de navegadores recomendados.
+                let mk = |id: usize, text: &str, style: u32| -> HWND {
+                    CreateWindowExW(
+                        0,
+                        w("BUTTON").as_ptr(),
+                        w(text).as_ptr(),
+                        style,
+                        0,
+                        0,
+                        10,
+                        10,
+                        hwnd,
+                        id as *mut c_void,
+                        GetModuleHandleW(std::ptr::null()),
+                        std::ptr::null_mut(),
+                    )
+                };
+                let radio = 0x5000_0000 | 0x9; // WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_AUTORADIOBUTTON
+                let fam = mk(
+                    ID_MODE_FAMILY,
+                    "Proteção familiar: bloqueia sites perigosos e adultos, e instala o bloqueador de anúncios",
+                    radio | 0x0002_0000,
+                );
+                let ads = mk(
+                    ID_MODE_ADS,
+                    "Só bloquear anúncios: bloqueia anúncios e rastreadores, sem filtrar conteúdo adulto",
+                    radio,
+                );
+                SendMessageW(fam, 0x00F1, 1, 0); // BM_SETCHECK
+                *RADIOS.lock().unwrap() = [fam as usize, ads as usize];
+                let rec = mk(ID_RECS, "Navegadores recomendados", 0x5000_0000);
+                REC_TOGGLE.store(rec as isize, Ordering::Relaxed);
+                let mut opens = [0usize; 5];
+                for (i, o) in opens.iter_mut().enumerate() {
+                    *o = mk(ID_OPEN_BASE + i, "Abrir site", 0x5000_0000) as usize;
+                }
+                *REC_OPEN.lock().unwrap() = opens;
+            }
             apply_theme(hwnd);
             place_buttons(hwnd);
             spawn_snapshot();
@@ -844,6 +1069,17 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: usize, lp: isize) ->
             }
             DestroyWindow(hwnd);
             0
+        }
+        0x0135 | 0x0138 => {
+            // WM_CTLCOLORBTN / WM_CTLCOLORSTATIC: rádios com as cores do tema.
+            let is_radio = RADIOS.lock().unwrap().iter().any(|r| *r as isize == lp);
+            if is_radio {
+                let p = palette();
+                SetTextColor(wp as HDC, rgb(p.text));
+                SetBkColor(wp as HDC, rgb(p.background));
+                return BG_BRUSH.load(Ordering::Relaxed);
+            }
+            DefWindowProcW(hwnd, msg, wp, lp)
         }
         0x0024 => {
             // WM_GETMINMAXINFO: tamanho mínimo da janela (E9).
@@ -915,7 +1151,27 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: usize, lp: isize) ->
                     .unwrap_or(0);
             }
             match id {
-                ID_ACTIVATE => spawn_action(hwnd, super::action_activate),
+                ID_MODE_FAMILY => MODE_ADS.store(false, Ordering::Relaxed),
+                ID_MODE_ADS => MODE_ADS.store(true, Ordering::Relaxed),
+                ID_RECS => {
+                    {
+                        let mut st = STATE.lock().unwrap();
+                        st.recs_open = !st.recs_open;
+                    }
+                    place_buttons(hwnd);
+                    InvalidateRect(hwnd, std::ptr::null(), 1);
+                }
+                i if (ID_OPEN_BASE..ID_OPEN_BASE + 5).contains(&i) => {
+                    open_url(theme::RECOMMENDED_BROWSERS[i - ID_OPEN_BASE].url);
+                }
+                ID_ACTIVATE => {
+                    crate::config::set_mode(if MODE_ADS.load(Ordering::Relaxed) {
+                        crate::config::FilterMode::AdsOnly
+                    } else {
+                        crate::config::FilterMode::Family
+                    });
+                    spawn_action(hwnd, super::action_activate)
+                }
                 ID_BROWSERS => spawn_action(hwnd, super::action_browsers),
                 ID_RESTORE => {
                     // Desativar tira a proteção da família: pede confirmação (E5).
@@ -1041,7 +1297,7 @@ pub fn run() -> Result<()> {
             0x8000_0000u32 as i32,
             0x8000_0000u32 as i32,
             740,
-            740,
+            790,
             std::ptr::null_mut(),
             std::ptr::null_mut(),
             inst,
@@ -1057,7 +1313,7 @@ pub fn run() -> Result<()> {
             0,
             0,
             dp(740, dpi),
-            dp(740, dpi),
+            dp(790, dpi),
             0x2 | 0x4 | 0x10,
         ); // NOMOVE|NOZORDER|NOACTIVATE
         ShowWindow(hwnd, SW_SHOWNORMAL);

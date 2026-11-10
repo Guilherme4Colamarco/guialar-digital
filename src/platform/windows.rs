@@ -4,9 +4,7 @@ use anyhow::{bail, Context, Result};
 use std::net::Ipv4Addr;
 use std::process::Command;
 
-use crate::config::{
-    BackendKind, ConnectionBackup, DnsStateManifest, CLOUDFLARE_IPV4, CLOUDFLARE_IPV6,
-};
+use crate::config::{current_mode, BackendKind, ConnectionBackup, DnsStateManifest};
 use crate::sysutil::{encode_powershell, is_safe_ps_alias};
 
 /// Prefixo: saída UTF-8 e erro fatal (um cmdlet que falha deve falhar o processo).
@@ -71,19 +69,63 @@ pub fn elevate_if_needed(subcomando: &str) -> Result<bool> {
 }
 
 pub fn apply_dns() -> Result<()> {
-    if elevate_if_needed("internal-apply")? {
+    if elevate_if_needed(&format!(
+        "internal-apply --mode {}",
+        current_mode().cli_name()
+    ))? {
         return Ok(());
     }
     apply_core()
 }
 
+/// Troca o filtro mantendo o DNS original do manifesto (e tirando as políticas de navegador
+/// quando o novo modo é só anúncios).
+pub fn switch_mode(mut manifest: DnsStateManifest) -> Result<()> {
+    if elevate_if_needed(&format!(
+        "internal-apply --mode {}",
+        current_mode().cli_name()
+    ))? {
+        return Ok(());
+    }
+    let _lock = crate::sysutil::OpLock::acquire()?;
+    let mode = current_mode();
+    let servers = format!(
+        "'{}','{}','{}','{}'",
+        mode.ipv4()[0],
+        mode.ipv4()[1],
+        mode.ipv6()[0],
+        mode.ipv6()[1]
+    );
+    for conn in &manifest.connections {
+        if !is_safe_ps_alias(&conn.id) {
+            bail!("alias inválido no manifesto: {:?}", conn.id);
+        }
+        run_powershell(&format!(
+            "Set-DnsClientServerAddress -InterfaceAlias '{}' -ServerAddresses @({servers})",
+            conn.id
+        ))?;
+    }
+    if mode == crate::config::FilterMode::AdsOnly {
+        crate::policy::revert_all()?;
+    }
+    manifest.mode = mode;
+    manifest.save_atomic()?;
+    flush_dns();
+    Ok(())
+}
+
 /// DNS + políticas dos navegadores com um único prompt de UAC.
 pub fn apply_all() -> Result<()> {
-    if elevate_if_needed("internal-setup")? {
+    if elevate_if_needed(&format!(
+        "internal-setup --mode {}",
+        current_mode().cli_name()
+    ))? {
         return Ok(());
     }
     apply_core()?;
-    crate::policy::install_all()?;
+    if current_mode() == crate::config::FilterMode::Family {
+        crate::policy::install_all()?; // políticas de navegador só no modo familiar
+    }
     Ok(())
 }
 
@@ -96,7 +138,10 @@ fn apply_core() -> Result<()> {
     }
     let servers = format!(
         "'{}','{}','{}','{}'",
-        CLOUDFLARE_IPV4[0], CLOUDFLARE_IPV4[1], CLOUDFLARE_IPV6[0], CLOUDFLARE_IPV6[1]
+        current_mode().ipv4()[0],
+        current_mode().ipv4()[1],
+        current_mode().ipv6()[0],
+        current_mode().ipv6()[1]
     );
     let mut manifest = DnsStateManifest::new(BackendKind::WindowsPowerShell);
     for (alias, index) in &interfaces {
@@ -205,7 +250,7 @@ pub fn cloudflare_dns_active() -> bool {
             o.trim()
                 .split(',')
                 .filter_map(|s| s.trim().parse::<Ipv4Addr>().ok())
-                .any(|ip| CLOUDFLARE_IPV4.contains(&ip))
+                .any(|ip| crate::config::is_filter_ipv4(&ip))
         })
         .unwrap_or(false)
 }

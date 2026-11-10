@@ -13,9 +13,7 @@ use std::net::Ipv4Addr;
 use std::path::Path;
 use std::process::Command;
 
-use crate::config::{
-    BackendKind, ConnectionBackup, DnsStateManifest, CLOUDFLARE_IPV4, CLOUDFLARE_IPV6,
-};
+use crate::config::{current_mode, BackendKind, ConnectionBackup, DnsStateManifest};
 
 /// Detecta qual subsistema de DNS está ativo no ambiente Linux.
 pub fn detect_active_backend() -> BackendKind {
@@ -62,7 +60,7 @@ fn elevate_self(subcommand: &str) -> Result<()> {
             v.extend(["env".into(), "APPIMAGE_EXTRACT_AND_RUN=1".into()]);
         }
         v.push(exe.clone().into_os_string());
-        v.push(subcommand.into());
+        v.extend(subcommand.split_whitespace().map(std::ffi::OsString::from));
         v
     };
     let run = |tool: &str| -> Option<std::process::ExitStatus> {
@@ -114,7 +112,7 @@ pub fn cloudflare_dns_active() -> bool {
                 l.split_whitespace()
                     .nth(1)
                     .and_then(|v| v.parse::<Ipv4Addr>().ok())
-                    .is_some_and(|ip| CLOUDFLARE_IPV4.contains(&ip))
+                    .is_some_and(|ip| crate::config::is_filter_ipv4(&ip))
             })
     };
     if fs::read_to_string("/etc/resolv.conf")
@@ -127,7 +125,7 @@ pub fn cloudflare_dns_active() -> bool {
         if let Ok(uuids) = get_active_nm_connections() {
             for uuid in uuids {
                 if let Ok(b) = inspect_nm_connection_raw(&uuid) {
-                    if b.0.iter().any(|ip| CLOUDFLARE_IPV4.contains(ip)) {
+                    if b.0.iter().any(crate::config::is_filter_ipv4) {
                         return true;
                     }
                 }
@@ -167,9 +165,7 @@ pub fn revert_dns_fallback() -> Result<()> {
                 .filter(|l| !l.contains("Gerado pelo GuiaLar"))
                 .filter(|l| {
                     !(l.trim_start().starts_with("nameserver")
-                        && (l.contains("1.1.1.3")
-                            || l.contains("1.0.0.3")
-                            || l.contains("2606:4700:4700::")))
+                        && crate::config::line_has_filter_ip(l))
                 })
                 .collect();
             write_resolv_conf(&(limpo.join("\n") + "\n"))?;
@@ -179,10 +175,69 @@ pub fn revert_dns_fallback() -> Result<()> {
     Ok(())
 }
 
-/// Aplica a proteção familiar conforme o backend detectado.
+/// Troca o filtro com a proteção ligada, mantendo o DNS original do manifesto.
+pub fn switch_mode(mut manifest: DnsStateManifest) -> Result<()> {
+    if !crate::sysutil::is_root() {
+        return elevate_self(&format!(
+            "internal-apply --mode {}",
+            current_mode().cli_name()
+        ));
+    }
+    let _lock = crate::sysutil::OpLock::acquire()?;
+    match manifest.backend {
+        BackendKind::NetworkManager => {
+            let mode = current_mode();
+            let v4 = format!("{} {}", mode.ipv4()[0], mode.ipv4()[1]);
+            let v6 = format!("{} {}", mode.ipv6()[0], mode.ipv6()[1]);
+            for conn in &manifest.connections {
+                let u = &conn.id;
+                run_privileged_command(
+                    "nmcli",
+                    &[
+                        "connection",
+                        "modify",
+                        u,
+                        "ipv4.dns",
+                        &v4,
+                        "ipv4.ignore-auto-dns",
+                        "yes",
+                    ],
+                )?;
+                let _ = run_privileged_command(
+                    "nmcli",
+                    &[
+                        "connection",
+                        "modify",
+                        u,
+                        "ipv6.dns",
+                        &v6,
+                        "ipv6.ignore-auto-dns",
+                        "yes",
+                    ],
+                );
+                run_privileged_command("nmcli", &["connection", "up", "uuid", u])?;
+            }
+        }
+        BackendKind::SystemdResolved => apply_systemd_resolved(&mut manifest.clone())?,
+        BackendKind::OpenResolvRunit => apply_openresolv_runit(&mut manifest.clone())?,
+        BackendKind::DirectResolvConf => {
+            // `apply_direct_resolv_conf` regravaria o backup: usa uma cópia descartável.
+            apply_direct_resolv_conf(&mut manifest.clone())?;
+        }
+        BackendKind::WindowsPowerShell => bail!("Backend Windows chamado em ambiente Linux"),
+    }
+    manifest.mode = current_mode();
+    manifest.save_atomic()?;
+    Ok(())
+}
+
+/// Aplica a proteção conforme o backend detectado e o modo escolhido.
 pub fn apply_dns() -> Result<()> {
     if !crate::sysutil::is_root() {
-        return elevate_self("internal-apply");
+        return elevate_self(&format!(
+            "internal-apply --mode {}",
+            current_mode().cli_name()
+        ));
     }
     let _lock = crate::sysutil::OpLock::acquire()?;
     let backend = detect_active_backend();
@@ -248,8 +303,8 @@ fn apply_network_manager(manifest: &mut DnsStateManifest) -> Result<()> {
         bail!("Nenhuma conexão ativa do NetworkManager (ethernet/wifi) encontrada");
     }
 
-    let ipv4_str = format!("{} {}", CLOUDFLARE_IPV4[0], CLOUDFLARE_IPV4[1]);
-    let ipv6_str = format!("{} {}", CLOUDFLARE_IPV6[0], CLOUDFLARE_IPV6[1]);
+    let ipv4_str = format!("{} {}", current_mode().ipv4()[0], current_mode().ipv4()[1]);
+    let ipv6_str = format!("{} {}", current_mode().ipv6()[0], current_mode().ipv6()[1]);
 
     for uuid in &active_uuids {
         let backup = inspect_nm_connection(uuid)?;
@@ -426,7 +481,10 @@ fn apply_systemd_resolved(_manifest: &mut DnsStateManifest) -> Result<()> {
 
     let conf_content = format!(
         "[Resolve]\nDNS={} {} {} {}\nFallbackDNS=1.1.1.1 8.8.8.8\n",
-        CLOUDFLARE_IPV4[0], CLOUDFLARE_IPV4[1], CLOUDFLARE_IPV6[0], CLOUDFLARE_IPV6[1]
+        current_mode().ipv4()[0],
+        current_mode().ipv4()[1],
+        current_mode().ipv6()[0],
+        current_mode().ipv6()[1]
     );
 
     let temp_file = "/tmp/99-guialar.conf.tmp";
@@ -457,7 +515,10 @@ fn revert_systemd_resolved() -> Result<()> {
 fn apply_openresolv_runit(_manifest: &mut DnsStateManifest) -> Result<()> {
     let conf = format!(
         "nameserver {}\nnameserver {}\nnameserver {}\nnameserver {}\n",
-        CLOUDFLARE_IPV4[0], CLOUDFLARE_IPV4[1], CLOUDFLARE_IPV6[0], CLOUDFLARE_IPV6[1]
+        current_mode().ipv4()[0],
+        current_mode().ipv4()[1],
+        current_mode().ipv6()[0],
+        current_mode().ipv6()[1]
     );
 
     let mut child = privileged_command("resolvconf", &["-a", "guialar"])
@@ -499,7 +560,7 @@ fn apply_direct_resolv_conf(manifest: &mut DnsStateManifest) -> Result<()> {
 
     let content = format!(
         "# Gerado pelo GuiaLar Digital - Protecao Familiar\nnameserver {}\nnameserver {}\nnameserver {}\nnameserver {}\n",
-        CLOUDFLARE_IPV4[0], CLOUDFLARE_IPV4[1], CLOUDFLARE_IPV6[0], CLOUDFLARE_IPV6[1]
+        current_mode().ipv4()[0], current_mode().ipv4()[1], current_mode().ipv6()[0], current_mode().ipv6()[1]
     );
 
     write_resolv_conf(&content)

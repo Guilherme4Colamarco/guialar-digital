@@ -99,3 +99,33 @@ fn gui_without_display_fails_cleanly() {
     assert!(!out.status.success(), "gui sem display deve falhar");
     assert!(String::from_utf8_lossy(&out.stderr).contains("ambiente gráfico"));
 }
+
+#[test]
+fn apply_mode_option_is_documented_and_validated() {
+    let out = bin()
+        .args(["apply", "--help"])
+        .output()
+        .expect("apply --help");
+    assert!(out.status.success());
+    let help = String::from_utf8_lossy(&out.stdout);
+    assert!(help.contains("--mode"), "help deve citar --mode: {help}");
+    assert!(help.contains("family") && help.contains("ads"));
+
+    let bad = bin()
+        .args(["apply", "--mode", "banana"])
+        .output()
+        .expect("modo inválido");
+    assert_eq!(bad.status.code(), Some(2), "modo inválido deve sair 2");
+}
+
+#[test]
+fn apply_mode_ads_alias_is_accepted_by_parser() {
+    // `--help` curto-circuita antes de tocar no sistema: só valida o parser.
+    for m in ["family", "ads", "ads-only"] {
+        let out = bin()
+            .args(["apply", "--mode", m, "--help"])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "--mode {m} deve ser aceito");
+    }
+}

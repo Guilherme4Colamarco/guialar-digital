@@ -18,6 +18,109 @@ pub const CLOUDFLARE_IPV6: [Ipv6Addr; 2] = [
     Ipv6Addr::new(0x2606, 0x4700, 0x4700, 0, 0, 0, 0, 0x1003),
 ];
 
+/// IPs do AdGuard DNS "Default" (bloqueia anúncios e rastreadores, sem filtro de conteúdo adulto).
+pub const ADGUARD_IPV4: [Ipv4Addr; 2] = [
+    Ipv4Addr::new(94, 140, 14, 14),
+    Ipv4Addr::new(94, 140, 15, 15),
+];
+
+pub const ADGUARD_IPV6: [Ipv6Addr; 2] = [
+    Ipv6Addr::new(0x2a10, 0x50c0, 0, 0, 0, 0, 0xad1, 0xff),
+    Ipv6Addr::new(0x2a10, 0x50c0, 0, 0, 0, 0, 0xad2, 0xff),
+];
+
+/// Modo de filtro DNS (ADR-022). Os pares de IPs nunca se misturam.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, clap::ValueEnum)]
+pub enum FilterMode {
+    /// Cloudflare for Families: malware + conteúdo adulto.
+    #[default]
+    #[serde(rename = "family")]
+    #[value(name = "family")]
+    Family,
+    /// AdGuard DNS Default: só anúncios e rastreadores.
+    #[serde(rename = "ads")]
+    #[value(name = "ads", alias = "ads-only")]
+    AdsOnly,
+}
+
+impl FilterMode {
+    pub fn ipv4(self) -> [Ipv4Addr; 2] {
+        match self {
+            Self::Family => CLOUDFLARE_IPV4,
+            Self::AdsOnly => ADGUARD_IPV4,
+        }
+    }
+
+    pub fn ipv6(self) -> [Ipv6Addr; 2] {
+        match self {
+            Self::Family => CLOUDFLARE_IPV6,
+            Self::AdsOnly => ADGUARD_IPV6,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Family => "Proteção familiar",
+            Self::AdsOnly => "Só bloquear anúncios",
+        }
+    }
+
+    /// Nome cuja resolução prova que o filtro está respondendo.
+    pub fn probe_host(self) -> &'static str {
+        match self {
+            Self::Family => "family.cloudflare-dns.com",
+            Self::AdsOnly => "dns.adguard-dns.com",
+        }
+    }
+
+    /// Argumento da CLI (`--mode`).
+    pub fn cli_name(self) -> &'static str {
+        match self {
+            Self::Family => "family",
+            Self::AdsOnly => "ads",
+        }
+    }
+}
+
+/// `true` se o IPv4 pertence a QUALQUER filtro do GuiaLar (nunca vira "DNS original").
+pub fn is_filter_ipv4(ip: &Ipv4Addr) -> bool {
+    CLOUDFLARE_IPV4.contains(ip) || ADGUARD_IPV4.contains(ip)
+}
+
+#[cfg_attr(windows, allow(dead_code))]
+pub fn is_filter_ipv6(ip: &Ipv6Addr) -> bool {
+    CLOUDFLARE_IPV6.contains(ip) || ADGUARD_IPV6.contains(ip)
+}
+
+/// A linha (resolv.conf etc.) cita algum IP de filtro do GuiaLar?
+#[cfg_attr(windows, allow(dead_code))]
+pub fn line_has_filter_ip(line: &str) -> bool {
+    line.split_whitespace()
+        .any(|t| match t.parse::<std::net::IpAddr>() {
+            Ok(std::net::IpAddr::V4(v4)) => is_filter_ipv4(&v4),
+            Ok(std::net::IpAddr::V6(v6)) => is_filter_ipv6(&v6),
+            Err(_) => false,
+        })
+}
+
+static MODE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// Modo escolhido para esta execução (`apply --mode`, seletor da GUI).
+pub fn set_mode(m: FilterMode) {
+    MODE.store(
+        matches!(m, FilterMode::AdsOnly) as u8,
+        std::sync::atomic::Ordering::SeqCst,
+    );
+}
+
+pub fn current_mode() -> FilterMode {
+    if MODE.load(std::sync::atomic::Ordering::SeqCst) == 1 {
+        FilterMode::AdsOnly
+    } else {
+        FilterMode::Family
+    }
+}
+
 /// Backend utilizado no momento da aplicação do DNS.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum BackendKind {
@@ -32,7 +135,7 @@ pub enum BackendKind {
 /// rede já filtrada): nesse caso a interface é tratada como DHCP, sem IPs fixos.
 pub fn sanitize_original_dns(ips: Vec<Ipv4Addr>, was_dhcp: bool) -> (Vec<Ipv4Addr>, bool) {
     // Sem IPs fixos não há o que restaurar além do automático.
-    if ips.is_empty() || ips.iter().all(|ip| CLOUDFLARE_IPV4.contains(ip)) {
+    if ips.is_empty() || ips.iter().all(is_filter_ipv4) {
         (Vec::new(), true)
     } else {
         (ips, was_dhcp)
@@ -56,6 +159,9 @@ pub struct DnsStateManifest {
     pub applied_at_utc: String,
     pub connections: Vec<ConnectionBackup>,
     pub previous_resolv_conf: Option<String>,
+    /// Filtro ativo. Manifestos antigos (sem o campo) são `family`.
+    #[serde(default)]
+    pub mode: FilterMode,
 }
 
 impl DnsStateManifest {
@@ -68,6 +174,7 @@ impl DnsStateManifest {
                 .unwrap_or_else(|_| "0".into()),
             connections: Vec::new(),
             previous_resolv_conf: None,
+            mode: current_mode(),
         }
     }
 
@@ -210,6 +317,7 @@ mod qa_tests {
                 was_dhcp_ipv6: false,
             }],
             previous_resolv_conf: Some("nameserver 10.0.0.1\n".into()),
+            mode: FilterMode::AdsOnly,
         };
 
         let json = serde_json::to_string(&manifest).expect("serializa");
@@ -220,6 +328,7 @@ mod qa_tests {
         assert_eq!(parsed.connections[0].original_ipv6_dns.len(), 1);
         assert!(parsed.connections[0].was_dhcp_ipv4);
         assert!(!parsed.connections[0].was_dhcp_ipv6);
+        assert_eq!(parsed.mode, FilterMode::AdsOnly);
         assert_eq!(
             parsed.previous_resolv_conf.as_deref(),
             Some("nameserver 10.0.0.1\n")
@@ -282,5 +391,67 @@ mod qa_tests {
         assert_eq!(sanitize_original_dns(misto.clone(), false), (misto, false));
         assert_eq!(sanitize_original_dns(Vec::new(), true), (Vec::new(), true));
         assert_eq!(sanitize_original_dns(Vec::new(), false), (Vec::new(), true));
+    }
+
+    #[test]
+    fn tabela_de_ips_por_modo() {
+        assert_eq!(
+            FilterMode::Family.ipv4(),
+            [Ipv4Addr::new(1, 1, 1, 3), Ipv4Addr::new(1, 0, 0, 3)]
+        );
+        assert_eq!(
+            FilterMode::AdsOnly.ipv4(),
+            [
+                Ipv4Addr::new(94, 140, 14, 14),
+                Ipv4Addr::new(94, 140, 15, 15)
+            ]
+        );
+        assert_eq!(
+            FilterMode::AdsOnly.ipv6()[0].to_string(),
+            "2a10:50c0::ad1:ff"
+        );
+        assert_eq!(
+            FilterMode::AdsOnly.ipv6()[1].to_string(),
+            "2a10:50c0::ad2:ff"
+        );
+        assert_eq!(
+            FilterMode::Family.ipv6()[0].to_string(),
+            "2606:4700:4700::1113"
+        );
+        for ip in FilterMode::Family.ipv4() {
+            assert!(!FilterMode::AdsOnly.ipv4().contains(&ip));
+        }
+    }
+
+    #[test]
+    fn manifesto_antigo_sem_mode_e_family() {
+        let antigo = r#"{"backend":"NetworkManager","applied_at_utc":"1","connections":[],"previous_resolv_conf":null}"#;
+        let m: DnsStateManifest = serde_json::from_str(antigo).unwrap();
+        assert_eq!(m.mode, FilterMode::Family);
+        let novo = r#"{"backend":"NetworkManager","applied_at_utc":"1","connections":[],"previous_resolv_conf":null,"mode":"ads"}"#;
+        let m: DnsStateManifest = serde_json::from_str(novo).unwrap();
+        assert_eq!(m.mode, FilterMode::AdsOnly);
+        assert!(serde_json::to_string(&m)
+            .unwrap()
+            .contains("\"mode\":\"ads\""));
+    }
+
+    #[test]
+    fn sanitize_reconhece_os_dois_conjuntos() {
+        let ads = vec![ADGUARD_IPV4[0], ADGUARD_IPV4[1]];
+        assert_eq!(sanitize_original_dns(ads, false), (Vec::new(), true));
+        let misto = vec![CLOUDFLARE_IPV4[0], ADGUARD_IPV4[0]];
+        assert_eq!(sanitize_original_dns(misto, false), (Vec::new(), true));
+        let casa = vec![Ipv4Addr::new(192, 168, 0, 1), ADGUARD_IPV4[0]];
+        assert_eq!(sanitize_original_dns(casa.clone(), false), (casa, false));
+    }
+
+    #[test]
+    fn linha_com_ip_de_filtro() {
+        assert!(line_has_filter_ip("nameserver 94.140.14.14"));
+        assert!(line_has_filter_ip("nameserver 1.1.1.3"));
+        assert!(line_has_filter_ip("nameserver 2a10:50c0::ad2:ff"));
+        assert!(!line_has_filter_ip("nameserver 10.0.2.3"));
+        assert!(!line_has_filter_ip("# 94.140.14.14x"));
     }
 }

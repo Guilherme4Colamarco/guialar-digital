@@ -112,6 +112,13 @@ mod imp {
         gtk_window_set_icon_name: unsafe extern "C" fn(P, *const c_char),
         gtk_window_present: unsafe extern "C" fn(P),
         adw_toast_dismiss: unsafe extern "C" fn(P),
+        gtk_check_button_new: unsafe extern "C" fn() -> P,
+        gtk_check_button_set_group: unsafe extern "C" fn(P, P),
+        gtk_check_button_set_active: unsafe extern "C" fn(P, c_int),
+        gtk_check_button_get_active: unsafe extern "C" fn(P) -> c_int,
+        adw_action_row_add_prefix: unsafe extern "C" fn(P, P),
+        adw_action_row_set_activatable_widget: unsafe extern "C" fn(P, P),
+        gtk_link_button_new_with_label: unsafe extern "C" fn(*const c_char, *const c_char) -> P,
         g_object_ref: unsafe extern "C" fn(P) -> P,
         gtk_widget_remove_css_class: unsafe extern "C" fn(P, *const c_char),
         gtk_button_set_label: unsafe extern "C" fn(P, *const c_char),
@@ -142,6 +149,8 @@ mod imp {
         window: usize,
         row_check: usize,
         buttons: [usize; 4], // ativar, restaurar, navegadores, verificar
+        modes_group: usize,
+        check_ads: usize,
     }
 
     static BUSY: AtomicBool = AtomicBool::new(false);
@@ -365,6 +374,12 @@ mod imp {
                 actions.contains(&Action::Browsers) as c_int,
             );
             (a.gtk_widget_set_visible)(u.row_check as P, actions.contains(&Action::Check) as c_int);
+            // Seletor de filtro só enquanto desprotegido (escolha antes da ação primária).
+            (a.gtk_widget_set_visible)(
+                u.modes_group as P,
+                (layout_state == theme::UiState::Desprotegido) as c_int,
+            );
+            (a.gtk_widget_set_sensitive)(u.modes_group as P, (!busy) as c_int);
         }
         set_row_subtitle(
             u.row_check,
@@ -506,6 +521,13 @@ mod imp {
     }
 
     unsafe extern "C" fn on_activate_btn(_b: P, _d: P) {
+        // Filtro escolhido no seletor (padrão: proteção familiar).
+        let ads = (api().gtk_check_button_get_active)(ui().check_ads as P) != 0;
+        crate::config::set_mode(if ads {
+            crate::config::FilterMode::AdsOnly
+        } else {
+            crate::config::FilterMode::Family
+        });
         run_action(crate::ui::action_activate);
     }
     /// Desativar pede confirmação (E5): o 1º clique arma, o 2º executa; desarma em 5 s.
@@ -617,6 +639,31 @@ mod imp {
         let progress = (a.gtk_progress_bar_new)();
         (a.gtk_widget_set_visible)(progress, 0);
 
+        // Seletor de filtro (ADR-022): um grupo de rádio, acima da ação primária.
+        let modes_group = (a.adw_preferences_group_new)();
+        let radio_family = (a.gtk_check_button_new)();
+        let radio_ads = (a.gtk_check_button_new)();
+        (a.gtk_check_button_set_group)(radio_ads, radio_family);
+        (a.gtk_check_button_set_active)(radio_family, 1);
+        for (radio, title, sub) in [
+            (
+                radio_family,
+                crate::config::FilterMode::Family.label(),
+                "Bloqueia sites perigosos e adultos, e instala o bloqueador de anúncios",
+            ),
+            (
+                radio_ads,
+                crate::config::FilterMode::AdsOnly.label(),
+                "Bloqueia anúncios e rastreadores. Não filtra conteúdo adulto e não mexe nos navegadores",
+            ),
+        ] {
+            let r = row(title, sub, &[]);
+            (a.adw_action_row_add_prefix)(r, radio);
+            (a.adw_action_row_set_activatable_widget)(r, radio);
+            (a.adw_preferences_group_add)(modes_group, r);
+        }
+        (a.gtk_box_append)(content, modes_group);
+
         let group = (a.adw_preferences_group_new)();
         let row_dns = row("Proteja a família em um passo", "", &[b_off, b_on]);
         let row_br = row("Anúncios ainda podem aparecer", "", &[b_br]);
@@ -640,6 +687,20 @@ mod imp {
         (a.adw_preferences_group_add)(details, expander);
         (a.gtk_box_append)(content, details);
 
+        // Navegadores recomendados: só informativo (links oficiais), nada é instalado.
+        let recs = (a.adw_preferences_group_new)();
+        let rec_exp = (a.adw_expander_row_new)();
+        (a.adw_preferences_row_set_title)(rec_exp, cs("Navegadores recomendados").as_ptr());
+        for r in &theme::RECOMMENDED_BROWSERS {
+            let link =
+                (a.gtk_link_button_new_with_label)(cs(r.url).as_ptr(), cs("Abrir site").as_ptr());
+            (a.gtk_widget_set_valign)(link, 3);
+            let rw = row(&format!("{} — {}", r.name, r.profile), r.note, &[link]);
+            (a.adw_expander_row_add_row)(rec_exp, rw);
+        }
+        (a.adw_preferences_group_add)(recs, rec_exp);
+        (a.gtk_box_append)(content, recs);
+
         let clamp = (a.adw_clamp_new)();
         (a.adw_clamp_set_child)(clamp, content);
         let scroll = (a.gtk_scrolled_window_new)();
@@ -661,6 +722,8 @@ mod imp {
             window: win as usize,
             row_check: row_chk as usize,
             buttons: [b_on as usize, b_off as usize, b_br as usize, b_chk as usize],
+            modes_group: modes_group as usize,
+            check_ads: radio_ads as usize,
         });
         // Ctrl+R = verificar.
         let act = (a.g_simple_action_new)(cs("verify").as_ptr(), std::ptr::null_mut());

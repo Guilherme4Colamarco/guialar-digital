@@ -167,6 +167,14 @@ pub fn allow_dark_mode_for_window(hwnd: HWND, allow: bool) {
 extern "system" {
     pub fn ShellExecuteExW(info: *mut SHELLEXECUTEINFOW) -> i32;
     pub fn IsUserAnAdmin() -> i32;
+    pub fn ShellExecuteW(
+        h: HWND,
+        verb: *const u16,
+        file: *const u16,
+        params: *const u16,
+        dir: *const u16,
+        show: i32,
+    ) -> isize;
 }
 
 #[link(name = "user32")]
@@ -243,6 +251,7 @@ extern "system" {
     pub fn SelectObject(dc: HDC, o: HGDIOBJ) -> HGDIOBJ;
     pub fn SetBkMode(dc: HDC, mode: i32) -> i32;
     pub fn SetTextColor(dc: HDC, color: u32) -> u32;
+    pub fn SetBkColor(dc: HDC, color: u32) -> u32;
     pub fn CreateFontW(
         h: i32,
         w: i32,
@@ -422,6 +431,21 @@ pub fn message_box(text: &str, caption: &str, kind: u32) -> i32 {
             w(caption).as_ptr(),
             kind,
         )
+    }
+}
+
+/// Abre uma URL no navegador padrão (só informativo: nada é instalado).
+pub fn open_url(url: &str) {
+    // SAFETY: strings UTF-16 terminadas em zero vivem até o fim da chamada.
+    unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            w("open").as_ptr(),
+            w(url).as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            SW_SHOWNORMAL,
+        );
     }
 }
 

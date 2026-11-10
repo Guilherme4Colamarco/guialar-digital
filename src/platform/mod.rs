@@ -13,9 +13,14 @@ pub fn apply_dns() -> Result<()> {
     let _guard = crate::sysutil::guard_operation()?;
     // Idempotente: um segundo `apply` regravaria o manifesto com o DNS já da Cloudflare
     // como "original" e o `revert` nunca restauraria o DNS verdadeiro.
-    if DnsStateManifest::load()?.is_some() {
-        println!("ℹ️  A proteção já está ativa. Use 'guialar revert' antes de aplicar de novo.");
-        return Ok(());
+    if let Some(m) = DnsStateManifest::load()? {
+        if m.mode == crate::config::current_mode() {
+            println!(
+                "ℹ️  A proteção já está ativa. Use 'guialar revert' antes de aplicar de novo."
+            );
+            return Ok(());
+        }
+        return switch_mode(m); // trocar de modo mantém o DNS original do manifesto
     }
     #[cfg(target_os = "linux")]
     {
@@ -62,9 +67,14 @@ pub fn elevate_if_needed(subcomando: &str) -> Result<bool> {
 /// Linux: só o DNS (o bloqueador é um passo separado, "Proteger navegadores").
 pub fn apply_all() -> Result<()> {
     let _guard = crate::sysutil::guard_operation()?;
-    if DnsStateManifest::load()?.is_some() {
-        println!("ℹ️  A proteção já está ativa. Use 'guialar revert' antes de aplicar de novo.");
-        return Ok(());
+    if let Some(m) = DnsStateManifest::load()? {
+        if m.mode == crate::config::current_mode() {
+            println!(
+                "ℹ️  A proteção já está ativa. Use 'guialar revert' antes de aplicar de novo."
+            );
+            return Ok(());
+        }
+        return switch_mode(m);
     }
     #[cfg(target_os = "windows")]
     {
@@ -105,6 +115,23 @@ pub fn revert_dns_fallback() -> Result<()> {
     }
     #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     {
+        anyhow::bail!("Sistema operacional não suportado nativamente pelo GuiaLar");
+    }
+}
+
+/// Troca o filtro com a proteção ligada, sem perder o DNS original.
+fn switch_mode(manifest: DnsStateManifest) -> Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        linux::switch_mode(manifest)
+    }
+    #[cfg(target_os = "windows")]
+    {
+        windows::switch_mode(manifest)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    {
+        let _ = manifest;
         anyhow::bail!("Sistema operacional não suportado nativamente pelo GuiaLar");
     }
 }

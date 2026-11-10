@@ -38,21 +38,35 @@ enum Commands {
     /// Abre a janela gráfica (padrão quando não há argumentos).
     Gui,
     /// Tudo de uma vez: DNS Cloudflare Family + bloqueador de anúncios.
-    Setup,
-    Apply,
+    Setup {
+        /// Filtro: `family` (padrão, malware + adulto) ou `ads` (só anúncios e rastreadores).
+        #[arg(long, value_enum, default_value_t = config::FilterMode::Family)]
+        mode: config::FilterMode,
+    },
+    Apply {
+        /// Filtro: `family` (padrão, malware + adulto) ou `ads` (só anúncios e rastreadores).
+        #[arg(long, value_enum, default_value_t = config::FilterMode::Family)]
+        mode: config::FilterMode,
+    },
     Revert,
     Browser {
         #[arg(long, short)]
         install_all: bool,
     },
     #[command(hide = true)]
-    InternalApply,
+    InternalApply {
+        #[arg(long, value_enum, default_value_t = config::FilterMode::Family)]
+        mode: config::FilterMode,
+    },
     #[command(hide = true)]
     InternalRevert,
     #[command(hide = true)]
     InternalBrowser,
     #[command(hide = true)]
-    InternalSetup,
+    InternalSetup {
+        #[arg(long, value_enum, default_value_t = config::FilterMode::Family)]
+        mode: config::FilterMode,
+    },
 }
 
 fn main() -> ExitCode {
@@ -66,7 +80,7 @@ fn main() -> ExitCode {
     #[cfg(target_os = "linux")]
     if matches!(
         cli.command,
-        None | Some(Commands::Gui) | Some(Commands::Apply) | Some(Commands::Setup)
+        None | Some(Commands::Gui) | Some(Commands::Apply { .. }) | Some(Commands::Setup { .. })
     ) {
         integration::ensure_desktop_integration();
     }
@@ -94,13 +108,25 @@ fn main() -> ExitCode {
     }
     let result = match cli.command.unwrap_or(Commands::Status) {
         Commands::Status | Commands::Gui => handle_status(),
-        Commands::Setup => handle_setup(false),
+        Commands::Setup { mode } => {
+            config::set_mode(mode);
+            handle_setup(false)
+        }
         Commands::InternalBrowser => handle_internal_browser(),
-        Commands::InternalSetup => handle_internal_setup(),
-        Commands::Apply => handle_apply(),
+        Commands::InternalSetup { mode } => {
+            config::set_mode(mode);
+            handle_internal_setup()
+        }
+        Commands::Apply { mode } => {
+            config::set_mode(mode);
+            handle_apply()
+        }
         Commands::Revert => handle_revert(),
         Commands::Browser { install_all } => handle_browser(install_all),
-        Commands::InternalApply => handle_internal_apply(),
+        Commands::InternalApply { mode } => {
+            config::set_mode(mode);
+            handle_internal_apply()
+        }
         Commands::InternalRevert => handle_internal_revert(),
     };
 
@@ -116,7 +142,11 @@ fn main() -> ExitCode {
 fn handle_setup(interativo: bool) -> anyhow::Result<()> {
     use std::io::{BufRead, Write};
     println!("🛡️  GuiaLar Digital — Configuração rápida\n");
-    println!("Isto vai:\n  1. usar o DNS Cloudflare Family (bloqueia malware e conteúdo adulto)\n  2. instalar o bloqueador de anúncios uBlock nos navegadores encontrados\n");
+    if config::current_mode() == config::FilterMode::AdsOnly {
+        println!("Isto vai usar o DNS AdGuard (bloqueia só anúncios e rastreadores). Os navegadores não serão alterados.\n");
+    } else {
+        println!("Isto vai:\n  1. usar o DNS Cloudflare Family (bloqueia malware e conteúdo adulto)\n  2. instalar o bloqueador de anúncios uBlock nos navegadores encontrados\n");
+    }
     let result = (|| {
         if interativo {
             print!("Continuar? [S/n] ");
@@ -130,7 +160,9 @@ fn handle_setup(interativo: bool) -> anyhow::Result<()> {
         }
         apply_flow(true)?;
         #[cfg(not(windows))]
-        handle_browser(true)?;
+        if config::current_mode() == config::FilterMode::Family {
+            handle_browser(true)?;
+        }
         println!("\n✅ Pronto. Reabra o navegador para o bloqueador aparecer.");
         println!("   Para desfazer o DNS: guialar revert");
         Ok(())
@@ -157,13 +189,20 @@ fn handle_internal_browser() -> anyhow::Result<()> {
 }
 
 fn handle_status() -> anyhow::Result<()> {
-    println!("🛡️  GuiaLar Digital — Status da Proteção Familiar\n");
+    println!("🛡️  GuiaLar Digital — Status da Proteção\n");
 
     match verify::check_status() {
         ProtectionStatus::Protected => {
             println!("  Estado:  🟢 [PROTEGIDO]");
-            println!("  Filtro:  Cloudflare Family (Malware + Adulto)");
-            println!("  IPs:     1.1.1.3, 1.0.0.3 e IPv6 correspondentes");
+            let mode = verify::active_mode().unwrap_or_default();
+            let [a, b] = mode.ipv4();
+            let filtro = match mode {
+                config::FilterMode::Family => "Cloudflare Family (Malware + Adulto)",
+                config::FilterMode::AdsOnly => "AdGuard DNS (só anúncios e rastreadores)",
+            };
+            println!("  Filtro:  {filtro}");
+            println!("  Modo:    {} ({})", mode.label(), mode.cli_name());
+            println!("  IPs:     {a}, {b} e IPv6 correspondentes");
         }
         ProtectionStatus::PartiallyConfigured(msg) => {
             println!("  Estado:  🟡 [CONFIGURAÇÃO PARCIAL OU AVISO]");
@@ -202,17 +241,28 @@ fn handle_apply() -> anyhow::Result<()> {
 /// `with_browsers`: no Windows faz DNS + navegadores com um único UAC.
 fn apply_flow(with_browsers: bool) -> anyhow::Result<()> {
     let _guard = sysutil::guard_operation()?;
-    if DnsStateManifest::load()?.is_some() {
-        println!("ℹ️  A proteção já está ativa. Use 'guialar revert' antes de aplicar de novo.");
-        return Ok(());
+    if let Some(m) = DnsStateManifest::load()? {
+        if m.mode == config::current_mode() {
+            println!(
+                "ℹ️  A proteção já está ativa. Use 'guialar revert' antes de aplicar de novo."
+            );
+            return Ok(());
+        }
+        println!(
+            "🔁 Trocando o filtro para: {}",
+            config::current_mode().label()
+        );
     }
-    println!("⚙️  Aplicando proteção familiar no sistema...");
+    println!(
+        "⚙️  Aplicando \"{}\" no sistema...",
+        config::current_mode().label()
+    );
     if with_browsers {
         platform::apply_all()?;
     } else {
         platform::apply_dns()?;
     }
-    println!("✅ Proteção familiar ativada com sucesso!");
+    println!("✅ {} ativada com sucesso!", config::current_mode().label());
     println!("🔍 Validando conexão com smoke test...");
 
     match verify::check_status() {

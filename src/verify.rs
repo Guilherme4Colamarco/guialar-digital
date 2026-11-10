@@ -4,7 +4,7 @@ use std::net::{IpAddr, ToSocketAddrs};
 use std::sync::mpsc;
 use std::time::Duration;
 
-use crate::config::{DnsStateManifest, CLOUDFLARE_IPV4, CLOUDFLARE_IPV6};
+use crate::config::{DnsStateManifest, FilterMode};
 
 pub const RESOLUTION_TIMEOUT: Duration = Duration::from_secs(3);
 
@@ -28,6 +28,11 @@ pub fn describe_load_error(e: &anyhow::Error) -> String {
     }
 }
 
+/// Modo gravado no manifesto (se houver proteção).
+pub fn active_mode() -> Option<FilterMode> {
+    DnsStateManifest::load().ok().flatten().map(|m| m.mode)
+}
+
 pub fn check_status() -> ProtectionStatus {
     let manifest_opt = match DnsStateManifest::load() {
         Ok(m) => m,
@@ -38,7 +43,8 @@ pub fn check_status() -> ProtectionStatus {
         return ProtectionStatus::Unprotected;
     }
 
-    if run_dns_smoke_test() {
+    let mode = manifest_opt.map(|m| m.mode).unwrap_or_default();
+    if run_dns_smoke_test(mode) {
         ProtectionStatus::Protected
     } else {
         ProtectionStatus::PartiallyConfigured(
@@ -51,21 +57,27 @@ pub fn check_status() -> ProtectionStatus {
 ///
 /// Sem esta checagem, DNS sequestrado (127.0.0.1, proxy do provedor) era
 /// reportado como "protegido" (QA-001).
+#[cfg(test)]
 pub fn resolution_is_family(addrs: &[IpAddr]) -> bool {
+    resolution_matches(addrs, FilterMode::Family)
+}
+
+/// A resolução contém um IP do filtro do `mode` (pares nunca se misturam).
+pub fn resolution_matches(addrs: &[IpAddr], mode: FilterMode) -> bool {
     addrs.iter().any(|ip| match ip {
-        IpAddr::V4(v4) => CLOUDFLARE_IPV4.contains(v4),
-        IpAddr::V6(v6) => CLOUDFLARE_IPV6.contains(v6),
+        IpAddr::V4(v4) => mode.ipv4().contains(v4),
+        IpAddr::V6(v6) => mode.ipv6().contains(v6),
     })
 }
 
 /// Smoke test com timeout: rede quebrada não pode travar a CLI.
-fn run_dns_smoke_test() -> bool {
+fn run_dns_smoke_test(mode: FilterMode) -> bool {
     // Logo após `apply` o resolvedor leva algumas centenas de ms para estabilizar.
     for attempt in 0..SMOKE_ATTEMPTS {
         if attempt > 0 {
             std::thread::sleep(SMOKE_RETRY_DELAY);
         }
-        if smoke_once() {
+        if smoke_once(mode) {
             return true;
         }
     }
@@ -75,17 +87,18 @@ fn run_dns_smoke_test() -> bool {
 const SMOKE_ATTEMPTS: u32 = 3;
 const SMOKE_RETRY_DELAY: Duration = Duration::from_millis(350);
 
-fn smoke_once() -> bool {
+fn smoke_once(mode: FilterMode) -> bool {
     let (tx, rx) = mpsc::channel::<Vec<IpAddr>>();
+    let target = format!("{}:53", mode.probe_host());
     std::thread::spawn(move || {
-        let addrs = "family.cloudflare-dns.com:53"
+        let addrs = target
             .to_socket_addrs()
             .map(|it| it.map(|a| a.ip()).collect::<Vec<_>>())
             .unwrap_or_default();
         let _ = tx.send(addrs);
     });
     rx.recv_timeout(RESOLUTION_TIMEOUT)
-        .map(|a| resolution_is_family(&a))
+        .map(|a| resolution_matches(&a, mode))
         .unwrap_or(false)
 }
 
@@ -203,5 +216,15 @@ mod qa_tests {
         assert!(!describe_load_error(&e).starts_with("Manifesto corrompido"));
         let e = anyhow::anyhow!("json ruim");
         assert!(describe_load_error(&e).starts_with("Manifesto corrompido"));
+    }
+
+    #[test]
+    fn resolucao_por_modo_nao_mistura_pares() {
+        let cf: Vec<IpAddr> = vec!["1.1.1.3".parse().unwrap()];
+        let ag: Vec<IpAddr> = vec!["94.140.14.14".parse().unwrap()];
+        assert!(resolution_matches(&cf, FilterMode::Family));
+        assert!(!resolution_matches(&cf, FilterMode::AdsOnly));
+        assert!(resolution_matches(&ag, FilterMode::AdsOnly));
+        assert!(!resolution_matches(&ag, FilterMode::Family));
     }
 }
