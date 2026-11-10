@@ -213,12 +213,40 @@ fn lock_path() -> PathBuf {
     std::env::temp_dir().join("guialar-op.lock")
 }
 
+/// Trava abandonada: velha (>120 s), vazia/sem PID válido (ex.: `touch`) ou com dono morto
+/// (`kill -9`). Um arquivo recém-criado (<50 ms) ainda pode estar prestes a receber o PID.
 fn lock_is_stale(path: &Path) -> bool {
-    std::fs::metadata(path)
+    let age = std::fs::metadata(path)
         .and_then(|m| m.modified())
         .ok()
-        .and_then(|t| t.elapsed().ok())
-        .is_some_and(|d| d.as_secs() > 120)
+        .and_then(|t| t.elapsed().ok());
+    let Some(age) = age else { return false };
+    if age.as_secs() > 120 {
+        return true;
+    }
+    if age.as_millis() < 50 {
+        return false;
+    }
+    match std::fs::read_to_string(path)
+        .ok()
+        .and_then(|t| t.trim().parse::<u32>().ok())
+    {
+        None => true, // sem PID válido
+        Some(pid) => !process_alive(pid),
+    }
+}
+
+/// O processo existe? Só sabemos responder no Linux (`/proc`); fora dele assume que sim.
+fn process_alive(pid: u32) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        Path::new(&format!("/proc/{pid}")).exists()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = pid;
+        true
+    }
 }
 
 impl OpLock {
@@ -244,7 +272,12 @@ impl OpLock {
     pub fn acquire_in(path: &Path) -> Result<Self> {
         for _ in 0..2 {
             match OpenOptions::new().write(true).create_new(true).open(path) {
-                Ok(_) => return Ok(Self(Some(path.to_path_buf()))),
+                Ok(mut f) => {
+                    use std::io::Write;
+                    let _ = write!(f, "{}", std::process::id());
+                    let _ = f.flush();
+                    return Ok(Self(Some(path.to_path_buf())));
+                }
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                     if lock_is_stale(path) {
                         let _ = std::fs::remove_file(path);
@@ -383,5 +416,38 @@ mod tests {
         assert!(caller_from_env(Some("0"), Some("0"), Some("root"), None, p).is_none());
         assert!(caller_from_env(None, None, None, None, p).is_none());
         assert!(caller_from_env(None, None, None, Some("4242"), p).is_none());
+    }
+
+    #[test]
+    fn trava_orfa_e_substituida() {
+        let base = std::env::temp_dir().join(format!("gl-orfa-{}", std::process::id()));
+        let _ = std::fs::remove_file(&base);
+        // vazio (touch) com > 50 ms
+        std::fs::write(&base, "").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(80));
+        assert!(lock_is_stale(&base));
+        let l = OpLock::acquire_in(&base).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&base).unwrap().trim(),
+            std::process::id().to_string()
+        );
+        // dono vivo (este processo): não é stale; segunda aquisição falha
+        std::thread::sleep(std::time::Duration::from_millis(80));
+        assert!(!lock_is_stale(&base));
+        assert!(OpLock::acquire_in(&base).is_err());
+        drop(l);
+        // PID inexistente (kill -9)
+        std::fs::write(&base, "999999999").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(80));
+        #[cfg(target_os = "linux")]
+        {
+            assert!(lock_is_stale(&base));
+            assert!(OpLock::acquire_in(&base).is_ok());
+        }
+        // recém-criado e vazio ainda não é stale (corrida com a gravação do PID)
+        let _ = std::fs::remove_file(&base);
+        std::fs::write(&base, "").unwrap();
+        assert!(!lock_is_stale(&base));
+        let _ = std::fs::remove_file(&base);
     }
 }
