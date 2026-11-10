@@ -3,7 +3,7 @@
 - **Status:** Aceito
 - **Data:** 08/11/2026
 - **Autor:** `gl-arquiteto`
-- **Alvo:** `guialar-rs` (`/home/geko/OpenBot/Shared/guialar-digital-refator/guialar-rs`)
+- **Alvo:** `guialar-rs`
 
 ---
 

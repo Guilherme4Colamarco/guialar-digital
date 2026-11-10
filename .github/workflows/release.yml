@@ -32,7 +32,11 @@ jobs:
           chmod +x /tmp/appimagetool
           sudo install -m 755 /tmp/appimagetool /usr/local/bin/appimagetool
       - name: Empacotar AppImage
+        env:
+          VERSION: ${{ github.ref_name }}
         run: |
+          VERSION="${VERSION#v}"
+          export NAME="guialar-${VERSION}-x86_64.AppImage"
           bash scripts/package-appimage.sh
           ls -lh dist/
       - uses: actions/upload-artifact@v4
@@ -51,13 +55,16 @@ jobs:
         run: cargo build --locked --release
       - name: Nomear artefato
         shell: bash
+        env:
+          VERSION: ${{ github.ref_name }}
         run: |
+          VERSION="${VERSION#v}"
           mkdir -p dist
-          cp target/release/guialar.exe dist/guialar-0.3.0-windows.exe
+          cp target/release/guialar.exe "dist/guialar-${VERSION}-windows.exe"
       - uses: actions/upload-artifact@v4
         with:
           name: windows-exe
-          path: dist/guialar-0.3.0-windows.exe
+          path: dist/*.exe
           if-no-files-found: error
 
   publish:

@@ -3,7 +3,7 @@
 - **Status:** Aceito (Revoga ADR-003 da Trilha Rust que previa `egui`/`eframe`)
 - **Data:** 08/11/2026
 - **Autor:** `gl-arquiteto` (Arquiteto do `guialar-digital`)
-- **Alvo:** `guialar-rs` v0.3.0 (`/home/geko/OpenBot/Shared/guialar-digital-refator/guialar-rs`)
+- **Alvo:** `guialar-rs` v0.3.0
 
 ---
 

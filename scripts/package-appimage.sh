@@ -6,7 +6,13 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="${BIN:-$ROOT/target/release/guialar}"
 OUT_DIR="${OUT_DIR:-$ROOT/dist}"
-NAME="${NAME:-guialar-0.3.0-x86_64.AppImage}"
+if [[ -z "${NAME:-}" ]]; then
+  VER="${VERSION:-}"
+  if [[ -z "$VER" && -f "$ROOT/Cargo.toml" ]]; then
+    VER="$(sed -n 's/^version = "\([^"]*\)"/\1/p' "$ROOT/Cargo.toml" | head -1)"
+  fi
+  NAME="guialar-${VER:-0.3.0}-x86_64.AppImage"
+fi
 STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
 
