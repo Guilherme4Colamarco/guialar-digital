@@ -42,7 +42,7 @@ Push na main, tag `java-final`, tag `v0.3.0`, release. Assinatura do `.exe`. Ent
 
 ## Ordem
 1. gl-refatorador: itens 1 a 4, testes novos da tabela de `check_status` (sem rede: manifesto + DNS simulado; os casos de rede ficam na VM).
-2. gl-reviewer: só o commit novo. Olhar a conjunção da sonda com o conjunto do modo, a troca pela GUI, e se o diff não altera o e-mail nem traz caminho `/home/geko`.
+2. gl-reviewer: só o commit novo. Olhar a conjunção da sonda com o conjunto do modo, a troca pela GUI, e se o diff não altera o e-mail nem traz caminho de máquina pessoal.
 3. gl-qa, nas 3 VMs, no binário desse commit: família ativa → 🟢; DNS trocado à mão para `1.1.1.1` → 🟡; anúncios → 🟢; anúncios → desativar → `10.0.2.3`; manifesto apagado com AdGuard ativo → desativar volta o DNS de antes; clique nos rádios com a proteção ligada (família ↔ anúncios) e em "Abrir site"; no Windows, anúncios → família deixa política no registro, família → anúncios tira. Trava órfã em fedora e win11.
 4. gl-usuario: uma sessão leiga na void, depois que o qa disser que o binário está lá. Errar de propósito, perguntar no canal. Não corrige e não lê código.
 

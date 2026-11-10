@@ -28,7 +28,7 @@ Em `apply_systemd_resolved` o drop-in manda `FallbackDNS=1.1.1.1 8.8.8.8`. Se o 
 A caixa de confirmação fala em "sites perigosos e adultos" mesmo no modo anúncios. O texto segue o modo. O botão padrão é Não, para um Enter não desfazer.
 
 ### WIP do devops entra no commit
-Há 5 arquivos modificados e não commitados em cima de `6afcd2f`: `ci.yml`, `release.yml`, `package-appimage.sh`, e o caminho `/home/geko/...` removido das ADRs 018 e 019. O gl-refatorador revisa e commita, autoria dele. Não descartar.
+Há 5 arquivos modificados e não commitados em cima de `6afcd2f`: `ci.yml`, `release.yml`, `package-appimage.sh`, e o caminho de máquina removido das ADRs 018 e 019. O gl-refatorador revisa e commita, autoria dele. Não descartar.
 
 ## Fora
 Push, tag `java-final`, tag `v0.3.0`, release pública, assinatura do `.exe`, trava por PID no Windows, DNS da Mullvad, Enter/Espaço no GTK (só reabre se o qa reproduzir, nesta build, desativar sem querer), tela pública, atividades acadêmicas.
