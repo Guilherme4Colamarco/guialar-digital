@@ -48,7 +48,7 @@ pub fn check_status() -> ProtectionStatus {
         ProtectionStatus::Protected
     } else {
         ProtectionStatus::PartiallyConfigured(
-            "DNS gravado, mas a filtragem familiar não respondeu no teste de rede".into(),
+            "DNS gravado, mas o filtro não respondeu no teste de rede".into(),
         )
     }
 }
@@ -72,20 +72,29 @@ pub fn resolution_matches(addrs: &[IpAddr], mode: FilterMode) -> bool {
 
 /// Smoke test com timeout: rede quebrada não pode travar a CLI.
 fn run_dns_smoke_test(mode: FilterMode) -> bool {
-    // Logo após `apply` o resolvedor leva algumas centenas de ms para estabilizar.
+    // Logo após `apply`/troca de modo o resolvedor leva um tempo para estabilizar.
+    // Falhas rápidas são repetidas; falhas lentas (rede fora) não alongam a espera.
+    let mut slow = 0;
     for attempt in 0..SMOKE_ATTEMPTS {
         if attempt > 0 {
             std::thread::sleep(SMOKE_RETRY_DELAY);
         }
+        let started = std::time::Instant::now();
         if smoke_once(mode) {
             return true;
+        }
+        if started.elapsed() >= Duration::from_secs(2) {
+            slow += 1;
+            if slow >= 2 {
+                break;
+            }
         }
     }
     false
 }
 
-const SMOKE_ATTEMPTS: u32 = 3;
-const SMOKE_RETRY_DELAY: Duration = Duration::from_millis(350);
+const SMOKE_ATTEMPTS: u32 = 6;
+const SMOKE_RETRY_DELAY: Duration = Duration::from_millis(500);
 
 fn smoke_once(mode: FilterMode) -> bool {
     let (tx, rx) = mpsc::channel::<Vec<IpAddr>>();
