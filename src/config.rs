@@ -65,11 +65,13 @@ impl FilterMode {
         }
     }
 
-    /// Nome cuja resolução prova que o filtro está respondendo.
+    /// Domínio de teste que o filtro do modo bloqueia (responde 0.0.0.0).
+    /// Cloudflare documenta `malware.testcategory.com`; `doubleclick.net` é bloqueado pelo
+    /// AdGuard DNS Padrão.
     pub fn probe_host(self) -> &'static str {
         match self {
-            Self::Family => "family.cloudflare-dns.com",
-            Self::AdsOnly => "dns.adguard-dns.com",
+            Self::Family => "malware.testcategory.com",
+            Self::AdsOnly => "doubleclick.net",
         }
     }
 

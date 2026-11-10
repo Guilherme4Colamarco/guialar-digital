@@ -107,6 +107,8 @@ pub fn switch_mode(mut manifest: DnsStateManifest) -> Result<()> {
     }
     if mode == crate::config::FilterMode::AdsOnly {
         crate::policy::revert_all()?;
+    } else {
+        crate::policy::install_all()?; // voltou ao familiar: o bloqueador de anúncios volta junto
     }
     manifest.mode = mode;
     manifest.save_atomic()?;

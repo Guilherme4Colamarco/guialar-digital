@@ -24,8 +24,8 @@ use std::process::ExitCode;
 #[command(
     name = "guialar",
     version,
-    about = "GuiaLar Digital - Proteção familiar de navegação via DNS Cloudflare Family e uBlock Origin",
-    long_about = "Configura de forma segura o DNS da Cloudflare for Families (1.1.1.3 / 1.0.0.3) e auxilia na instalação de bloqueadores de anúncios em Linux (NetworkManager, systemd-resolved, runit/resolvconf) e Windows."
+    about = "GuiaLar Digital - proteção de navegação via DNS filtrado",
+    long_about = "Configura o DNS filtrado do computador: proteção familiar (Cloudflare for Families, bloqueia malware e conteúdo adulto) ou só anúncios (AdGuard DNS), e ajuda a instalar bloqueadores de anúncios. Funciona em Linux (NetworkManager, systemd-resolved, runit/resolvconf) e Windows."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -34,21 +34,25 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Mostra se este computador está protegido e qual filtro está ativo.
     Status,
     /// Abre a janela gráfica (padrão quando não há argumentos).
     Gui,
-    /// Tudo de uma vez: DNS Cloudflare Family + bloqueador de anúncios.
+    /// Tudo de uma vez: filtro de DNS + (no modo família) bloqueador de anúncios.
     Setup {
         /// Filtro: `family` (padrão, malware + adulto) ou `ads` (só anúncios e rastreadores).
         #[arg(long, value_enum, default_value_t = config::FilterMode::Family)]
         mode: config::FilterMode,
     },
+    /// Ativa só o filtro de DNS (sem mexer nos navegadores).
     Apply {
         /// Filtro: `family` (padrão, malware + adulto) ou `ads` (só anúncios e rastreadores).
         #[arg(long, value_enum, default_value_t = config::FilterMode::Family)]
         mode: config::FilterMode,
     },
+    /// Desfaz a proteção e devolve o DNS ao padrão da rede.
     Revert,
+    /// Instala o bloqueador de anúncios nos navegadores (modo família).
     Browser {
         #[arg(long, short)]
         install_all: bool,

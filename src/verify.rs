@@ -53,21 +53,13 @@ pub fn check_status() -> ProtectionStatus {
     }
 }
 
-/// `true` somente se a resolução contém um IP da Cloudflare Family.
+/// O nome de teste do `mode` foi bloqueado pelo filtro (resposta 0.0.0.0 / ::).
 ///
-/// Sem esta checagem, DNS sequestrado (127.0.0.1, proxy do provedor) era
-/// reportado como "protegido" (QA-001).
-#[cfg(test)]
-pub fn resolution_is_family(addrs: &[IpAddr]) -> bool {
-    resolution_matches(addrs, FilterMode::Family)
-}
-
-/// A resolução contém um IP do filtro do `mode` (pares nunca se misturam).
-pub fn resolution_matches(addrs: &[IpAddr], mode: FilterMode) -> bool {
-    addrs.iter().any(|ip| match ip {
-        IpAddr::V4(v4) => mode.ipv4().contains(v4),
-        IpAddr::V6(v6) => mode.ipv6().contains(v6),
-    })
+/// Perguntar o endereço do próprio servidor do filtro não prova nada: qualquer DNS
+/// responde igual (uma VPN ou o roteador trocando o DNS passava por "protegido").
+/// Só o filtro devolve "bloqueado" para um domínio de teste de malware/anúncio.
+pub fn resolution_matches(addrs: &[IpAddr], _mode: FilterMode) -> bool {
+    addrs.iter().any(|ip| ip.is_unspecified())
 }
 
 /// Smoke test com timeout: rede quebrada não pode travar a CLI.
@@ -201,21 +193,18 @@ mod qa_tests {
         assert_eq!(loaded.unwrap().backend, BackendKind::SystemdResolved);
     }
 
-    /// QA-001: só IPs Cloudflare Family contam como protegido.
+    /// QA-001: DNS sequestrado ou que responde normalmente NÃO conta como filtro.
     #[test]
-    fn qa001_resolution_is_family_rejects_hijacked_dns() {
-        use std::net::{Ipv4Addr, Ipv6Addr};
-        assert!(!resolution_is_family(&[]));
-        assert!(!resolution_is_family(&["127.0.0.1".parse().unwrap()]));
-        assert!(!resolution_is_family(&[IpAddr::V4(Ipv4Addr::new(
-            1, 1, 1, 1
-        ))]));
-        assert!(!resolution_is_family(&[IpAddr::V6(Ipv6Addr::LOCALHOST)]));
-        assert!(resolution_is_family(&["1.1.1.3".parse().unwrap()]));
-        assert!(resolution_is_family(&[
-            "127.0.0.1".parse().unwrap(),
-            "1.0.0.3".parse().unwrap()
-        ]));
+    fn qa001_so_resposta_bloqueada_conta_como_protegido() {
+        let un = |s: &str| -> IpAddr { s.parse().unwrap() };
+        for m in [FilterMode::Family, FilterMode::AdsOnly] {
+            assert!(!resolution_matches(&[], m));
+            assert!(!resolution_matches(&[un("127.0.0.1")], m));
+            assert!(!resolution_matches(&[un("104.18.5.35")], m)); // resposta real: sem filtro
+            assert!(!resolution_matches(&[un("1.1.1.3")], m)); // IP do filtro não prova o filtro
+            assert!(resolution_matches(&[un("0.0.0.0")], m));
+            assert!(resolution_matches(&[un("::")], m));
+        }
     }
 
     #[test]
@@ -228,12 +217,8 @@ mod qa_tests {
     }
 
     #[test]
-    fn resolucao_por_modo_nao_mistura_pares() {
-        let cf: Vec<IpAddr> = vec!["1.1.1.3".parse().unwrap()];
-        let ag: Vec<IpAddr> = vec!["94.140.14.14".parse().unwrap()];
-        assert!(resolution_matches(&cf, FilterMode::Family));
-        assert!(!resolution_matches(&cf, FilterMode::AdsOnly));
-        assert!(resolution_matches(&ag, FilterMode::AdsOnly));
-        assert!(!resolution_matches(&ag, FilterMode::Family));
+    fn dominios_de_teste_por_modo() {
+        assert_eq!(FilterMode::Family.probe_host(), "malware.testcategory.com");
+        assert_eq!(FilterMode::AdsOnly.probe_host(), "doubleclick.net");
     }
 }
