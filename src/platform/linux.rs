@@ -397,7 +397,7 @@ fn inspect_nm_connection_unsanitized(uuid: &str) -> Result<ConnectionBackup> {
             }
         } else if line.starts_with("ipv4.dns:") {
             let val = line.trim_start_matches("ipv4.dns:").trim();
-            for ip_str in val.split_whitespace() {
+            for ip_str in val.split(|c: char| c.is_whitespace() || c == ',') {
                 if let Ok(ip) = ip_str.parse::<Ipv4Addr>() {
                     original_ips.push(ip);
                 }

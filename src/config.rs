@@ -31,7 +31,8 @@ pub enum BackendKind {
 /// DNS "original" nunca pode ser o filtro do próprio GuiaLar (apply sem manifesto sobre
 /// rede já filtrada): nesse caso a interface é tratada como DHCP, sem IPs fixos.
 pub fn sanitize_original_dns(ips: Vec<Ipv4Addr>, was_dhcp: bool) -> (Vec<Ipv4Addr>, bool) {
-    if !ips.is_empty() && ips.iter().all(|ip| CLOUDFLARE_IPV4.contains(ip)) {
+    // Sem IPs fixos não há o que restaurar além do automático.
+    if ips.is_empty() || ips.iter().all(|ip| CLOUDFLARE_IPV4.contains(ip)) {
         (Vec::new(), true)
     } else {
         (ips, was_dhcp)
@@ -280,5 +281,6 @@ mod qa_tests {
         let misto = vec![CLOUDFLARE_IPV4[0], Ipv4Addr::new(9, 9, 9, 9)];
         assert_eq!(sanitize_original_dns(misto.clone(), false), (misto, false));
         assert_eq!(sanitize_original_dns(Vec::new(), true), (Vec::new(), true));
+        assert_eq!(sanitize_original_dns(Vec::new(), false), (Vec::new(), true));
     }
 }
