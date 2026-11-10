@@ -630,6 +630,8 @@ mod imp {
             status,
             cs("Lendo o estado da proteção deste computador.").as_ptr(),
         );
+        // Compacto: com o seletor de filtro a janela fica mais cheia e o título não pode sumir.
+        (a.gtk_widget_add_css_class)(status, cs("compact").as_ptr());
         (a.gtk_box_append)(content, status);
 
         let b_on = button("Proteger este computador", None, on_activate_btn);
