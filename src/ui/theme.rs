@@ -74,7 +74,14 @@ impl Snapshot {
 /// Resultado de "Verificar", com veredito (nunca só "concluída").
 pub fn verdict(state: UiState, snapshot: Option<&Snapshot>) -> String {
     match state {
-        UiState::Protegido => "Verificação concluída: este computador está protegido.".into(),
+        UiState::Protegido => match snapshot.and_then(|s| s.mode) {
+            Some(crate::config::FilterMode::AdsOnly) => {
+                "Verificação concluída: anúncios e rastreadores estão bloqueados neste computador."
+                    .into()
+            }
+            _ => "Verificação concluída: sites perigosos e adultos estão bloqueados neste computador."
+                .into(),
+        },
         UiState::Desprotegido => {
             "Verificação concluída: este computador não está protegido.".into()
         }
@@ -196,6 +203,22 @@ pub fn card_subtitle(action: Action, missing: &[String]) -> String {
         Action::Browsers => format!("Falta o bloqueador em: {}", missing.join(", ")),
         Action::Check => "Testa a conexão agora".into(),
         Action::Restore => "Desfaz a proteção e remove o bloqueador de anúncios".into(),
+    }
+}
+
+/// Os rádios de modo aparecem em Desprotegido, Protegido e Parcial; não enquanto trabalha
+/// nem antes da primeira leitura.
+pub fn show_mode_selector(snapshot: Option<&Snapshot>, busy: bool) -> bool {
+    !busy && snapshot.is_some()
+}
+
+/// Pergunta antes de desativar: o texto segue o modo (anúncios não fala em conteúdo adulto).
+pub fn confirm_disable_text(mode: Option<crate::config::FilterMode>) -> &'static str {
+    match mode {
+        Some(crate::config::FilterMode::AdsOnly) => {
+            "Desativar a proteção deste computador? Anúncios e rastreadores deixarão de ser bloqueados."
+        }
+        _ => "Desativar a proteção deste computador? Sites perigosos e adultos deixarão de ser bloqueados.",
     }
 }
 
@@ -499,7 +522,7 @@ mod tests {
     fn verificar_sempre_tem_veredito() {
         let un = snap(ProtectionStatus::Unprotected, &[]);
         assert!(verdict(UiState::Desprotegido, Some(&un)).contains("não está protegido"));
-        assert!(verdict(UiState::Protegido, None).contains("está protegido"));
+        assert!(verdict(UiState::Protegido, None).contains("bloqueados"));
     }
 
     #[test]
@@ -534,5 +557,27 @@ mod tests {
         assert!(!technical_details(&s, "").contains("Cloudflare"));
         s.mode = Some(crate::config::FilterMode::Family);
         assert!(technical_details(&s, "").contains("Cloudflare"));
+    }
+
+    #[test]
+    fn verdict_protegido_diz_o_modo() {
+        let mut s = snap(ProtectionStatus::Protected, &[]);
+        s.mode = Some(crate::config::FilterMode::AdsOnly);
+        let v = verdict(UiState::Protegido, Some(&s));
+        assert!(v.contains("anúncios") && !v.contains("adultos"));
+        s.mode = Some(crate::config::FilterMode::Family);
+        assert!(verdict(UiState::Protegido, Some(&s)).contains("adultos"));
+    }
+
+    #[test]
+    fn seletor_de_modo_e_texto_da_confirmacao() {
+        let s = snap(ProtectionStatus::Protected, &[]);
+        assert!(show_mode_selector(Some(&s), false));
+        assert!(!show_mode_selector(Some(&s), true));
+        assert!(!show_mode_selector(None, false));
+        use crate::config::FilterMode::{AdsOnly, Family};
+        assert!(!confirm_disable_text(Some(AdsOnly)).contains("adultos"));
+        assert!(confirm_disable_text(Some(Family)).contains("adultos"));
+        assert!(confirm_disable_text(None).contains("adultos"));
     }
 }

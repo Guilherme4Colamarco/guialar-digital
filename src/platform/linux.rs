@@ -103,6 +103,83 @@ fn elevate_self(subcommand: &str) -> Result<()> {
     }
 }
 
+/// Extrai IPs de um texto qualquer (nameserver, `resolvectl dns`, `nmcli`): tokens que são
+/// IP, sem sufixos `#sni` nem `%iface`. Duplicados saem uma vez.
+pub fn parse_dns_ips(text: &str) -> Vec<std::net::IpAddr> {
+    let mut out: Vec<std::net::IpAddr> = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with('#') || line.starts_with(';') {
+            continue;
+        }
+        // "nameserver 1.1.1.3" | "Link 2 (eth0): 1.1.1.3 1.0.0.3" | "IP4.DNS[1]:1.1.1.3"
+        let body = match line.split_once(':') {
+            Some((k, rest))
+                if !k.contains(' ') || k.starts_with("Link") || k.starts_with("Global") =>
+            {
+                if k.starts_with("IP4")
+                    || k.starts_with("IP6")
+                    || k.starts_with("Link")
+                    || k.starts_with("Global")
+                {
+                    rest
+                } else {
+                    line
+                }
+            }
+            _ => line,
+        };
+        for tok in body.split(|c: char| c.is_whitespace() || c == ',') {
+            let tok = tok.split(['#', '%']).next().unwrap_or("");
+            if let Ok(ip) = tok.parse::<std::net::IpAddr>() {
+                if !out.contains(&ip) {
+                    out.push(ip);
+                }
+            }
+        }
+    }
+    out
+}
+
+fn command_text(program: &str, args: &[&str]) -> String {
+    Command::new(program)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default()
+}
+
+/// DNS em uso: resolv.conf + NetworkManager (`device show`) + systemd-resolved (`resolvectl`).
+/// Ler só o resolv.conf não basta: com stub local ele mostra 127.0.0.53.
+pub fn configured_dns() -> Vec<std::net::IpAddr> {
+    let mut all = Vec::new();
+    let mut add = |text: String| {
+        for ip in parse_dns_ips(&text) {
+            if !all.contains(&ip) {
+                all.push(ip);
+            }
+        }
+    };
+    let resolv = fs::read_to_string("/etc/resolv.conf").unwrap_or_default();
+    add(resolv
+        .lines()
+        .filter(|l| l.trim_start().starts_with("nameserver"))
+        .collect::<Vec<_>>()
+        .join("\n"));
+    if is_command_available("nmcli") {
+        add(command_text(
+            "nmcli",
+            &["-t", "-f", "IP4.DNS,IP6.DNS", "device", "show"],
+        ));
+    }
+    if is_command_available("resolvectl") {
+        add(command_text("resolvectl", &["dns"]));
+    }
+    all
+}
+
 /// `true` se o DNS em uso ainda é o filtro do GuiaLar (resolv.conf ou perfil do NM).
 pub fn cloudflare_dns_active() -> bool {
     let cf = |t: &str| {
@@ -480,20 +557,18 @@ fn apply_systemd_resolved(_manifest: &mut DnsStateManifest) -> Result<()> {
     }
 
     let conf_content = format!(
-        "[Resolve]\nDNS={} {} {} {}\nFallbackDNS=1.1.1.1 8.8.8.8\n",
+        "[Resolve]\nDNS={} {} {} {}\n",
         current_mode().ipv4()[0],
         current_mode().ipv4()[1],
         current_mode().ipv6()[0],
         current_mode().ipv6()[1]
     );
 
-    let temp_file = "/tmp/99-guialar.conf.tmp";
-    fs::write(temp_file, conf_content)?;
-    run_privileged_command(
-        "cp",
-        &[temp_file, "/etc/systemd/resolved.conf.d/99-guialar.conf"],
+    // Pelo stdin: nenhum arquivo previsível em /tmp.
+    write_privileged_file(
+        "/etc/systemd/resolved.conf.d/99-guialar.conf",
+        &conf_content,
     )?;
-    let _ = fs::remove_file(temp_file);
 
     run_privileged_command("systemctl", &["restart", "systemd-resolved"])?;
     Ok(())
@@ -564,6 +639,24 @@ fn apply_direct_resolv_conf(manifest: &mut DnsStateManifest) -> Result<()> {
     );
 
     write_resolv_conf(&content)
+}
+
+/// Grava `path` via `tee` (com privilégio) com o conteúdo em stdin, sem arquivo temporário.
+fn write_privileged_file(path: &str, content: &str) -> Result<()> {
+    let mut child = privileged_command("tee", &[path])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .with_context(|| format!("Falha ao iniciar tee para {path}"))?;
+    child
+        .stdin
+        .take()
+        .context("stdin do tee indisponível")?
+        .write_all(content.as_bytes())?;
+    if !child.wait()?.success() {
+        bail!("Falha ao gravar {path}");
+    }
+    Ok(())
 }
 
 /// Grava `/etc/resolv.conf` via `tee` com o conteúdo em stdin (sem arquivo temporário).
@@ -637,4 +730,32 @@ fn run_privileged_command(program: &str, args: &[&str]) -> Result<()> {
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod dns_parse_tests {
+    use super::parse_dns_ips;
+
+    fn s(v: &[&str]) -> Vec<std::net::IpAddr> {
+        v.iter().map(|x| x.parse().unwrap()).collect()
+    }
+
+    #[test]
+    fn le_resolv_conf_resolvectl_e_nmcli() {
+        assert_eq!(
+            parse_dns_ips("nameserver 1.1.1.3\nnameserver 2606:4700:4700::1113"),
+            s(&["1.1.1.3", "2606:4700:4700::1113"])
+        );
+        assert_eq!(
+            parse_dns_ips(
+                "Global: 94.140.14.14#dns.adguard-dns.com\nLink 2 (eth0): 1.1.1.3 fe80::1%eth0"
+            ),
+            s(&["94.140.14.14", "1.1.1.3", "fe80::1"])
+        );
+        assert_eq!(
+            parse_dns_ips("IP4.DNS[1]:10.0.2.3\nIP6.DNS[1]:2a10:50c0::ad1:ff\nIP4.DNS[2]:10.0.2.3"),
+            s(&["10.0.2.3", "2a10:50c0::ad1:ff"])
+        );
+        assert!(parse_dns_ips("# nameserver 8.8.8.8\nsearch lan").is_empty());
+    }
 }

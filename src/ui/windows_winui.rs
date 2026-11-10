@@ -412,7 +412,14 @@ fn place_buttons(hwnd: HWND) {
             st.recs_open,
         )
     };
-    let show_modes = ui_st == theme::UiState::Desprotegido && !recs;
+    let (snap_mode, has_snap) = {
+        let st = STATE.lock().unwrap();
+        (
+            st.snapshot.as_ref().and_then(|x| x.mode),
+            st.snapshot.is_some(),
+        )
+    };
+    let show_modes = has_snap && !recs;
     let l = layout(rc.right, dpi, actions.len(), show_modes);
     let b = *BUTTONS.lock().unwrap();
     let all = [
@@ -501,6 +508,13 @@ fn place_buttons(hwnd: HWND) {
         ShowWindow(e[0] as HWND, if recs { SW_HIDE } else { 5 });
         // Seletor de filtro (só desprotegido) e página de navegadores recomendados.
         let radios = *RADIOS.lock().unwrap();
+        if let Some(m) = snap_mode {
+            // Com proteção gravada, o rádio mostra o modo que está valendo.
+            let ads = m == crate::config::FilterMode::AdsOnly;
+            MODE_ADS.store(ads, Ordering::Relaxed);
+            SendMessageW(radios[0] as HWND, 0x00F1, (!ads) as usize, 0);
+            SendMessageW(radios[1] as HWND, 0x00F1, ads as usize, 0);
+        }
         for (i, h) in radios.iter().enumerate() {
             let r = l.modes[i];
             MoveWindow(
@@ -686,8 +700,7 @@ fn draw(dc: HDC, rc: &RECT, dpi: u32) {
     } else {
         actions_of(&snapshot)
     };
-    let show_modes =
-        !recs && theme::ui_state(snapshot.as_ref(), false) == theme::UiState::Desprotegido;
+    let show_modes = !recs && theme::show_mode_selector(snapshot.as_ref(), false);
     let l = layout(rc.right, dpi, actions.len(), show_modes);
     // SAFETY: GDI no DC em memória desta pintura.
     unsafe {
@@ -1151,8 +1164,24 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: usize, lp: isize) ->
                     .unwrap_or(0);
             }
             match id {
-                ID_MODE_FAMILY => MODE_ADS.store(false, Ordering::Relaxed),
-                ID_MODE_ADS => MODE_ADS.store(true, Ordering::Relaxed),
+                ID_MODE_FAMILY | ID_MODE_ADS => {
+                    let ads = id == ID_MODE_ADS;
+                    MODE_ADS.store(ads, Ordering::Relaxed);
+                    // Com proteção ligada em outro modo: troca (mantém o DNS original).
+                    let (ativo, busy) = {
+                        let st = STATE.lock().unwrap();
+                        (st.snapshot.as_ref().and_then(|x| x.mode), st.busy)
+                    };
+                    let chosen = if ads {
+                        crate::config::FilterMode::AdsOnly
+                    } else {
+                        crate::config::FilterMode::Family
+                    };
+                    if !busy && ativo.is_some_and(|m| m != chosen) {
+                        crate::config::set_mode(chosen);
+                        spawn_action(hwnd, super::action_activate);
+                    }
+                }
                 ID_RECS => {
                     {
                         let mut st = STATE.lock().unwrap();
@@ -1176,11 +1205,13 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: usize, lp: isize) ->
                 ID_RESTORE => {
                     // Desativar tira a proteção da família: pede confirmação (E5).
                     // 0x24 = MB_YESNO | MB_ICONQUESTION; 6 = IDYES.
+                    // + MB_DEFBUTTON2 (0x100): o padrão é "Não", um Enter não desfaz.
+                    let mode = STATE.lock().unwrap().snapshot.as_ref().and_then(|x| x.mode);
                     let ok = message_box_owned(
                         hwnd,
-                        "Desativar a proteção deste computador? Sites perigosos e adultos deixarão de ser bloqueados.",
+                        theme::confirm_disable_text(mode),
                         "GuiaLar Digital",
-                        0x24,
+                        0x24 | 0x100,
                     );
                     if ok == 6 {
                         spawn_action(hwnd, super::action_restore);

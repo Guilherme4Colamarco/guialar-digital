@@ -135,3 +135,20 @@ fn switch_mode(manifest: DnsStateManifest) -> Result<()> {
         anyhow::bail!("Sistema operacional não suportado nativamente pelo GuiaLar");
     }
 }
+
+/// DNS efetivamente configurados na máquina (IPv4 e IPv6, inclusive stubs locais; quem
+/// decide o que conta é `verify::check_configured_dns`). Falha de leitura = lista vazia.
+pub fn configured_dns() -> Vec<std::net::IpAddr> {
+    #[cfg(target_os = "linux")]
+    {
+        linux::configured_dns()
+    }
+    #[cfg(target_os = "windows")]
+    {
+        windows::configured_dns()
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    {
+        Vec::new()
+    }
+}

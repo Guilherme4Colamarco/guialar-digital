@@ -66,11 +66,12 @@ impl FilterMode {
     }
 
     /// Domínio de teste que o filtro do modo bloqueia (responde 0.0.0.0).
-    /// Cloudflare documenta `malware.testcategory.com`; `doubleclick.net` é bloqueado pelo
-    /// AdGuard DNS Padrão.
+    /// `nudity.testcategory.com` só é bloqueado pelo filtro família (1.1.1.3): o DNS que
+    /// pega só malware (1.1.1.2) também bloquearia `malware.testcategory.com`.
+    /// `doubleclick.net` é bloqueado pelo AdGuard DNS Padrão.
     pub fn probe_host(self) -> &'static str {
         match self {
-            Self::Family => "malware.testcategory.com",
+            Self::Family => "nudity.testcategory.com",
             Self::AdsOnly => "doubleclick.net",
         }
     }
@@ -92,6 +93,18 @@ pub fn is_filter_ipv4(ip: &Ipv4Addr) -> bool {
 #[cfg_attr(windows, allow(dead_code))]
 pub fn is_filter_ipv6(ip: &Ipv6Addr) -> bool {
     CLOUDFLARE_IPV6.contains(ip) || ADGUARD_IPV6.contains(ip)
+}
+
+/// DNS local do próprio sistema (stub do systemd-resolved, dnsmasq do NetworkManager,
+/// loopback do Windows): não é "DNS de fora" nem é o nosso; o que conta é o upstream.
+pub fn is_local_stub(ip: &std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => v4.is_loopback() || v4.is_unspecified(),
+        std::net::IpAddr::V6(v6) => {
+            // ::1, :: e fec0::/10 (site-local, usado pelo Windows na interface de loopback)
+            v6.is_loopback() || v6.is_unspecified() || (v6.segments()[0] & 0xffc0) == 0xfec0
+        }
+    }
 }
 
 /// A linha (resolv.conf etc.) cita algum IP de filtro do GuiaLar?

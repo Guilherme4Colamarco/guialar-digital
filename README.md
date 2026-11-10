@@ -9,7 +9,7 @@ Proteção de navegação por **DNS filtrado**, com duas opções:
 
 O modo familiar também configura o bloqueador de anúncios uBlock Origin nos navegadores (no Windows, por política; no Linux, abre a página da extensão). O modo "só anúncios" não mexe nos navegadores. Desativar a proteção devolve o DNS exatamente ao que era antes, mesmo que o arquivo de estado seja apagado ou corrompido.
 
-> O filtro por DNS bloqueia por **domínio**. Não remove anúncios que o próprio site serve do mesmo domínio, nem funciona em navegadores/apps que usam DNS próprio (DoH).
+> **Limites do filtro por DNS.** Ele bloqueia por **domínio**: não pega anúncio servido pelo mesmo domínio do site, nem navegador ou app com DNS próprio (DoH), nem tráfego que sai por uma VPN. Se a rede já tem outro bloqueador (um Pi-hole, por exemplo), o bloqueio pode vir dele e não do GuiaLar; por isso o programa só diz "Protegido" quando o DNS configurado é o do modo escolhido e o teste de bloqueio responde.
 
 Reescrita em Rust com interface nativa: **GTK 4 / Libadwaita** no Linux (carregado em tempo de execução) e **Win32 / Fluent (Mica)** no Windows. Há também uma seção informativa de **navegadores recomendados** (Brave, Helium, Zen Browser + uBlock Origin, Mullvad Browser, LibreWolf); o programa só mostra os links oficiais e não instala nada.
 

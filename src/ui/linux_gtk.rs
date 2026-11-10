@@ -151,10 +151,13 @@ mod imp {
         buttons: [usize; 4], // ativar, restaurar, navegadores, verificar
         modes_group: usize,
         check_ads: usize,
+        check_family: usize,
     }
 
     static BUSY: AtomicBool = AtomicBool::new(false);
     static ARMED: AtomicBool = AtomicBool::new(false);
+    /// `true` enquanto o programa mexe nos rádios (não é escolha do usuário).
+    static SYNCING: AtomicBool = AtomicBool::new(false);
     /// Toast "clique de novo…" ainda na tela (com referência própria) para poder dispensá-lo.
     static ARM_TOAST: AtomicUsize = AtomicUsize::new(0);
     /// Verificação pedida pelo usuário: ao terminar, mostra o veredito.
@@ -377,9 +380,17 @@ mod imp {
             // Seletor de filtro só enquanto desprotegido (escolha antes da ação primária).
             (a.gtk_widget_set_visible)(
                 u.modes_group as P,
-                (layout_state == theme::UiState::Desprotegido) as c_int,
+                theme::show_mode_selector(snap.as_ref(), busy) as c_int,
             );
             (a.gtk_widget_set_sensitive)(u.modes_group as P, (!busy) as c_int);
+            // Com proteção gravada, o rádio mostra o modo que está valendo.
+            if let Some(m) = snap.as_ref().and_then(|s| s.mode) {
+                SYNCING.store(true, Ordering::Relaxed);
+                let want_ads = m == crate::config::FilterMode::AdsOnly;
+                (a.gtk_check_button_set_active)(u.check_ads as P, want_ads as c_int);
+                (a.gtk_check_button_set_active)(u.check_family as P, (!want_ads) as c_int);
+                SYNCING.store(false, Ordering::Relaxed);
+            }
         }
         set_row_subtitle(
             u.row_check,
@@ -518,6 +529,26 @@ mod imp {
             let snap = Box::new(crate::ui::snapshot());
             unsafe { (api().g_idle_add)(idle_snapshot, Box::into_raw(snap) as P) };
         });
+    }
+
+    /// Mudou o rádio: com proteção ligada em outro modo, troca (mantém o DNS original).
+    unsafe extern "C" fn on_mode_toggled(b: P, _d: P) {
+        if SYNCING.load(Ordering::Relaxed) || BUSY.load(Ordering::Relaxed) {
+            return;
+        }
+        if (api().gtk_check_button_get_active)(b) == 0 {
+            return; // evento do botão que ficou inativo
+        }
+        let chosen = if b as usize == ui().check_ads {
+            crate::config::FilterMode::AdsOnly
+        } else {
+            crate::config::FilterMode::Family
+        };
+        let active = LAST.lock().unwrap().as_ref().and_then(|s| s.mode);
+        if active.is_some_and(|m| m != chosen) {
+            crate::config::set_mode(chosen);
+            run_action(crate::ui::action_activate);
+        }
     }
 
     unsafe extern "C" fn on_activate_btn(_b: P, _d: P) {
@@ -664,6 +695,16 @@ mod imp {
             (a.adw_action_row_set_activatable_widget)(r, radio);
             (a.adw_preferences_group_add)(modes_group, r);
         }
+        for radio in [radio_family, radio_ads] {
+            (a.g_signal_connect_data)(
+                radio,
+                cs("toggled").as_ptr(),
+                on_mode_toggled as P,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                0,
+            );
+        }
         (a.gtk_box_append)(content, modes_group);
 
         let group = (a.adw_preferences_group_new)();
@@ -726,6 +767,7 @@ mod imp {
             buttons: [b_on as usize, b_off as usize, b_br as usize, b_chk as usize],
             modes_group: modes_group as usize,
             check_ads: radio_ads as usize,
+            check_family: radio_family as usize,
         });
         // Ctrl+R = verificar.
         let act = (a.g_simple_action_new)(cs("verify").as_ptr(), std::ptr::null_mut());

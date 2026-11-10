@@ -33,24 +33,78 @@ pub fn active_mode() -> Option<FilterMode> {
     DnsStateManifest::load().ok().flatten().map(|m| m.mode)
 }
 
-pub fn check_status() -> ProtectionStatus {
-    let manifest_opt = match DnsStateManifest::load() {
-        Ok(m) => m,
-        Err(e) => return ProtectionStatus::PartiallyConfigured(describe_load_error(&e)),
-    };
+/// Resultado da conferência do DNS configurado contra o conjunto do modo (sem rede).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DnsCheck {
+    /// Todo DNS configurado (fora stubs locais) é do conjunto do modo.
+    Ours,
+    /// Há DNS configurado que não é do conjunto do modo.
+    Foreign(Vec<IpAddr>),
+    /// Não deu para ler nenhum DNS (só stub local ou nada): vale só a sonda.
+    Unknown,
+}
 
-    if manifest_opt.is_none() {
-        return ProtectionStatus::Unprotected;
+/// Confere os DNS configurados (IPv4 e IPv6) com o conjunto do `mode`.
+pub fn check_configured_dns(mode: FilterMode, configured: &[IpAddr]) -> DnsCheck {
+    let real: Vec<IpAddr> = configured
+        .iter()
+        .copied()
+        .filter(|ip| !crate::config::is_local_stub(ip))
+        .collect();
+    if real.is_empty() {
+        return DnsCheck::Unknown;
     }
+    let (v4, v6) = (mode.ipv4(), mode.ipv6());
+    let foreign: Vec<IpAddr> = real
+        .into_iter()
+        .filter(|ip| match ip {
+            IpAddr::V4(a) => !v4.contains(a),
+            IpAddr::V6(a) => !v6.contains(a),
+        })
+        .collect();
+    if foreign.is_empty() {
+        DnsCheck::Ours
+    } else {
+        DnsCheck::Foreign(foreign)
+    }
+}
 
-    let mode = manifest_opt.map(|m| m.mode).unwrap_or_default();
-    if run_dns_smoke_test(mode) {
+/// Decide o estado com manifesto presente. `probe` só é chamada se o DNS é nosso ou
+/// desconhecido (DNS de fora já é Parcial sem gastar rede).
+pub fn decide_status(
+    mode: FilterMode,
+    configured: &[IpAddr],
+    probe: impl FnOnce() -> bool,
+) -> ProtectionStatus {
+    if let DnsCheck::Foreign(f) = check_configured_dns(mode, configured) {
+        let lista: Vec<String> = f.iter().map(|i| i.to_string()).collect();
+        return ProtectionStatus::PartiallyConfigured(format!(
+            "Este computador usa outro DNS ({}), não o do GuiaLar. Clique em \"Proteger\" de novo ou em \"Desativar proteção\".",
+            lista.join(", ")
+        ));
+    }
+    if probe() {
         ProtectionStatus::Protected
     } else {
         ProtectionStatus::PartiallyConfigured(
             "DNS gravado, mas o filtro não respondeu no teste de rede".into(),
         )
     }
+}
+
+pub fn check_status() -> ProtectionStatus {
+    let manifest_opt = match DnsStateManifest::load() {
+        Ok(m) => m,
+        Err(e) => return ProtectionStatus::PartiallyConfigured(describe_load_error(&e)),
+    };
+
+    let Some(manifest) = manifest_opt else {
+        return ProtectionStatus::Unprotected;
+    };
+    let mode = manifest.mode;
+    decide_status(mode, &crate::platform::configured_dns(), || {
+        run_dns_smoke_test(mode)
+    })
 }
 
 /// O nome de teste do `mode` foi bloqueado pelo filtro (resposta 0.0.0.0 / ::).
@@ -226,7 +280,7 @@ mod qa_tests {
 
     #[test]
     fn dominios_de_teste_por_modo() {
-        assert_eq!(FilterMode::Family.probe_host(), "malware.testcategory.com");
+        assert_eq!(FilterMode::Family.probe_host(), "nudity.testcategory.com");
         assert_eq!(FilterMode::AdsOnly.probe_host(), "doubleclick.net");
     }
 
@@ -235,5 +289,85 @@ mod qa_tests {
         let e = std::io::Error::from_raw_os_error(11004);
         assert_eq!(is_blocked_error(&e), cfg!(windows));
         assert!(!is_blocked_error(&std::io::Error::from_raw_os_error(11001)));
+    }
+
+    fn ips(v: &[&str]) -> Vec<IpAddr> {
+        v.iter().map(|s| s.parse().unwrap()).collect()
+    }
+
+    /// Tabela do check_status (ADR-025), sem rede: (modo, DNS configurado, sonda) -> estado.
+    #[test]
+    fn tabela_do_check_status() {
+        use FilterMode::{AdsOnly, Family};
+        let fam4 = ["1.1.1.3", "1.0.0.3"];
+        let fam6 = ["2606:4700:4700::1113", "2606:4700:4700::1003"];
+        let ads4 = ["94.140.14.14", "94.140.15.15"];
+        let todos_fam: Vec<&str> = fam4.iter().chain(fam6.iter()).copied().collect();
+        let prot = |m, dns: &[&str], probe| decide_status(m, &ips(dns), || probe);
+        let parcial = |s: ProtectionStatus| matches!(s, ProtectionStatus::PartiallyConfigured(_));
+
+        assert_eq!(prot(Family, &todos_fam, true), ProtectionStatus::Protected);
+        assert_eq!(prot(AdsOnly, &ads4, true), ProtectionStatus::Protected);
+        // sonda falha com o DNS certo: parcial
+        assert!(parcial(prot(Family, &todos_fam, false)));
+        // 1.1.1.2 (só malware): a sonda nova já pega, mas o DNS de fora também é parcial
+        assert!(parcial(prot(Family, &["1.1.1.2", "1.0.0.2"], true)));
+        // DNS de outro modo
+        assert!(parcial(prot(Family, &ads4, true)));
+        assert!(parcial(prot(AdsOnly, &fam4, true)));
+        // Pi-hole/roteador junto com o nosso: qualquer DNS de fora derruba
+        assert!(parcial(prot(
+            AdsOnly,
+            &["94.140.14.14", "192.168.0.2"],
+            true
+        )));
+        // IPv6 de fora com IPv4 nosso
+        assert!(parcial(prot(
+            Family,
+            &["1.1.1.3", "2001:4860:4860::8888"],
+            true
+        )));
+        // stubs locais não contam nem como de fora nem como nosso
+        assert_eq!(
+            prot(Family, &["127.0.0.53", "1.1.1.3"], true),
+            ProtectionStatus::Protected
+        );
+        assert_eq!(
+            prot(Family, &["127.0.0.53"], true),
+            ProtectionStatus::Protected
+        );
+        assert!(parcial(prot(Family, &["127.0.0.53"], false)));
+        assert_eq!(
+            prot(Family, &["fec0:0:0:ffff::1", "1.1.1.3"], true),
+            ProtectionStatus::Protected
+        );
+        // sem DNS legível: só a sonda decide
+        assert_eq!(prot(Family, &[], true), ProtectionStatus::Protected);
+        assert!(parcial(prot(Family, &[], false)));
+    }
+
+    #[test]
+    fn dns_de_fora_nao_gasta_rede() {
+        let s = decide_status(FilterMode::Family, &ips(&["8.8.8.8"]), || {
+            panic!("a sonda não deve rodar com DNS de fora")
+        });
+        match s {
+            ProtectionStatus::PartiallyConfigured(m) => assert!(m.contains("8.8.8.8")),
+            o => panic!("{o:?}"),
+        }
+    }
+
+    #[test]
+    fn sem_manifesto_continua_desprotegido() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let old = std::env::var("HOME").ok();
+        let home = unique_temp_home("semmanifesto");
+        std::fs::create_dir_all(&home).unwrap();
+        std::env::set_var("HOME", &home);
+        std::env::remove_var("SUDO_USER");
+        let st = check_status();
+        restore_home(old);
+        std::fs::remove_dir_all(&home).ok();
+        assert_eq!(st, ProtectionStatus::Unprotected);
     }
 }

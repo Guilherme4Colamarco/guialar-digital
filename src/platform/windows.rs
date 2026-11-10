@@ -245,6 +245,29 @@ fn inspect_interface_state(index: u32, alias: &str) -> Result<ConnectionBackup> 
     })
 }
 
+/// DNS configurados nas interfaces ativas (IPv4 e IPv6).
+pub fn configured_dns() -> Vec<std::net::IpAddr> {
+    let Ok(ifaces) = list_active_interfaces() else {
+        return Vec::new();
+    };
+    let mut out: Vec<std::net::IpAddr> = Vec::new();
+    for (_, index) in ifaces {
+        let Ok(text) = powershell_output(&format!(
+            "(Get-DnsClientServerAddress -InterfaceIndex {index}).ServerAddresses -join ','"
+        )) else {
+            continue;
+        };
+        for tok in text.trim().split(',') {
+            if let Ok(ip) = tok.trim().parse::<std::net::IpAddr>() {
+                if !out.contains(&ip) {
+                    out.push(ip);
+                }
+            }
+        }
+    }
+    out
+}
+
 /// `true` se alguma interface ativa ainda usa o DNS do filtro do GuiaLar.
 pub fn cloudflare_dns_active() -> bool {
     powershell_output("(Get-DnsClientServerAddress -AddressFamily IPv4).ServerAddresses -join ','")
