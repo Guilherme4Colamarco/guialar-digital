@@ -123,19 +123,16 @@ fn is_corrupt_manifest(path: &std::path::Path) -> bool {
 
 /// Desfaz DNS (e políticas do uBlock no Windows).
 pub fn action_restore() -> Result<String> {
-    // Arquivo de estado ilegível: "Desativar" nunca poderia funcionar. Remove-o e
-    // orienta a proteger de novo (a pessoa não fica sem saída).
-    if let Ok(path) = DnsStateManifest::file_path() {
-        if is_corrupt_manifest(&path) {
-            std::fs::remove_file(&path)?;
-            return Ok(
-            "O registro da proteção estava danificado e foi removido. Clique em \"Proteger este computador\" para começar de novo."
-                .into(),
-            );
-        }
-    }
+    // Manifesto ilegível: o fluxo de reversão limpa o arquivo e volta o DNS ao automático.
+    let corrompido = DnsStateManifest::file_path()
+        .map(|p| is_corrupt_manifest(&p))
+        .unwrap_or(false);
     crate::handle_revert()?;
-    Ok("Configurações de rede restauradas.".into())
+    if corrompido {
+        Ok("O registro da proteção estava danificado. O DNS voltou ao padrão da rede; clique em \"Proteger este computador\" para começar de novo.".into())
+    } else {
+        Ok("Configurações de rede restauradas.".into())
+    }
 }
 
 #[cfg(test)]
@@ -163,6 +160,18 @@ mod tests {
         assert!(is_corrupt_manifest(&f));
         std::fs::write(&f, r#"{"backend":"DirectResolvConf","applied_at_utc":"1","connections":[],"previous_resolv_conf":null}"#).unwrap();
         assert!(!is_corrupt_manifest(&f));
+        // Sem permissão de leitura NÃO é corrompido.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::write(&f, "{ lixo").unwrap();
+            std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o000)).unwrap();
+            let readable = std::fs::read(&f).is_ok(); // root lê mesmo assim
+            if !readable {
+                assert!(!is_corrupt_manifest(&f));
+            }
+            std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
         std::fs::remove_dir_all(&dir).ok();
     }
 }

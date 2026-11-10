@@ -15,7 +15,7 @@ pub use imp::run;
 #[cfg(target_env = "gnu")]
 mod imp {
     use std::ffi::{c_char, c_int, c_uint, c_void, CString};
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Mutex, OnceLock};
 
     use anyhow::Result;
@@ -111,7 +111,8 @@ mod imp {
         gtk_window_set_default_size: unsafe extern "C" fn(P, c_int, c_int),
         gtk_window_set_icon_name: unsafe extern "C" fn(P, *const c_char),
         gtk_window_present: unsafe extern "C" fn(P),
-        gtk_window_set_default_widget: unsafe extern "C" fn(P, P),
+        adw_toast_dismiss: unsafe extern "C" fn(P),
+        g_object_ref: unsafe extern "C" fn(P) -> P,
         gtk_widget_remove_css_class: unsafe extern "C" fn(P, *const c_char),
         gtk_button_set_label: unsafe extern "C" fn(P, *const c_char),
         gtk_progress_bar_new: unsafe extern "C" fn() -> P,
@@ -145,6 +146,8 @@ mod imp {
 
     static BUSY: AtomicBool = AtomicBool::new(false);
     static ARMED: AtomicBool = AtomicBool::new(false);
+    /// Toast "clique de novo…" ainda na tela (com referência própria) para poder dispensá-lo.
+    static ARM_TOAST: AtomicUsize = AtomicUsize::new(0);
     /// Verificação pedida pelo usuário: ao terminar, mostra o veredito.
     static CHECKING: AtomicBool = AtomicBool::new(false);
     /// Último veredito de "Verificar": fica na tela (o toast some sozinho).
@@ -336,7 +339,6 @@ mod imp {
                 let accent = cs("suggested-action");
                 if pos == Some(0) {
                     (a.gtk_widget_add_css_class)(b, accent.as_ptr());
-                    (a.gtk_window_set_default_widget)(u.window as P, b); // Enter
                 } else {
                     (a.gtk_widget_remove_css_class)(b, accent.as_ptr());
                 }
@@ -420,12 +422,34 @@ mod imp {
         }
     }
 
-    fn toast(msg: &str) {
+    /// Mostra um toast e devolve o ponteiro (com referência extra: libere com `dismiss_arm_toast`).
+    fn toast_ref(msg: &str) -> usize {
         let u = ui();
         let a = api();
-        // SAFETY: thread principal.
+        // SAFETY: thread principal. O overlay assume uma referência; guardamos outra.
         unsafe {
-            (a.adw_toast_overlay_add_toast)(u.toasts as P, (a.adw_toast_new)(cs(msg).as_ptr()));
+            let t = (a.adw_toast_new)(cs(msg).as_ptr());
+            (a.g_object_ref)(t);
+            (a.adw_toast_overlay_add_toast)(u.toasts as P, t);
+            t as usize
+        }
+    }
+
+    fn toast(msg: &str) {
+        let t = toast_ref(msg);
+        // SAFETY: devolve a referência extra; o overlay mantém a dele.
+        unsafe { (api().g_object_unref)(t as P) };
+    }
+
+    /// Dispensa o aviso de "confirmar desativação" (já não vale) e libera a referência.
+    fn dismiss_arm_toast() {
+        let t = ARM_TOAST.swap(0, Ordering::Relaxed);
+        if t != 0 {
+            // SAFETY: referência própria guardada em `toast_ref`; dispensar duas vezes é inofensivo.
+            unsafe {
+                (api().adw_toast_dismiss)(t as P);
+                (api().g_object_unref)(t as P);
+            }
         }
     }
 
@@ -435,6 +459,8 @@ mod imp {
         let checked = CHECKING.swap(false, Ordering::Relaxed);
         let mut verdict = None;
         if checked {
+            // Verificação concluída: um erro antigo (ex.: permissão negada) não vale mais.
+            ERR_DETAIL.lock().unwrap().clear();
             let snap = LAST.lock().unwrap().clone();
             let state = theme::ui_state(snap.as_ref(), false);
             let v = theme::verdict(state, snap.as_ref());
@@ -485,17 +511,23 @@ mod imp {
     /// Desativar pede confirmação (E5): o 1º clique arma, o 2º executa; desarma em 5 s.
     unsafe extern "C" fn on_restore_btn(_b: P, _d: P) {
         if ARMED.swap(false, Ordering::Relaxed) {
+            dismiss_arm_toast();
             render();
             run_action(crate::ui::action_restore);
         } else {
             ARMED.store(true, Ordering::Relaxed);
             render();
-            toast("Clique de novo em \"Confirmar desativação\" para desligar a proteção.");
+            dismiss_arm_toast();
+            ARM_TOAST.store(
+                toast_ref("Clique de novo em \"Confirmar desativação\" para desligar a proteção."),
+                Ordering::Relaxed,
+            );
             (api().g_timeout_add)(5000, disarm, std::ptr::null_mut());
         }
     }
     unsafe extern "C" fn disarm(_d: P) -> c_int {
         ARMED.store(false, Ordering::Relaxed);
+        dismiss_arm_toast();
         render();
         0
     }
@@ -544,6 +576,13 @@ mod imp {
 
     unsafe extern "C" fn on_app_activate(app: P, _d: P) {
         let a = api();
+        // Segunda ativação (ex.: abrir de novo pelo menu): só traz a janela existente.
+        let existing = UI.lock().unwrap().as_ref().map(|u| u.window);
+        if let Some(win) = existing {
+            (a.gtk_window_present)(win as P);
+            refresh();
+            return;
+        }
         let win = (a.adw_application_window_new)(app);
         (a.gtk_window_set_title)(win, cs("GuiaLar Digital").as_ptr());
         (a.gtk_window_set_icon_name)(win, cs("br.uniube.pi.guialar").as_ptr());

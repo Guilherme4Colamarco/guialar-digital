@@ -46,6 +46,7 @@ pub fn detect_active_backend() -> BackendKind {
 /// `internal-apply` / `internal-revert`. Dentro de um AppImage usa o caminho do
 /// AppImage (o ponto de montagem FUSE não é acessível ao root).
 fn elevate_self(subcommand: &str) -> Result<()> {
+    crate::sysutil::OpLock::check_free()?;
     let appimage = std::env::var_os("APPIMAGE").filter(|v| !v.is_empty());
     let exe = match &appimage {
         Some(a) => std::path::PathBuf::from(a),
@@ -102,6 +103,80 @@ fn elevate_self(subcommand: &str) -> Result<()> {
         }
         code => bail!("a operação com privilégios falhou (código {code:?})"),
     }
+}
+
+/// `true` se o DNS em uso ainda é o filtro do GuiaLar (resolv.conf ou perfil do NM).
+pub fn cloudflare_dns_active() -> bool {
+    let cf = |t: &str| {
+        t.lines()
+            .filter(|l| l.trim_start().starts_with("nameserver"))
+            .any(|l| {
+                l.split_whitespace()
+                    .nth(1)
+                    .and_then(|v| v.parse::<Ipv4Addr>().ok())
+                    .is_some_and(|ip| CLOUDFLARE_IPV4.contains(&ip))
+            })
+    };
+    if fs::read_to_string("/etc/resolv.conf")
+        .map(|t| cf(&t))
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    if is_command_available("nmcli") {
+        if let Ok(uuids) = get_active_nm_connections() {
+            for uuid in uuids {
+                if let Ok(b) = inspect_nm_connection_raw(&uuid) {
+                    if b.0.iter().any(|ip| CLOUDFLARE_IPV4.contains(ip)) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Reversão de emergência: sem manifesto (corrompido/apagado) volta o DNS ao automático.
+pub fn revert_dns_fallback() -> Result<()> {
+    if !crate::sysutil::is_root() {
+        return elevate_self("internal-revert");
+    }
+    let _lock = crate::sysutil::OpLock::acquire()?;
+    match detect_active_backend() {
+        BackendKind::NetworkManager => {
+            for uuid in get_active_nm_connections()? {
+                for fam in ["ipv4", "ipv6"] {
+                    let dns = format!("{fam}.dns");
+                    let ign = format!("{fam}.ignore-auto-dns");
+                    run_privileged_command(
+                        "nmcli",
+                        &["connection", "modify", &uuid, &dns, "", &ign, "no"],
+                    )?;
+                }
+                run_privileged_command("nmcli", &["connection", "up", "uuid", &uuid])?;
+            }
+        }
+        BackendKind::SystemdResolved => revert_systemd_resolved()?,
+        BackendKind::OpenResolvRunit => revert_openresolv_runit()?,
+        BackendKind::DirectResolvConf | BackendKind::WindowsPowerShell => {
+            // Sem backup do DNS anterior: só tira as linhas do filtro do GuiaLar.
+            let atual = fs::read_to_string("/etc/resolv.conf").unwrap_or_default();
+            let limpo: Vec<&str> = atual
+                .lines()
+                .filter(|l| !l.contains("Gerado pelo GuiaLar"))
+                .filter(|l| {
+                    !(l.trim_start().starts_with("nameserver")
+                        && (l.contains("1.1.1.3")
+                            || l.contains("1.0.0.3")
+                            || l.contains("2606:4700:4700::")))
+                })
+                .collect();
+            write_resolv_conf(&(limpo.join("\n") + "\n"))?;
+        }
+    }
+    DnsStateManifest::remove_manifest()?;
+    Ok(())
 }
 
 /// Aplica a proteção familiar conforme o backend detectado.
@@ -283,7 +358,22 @@ fn get_active_nm_connections() -> Result<Vec<String>> {
     Ok(uuids)
 }
 
+fn inspect_nm_connection_raw(uuid: &str) -> Result<(Vec<Ipv4Addr>, bool)> {
+    let b = inspect_nm_connection_unsanitized(uuid)?;
+    Ok((b.original_ipv4_dns, b.was_dhcp_ipv4))
+}
+
 fn inspect_nm_connection(uuid: &str) -> Result<ConnectionBackup> {
+    let b = inspect_nm_connection_unsanitized(uuid)?;
+    let (ips, dhcp) = crate::config::sanitize_original_dns(b.original_ipv4_dns, b.was_dhcp_ipv4);
+    Ok(ConnectionBackup {
+        original_ipv4_dns: ips,
+        was_dhcp_ipv4: dhcp,
+        ..b
+    })
+}
+
+fn inspect_nm_connection_unsanitized(uuid: &str) -> Result<ConnectionBackup> {
     let output = Command::new("nmcli")
         .args([
             "-t",

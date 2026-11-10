@@ -202,29 +202,55 @@ pub fn is_safe_ps_alias(value: &str) -> bool {
 
 /// Trava de operação: impede dois `apply`/`revert` ao mesmo tempo (o NetworkManager
 /// quebra com ativações paralelas). Trava velha (>120 s) é considerada abandonada.
-pub struct OpLock(PathBuf);
+/// `acquire()` é reentrante no mesmo processo (o subcomando interno já segura a trava).
+pub struct OpLock(Option<PathBuf>);
+
+static HELD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+const LOCK_BUSY: &str =
+    "Outra operação do GuiaLar já está em andamento. Aguarde terminar e tente de novo.";
+
+fn lock_path() -> PathBuf {
+    std::env::temp_dir().join("guialar-op.lock")
+}
+
+fn lock_is_stale(path: &Path) -> bool {
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+        .is_some_and(|d| d.as_secs() > 120)
+}
 
 impl OpLock {
     pub fn acquire() -> Result<Self> {
-        let dir = std::env::temp_dir();
-        Self::acquire_in(&dir.join("guialar-op.lock"))
+        if HELD.load(std::sync::atomic::Ordering::SeqCst) {
+            return Ok(Self(None)); // já seguro por este processo
+        }
+        let l = Self::acquire_in(&lock_path())?;
+        HELD.store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(l)
+    }
+
+    /// Falha se OUTRO processo está operando (para quem não é root/admin e só vai elevar).
+    pub fn check_free() -> Result<()> {
+        let path = lock_path();
+        if HELD.load(std::sync::atomic::Ordering::SeqCst) || !path.exists() || lock_is_stale(&path)
+        {
+            return Ok(());
+        }
+        bail!(LOCK_BUSY)
     }
 
     pub fn acquire_in(path: &Path) -> Result<Self> {
         for _ in 0..2 {
             match OpenOptions::new().write(true).create_new(true).open(path) {
-                Ok(_) => return Ok(Self(path.to_path_buf())),
+                Ok(_) => return Ok(Self(Some(path.to_path_buf()))),
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                    let velha = std::fs::metadata(path)
-                        .and_then(|m| m.modified())
-                        .ok()
-                        .and_then(|t| t.elapsed().ok())
-                        .is_some_and(|d| d.as_secs() > 120);
-                    if velha {
+                    if lock_is_stale(path) {
                         let _ = std::fs::remove_file(path);
                         continue;
                     }
-                    bail!("Outra operação do GuiaLar já está em andamento. Aguarde terminar e tente de novo.");
+                    bail!(LOCK_BUSY);
                 }
                 Err(e) => return Err(e).context("não foi possível criar a trava de operação"),
             }
@@ -235,8 +261,53 @@ impl OpLock {
 
 impl Drop for OpLock {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
+        if let Some(p) = &self.0 {
+            let _ = std::fs::remove_file(p);
+            if *p == lock_path() {
+                HELD.store(false, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
     }
+}
+
+/// Root (Unix) ou administrador (Windows).
+pub fn is_privileged() -> bool {
+    #[cfg(unix)]
+    {
+        is_root()
+    }
+    #[cfg(windows)]
+    {
+        // SAFETY: função Win32 sem argumentos.
+        unsafe { crate::win32::IsUserAnAdmin() != 0 }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        false
+    }
+}
+
+/// Início de uma operação: com privilégio, pega a trava; sem, só confere que está livre.
+pub fn guard_operation() -> Result<Option<OpLock>> {
+    if is_privileged() {
+        Ok(Some(OpLock::acquire()?))
+    } else {
+        OpLock::check_free()?;
+        Ok(None)
+    }
+}
+
+/// Os subcomandos internos só fazem sentido já elevados.
+pub fn require_privileged() -> Result<()> {
+    if is_privileged() {
+        return Ok(());
+    }
+    if cfg!(windows) {
+        bail!("Subcomando interno requer privilégios de administrador.");
+    }
+    bail!(
+        "Subcomando interno requer privilégios de root (use 'guialar apply' ou 'guialar revert')."
+    );
 }
 
 #[cfg(test)]

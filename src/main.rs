@@ -147,6 +147,8 @@ fn handle_setup(interativo: bool) -> anyhow::Result<()> {
 }
 
 fn handle_internal_browser() -> anyhow::Result<()> {
+    sysutil::require_privileged()?;
+    let _lock = sysutil::OpLock::acquire()?;
     #[cfg(windows)]
     for line in policy::install_all()? {
         println!("  ✓ {line}");
@@ -199,6 +201,7 @@ fn handle_apply() -> anyhow::Result<()> {
 
 /// `with_browsers`: no Windows faz DNS + navegadores com um único UAC.
 fn apply_flow(with_browsers: bool) -> anyhow::Result<()> {
+    let _guard = sysutil::guard_operation()?;
     if DnsStateManifest::load()?.is_some() {
         println!("ℹ️  A proteção já está ativa. Use 'guialar revert' antes de aplicar de novo.");
         return Ok(());
@@ -229,23 +232,55 @@ fn apply_flow(with_browsers: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn handle_revert() -> anyhow::Result<()> {
-    let Some(manifest) = DnsStateManifest::load()? else {
-        #[cfg(windows)]
-        {
-            // Sem DNS para reverter, mas ainda pode haver políticas do uBlock.
-            if platform::elevate_if_needed("internal-revert")? {
-                return Ok(());
-            }
-            policy::revert_all()?;
+/// Reverte a proteção. Cobre manifesto normal, ausente e corrompido (nunca deixa o
+/// DNS preso no filtro). Devolve a mensagem final.
+fn revert_flow() -> anyhow::Result<String> {
+    match DnsStateManifest::load() {
+        Ok(Some(manifest)) => {
+            println!("🔄 Restaurando configurações originais de DNS...");
+            platform::revert_dns(&manifest)?;
+            Ok("Configurações de DNS restauradas com sucesso para o estado anterior.".into())
         }
-        println!("ℹ️  Nenhum manifesto de proteção ativo encontrado para reverter.");
-        return Ok(());
-    };
+        Ok(None) => {
+            if platform::cloudflare_dns_active() {
+                println!("🔄 O DNS ainda usa o filtro, mas não há registro: voltando ao padrão da rede...");
+                platform::revert_dns_fallback()?;
+                return Ok("DNS restaurado para o padrão da rede.".into());
+            }
+            #[cfg(windows)]
+            {
+                // Sem DNS para reverter, mas ainda pode haver políticas do uBlock.
+                if platform::elevate_if_needed("internal-revert")? {
+                    return Ok(
+                        "Nenhum manifesto de proteção ativo encontrado para reverter.".into(),
+                    );
+                }
+                policy::revert_all()?;
+            }
+            Ok("Nenhum manifesto de proteção ativo encontrado para reverter.".into())
+        }
+        Err(_) => {
+            println!(
+                "⚠️  O registro da proteção está danificado: voltando o DNS ao padrão da rede..."
+            );
+            if let Ok(path) = DnsStateManifest::file_path() {
+                let _ = std::fs::remove_file(path);
+            }
+            platform::revert_dns_fallback()?;
+            Ok("O registro estava danificado. DNS restaurado para o padrão da rede.".into())
+        }
+    }
+}
 
-    println!("🔄 Restaurando configurações originais de DNS...");
-    platform::revert_dns(&manifest)?;
-    println!("✅ Configurações de DNS restauradas com sucesso para o estado anterior.");
+fn handle_revert() -> anyhow::Result<()> {
+    let _guard = sysutil::guard_operation()?;
+    let msg = revert_flow()?;
+    let icone = if msg.starts_with("Nenhum") {
+        "ℹ️ "
+    } else {
+        "✅"
+    };
+    println!("{icone} {msg}");
     Ok(())
 }
 
@@ -299,21 +334,21 @@ fn open_store_pages(install_all: bool) -> anyhow::Result<()> {
 }
 
 fn handle_internal_setup() -> anyhow::Result<()> {
+    sysutil::require_privileged()?;
+    let _lock = sysutil::OpLock::acquire()?;
     platform::apply_all()
 }
 
 fn handle_internal_apply() -> anyhow::Result<()> {
+    sysutil::require_privileged()?;
+    let _lock = sysutil::OpLock::acquire()?;
     platform::apply_dns()
 }
 
 fn handle_internal_revert() -> anyhow::Result<()> {
-    if let Some(manifest) = DnsStateManifest::load()? {
-        platform::revert_dns(&manifest)?;
-    } else {
-        #[cfg(windows)]
-        policy::revert_all()?;
-    }
-    Ok(())
+    sysutil::require_privileged()?;
+    let _lock = sysutil::OpLock::acquire()?;
+    revert_flow().map(|_| ())
 }
 
 #[cfg(test)]

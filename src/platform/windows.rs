@@ -60,6 +60,7 @@ pub fn elevate_if_needed(subcomando: &str) -> Result<bool> {
     if is_admin() {
         return Ok(false);
     }
+    crate::sysutil::OpLock::check_free()?;
     let exe = std::env::current_exe().context("não foi possível localizar o executável")?;
     let code = crate::win32::run_elevated_hidden(&exe.to_string_lossy(), subcomando)
         .map_err(anyhow::Error::msg)?;
@@ -88,6 +89,7 @@ pub fn apply_all() -> Result<()> {
 
 /// Já elevado: grava o DNS e o manifesto.
 fn apply_core() -> Result<()> {
+    let _lock = crate::sysutil::OpLock::acquire()?;
     let interfaces = list_active_interfaces()?;
     if interfaces.is_empty() {
         bail!("Nenhuma interface de rede ativa encontrada no Windows");
@@ -117,6 +119,7 @@ pub fn revert_dns(manifest: &DnsStateManifest) -> Result<()> {
     if elevate_if_needed("internal-revert")? {
         return Ok(());
     }
+    let _lock = crate::sysutil::OpLock::acquire()?;
     let mut falhas: Vec<String> = Vec::new();
     for conn in &manifest.connections {
         // O alias vem do manifesto em disco: pode ter sido adulterado.
@@ -184,13 +187,44 @@ fn inspect_interface_state(index: u32, alias: &str) -> Result<ConnectionBackup> 
         .split(',')
         .filter_map(|s| s.trim().parse().ok())
         .collect();
+    let dhcp = ips.is_empty();
+    let (ips, dhcp) = crate::config::sanitize_original_dns(ips, dhcp);
     Ok(ConnectionBackup {
         id: alias.to_string(),
-        was_dhcp_ipv4: ips.is_empty(),
+        was_dhcp_ipv4: dhcp,
         original_ipv4_dns: ips,
         original_ipv6_dns: Vec::new(),
         was_dhcp_ipv6: true,
     })
+}
+
+/// `true` se alguma interface ativa ainda usa o DNS do filtro do GuiaLar.
+pub fn cloudflare_dns_active() -> bool {
+    powershell_output("(Get-DnsClientServerAddress -AddressFamily IPv4).ServerAddresses -join ','")
+        .map(|o| {
+            o.trim()
+                .split(',')
+                .filter_map(|s| s.trim().parse::<Ipv4Addr>().ok())
+                .any(|ip| CLOUDFLARE_IPV4.contains(&ip))
+        })
+        .unwrap_or(false)
+}
+
+/// Reversão de emergência sem manifesto: DNS automático em todas as interfaces.
+pub fn revert_dns_fallback() -> Result<()> {
+    if elevate_if_needed("internal-revert")? {
+        return Ok(());
+    }
+    let _lock = crate::sysutil::OpLock::acquire()?;
+    for (_, index) in list_active_interfaces()? {
+        run_powershell(&format!(
+            "Set-DnsClientServerAddress -InterfaceIndex {index} -ResetServerAddresses"
+        ))?;
+    }
+    crate::policy::revert_all()?;
+    flush_dns();
+    DnsStateManifest::remove_manifest()?;
+    Ok(())
 }
 
 fn flush_dns() {

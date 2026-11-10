@@ -224,6 +224,7 @@ extern "system" {
     ) -> i32;
     pub fn GetDpiForWindow(h: HWND) -> u32;
     pub fn SetForegroundWindow(h: HWND) -> i32;
+    pub fn FindWindowW(class: *const u16, title: *const u16) -> HWND;
     pub fn DestroyWindow(h: HWND) -> i32;
     pub fn MessageBoxW(h: HWND, text: *const u16, caption: *const u16, kind: u32) -> i32;
     pub fn SetTimer(h: HWND, id: usize, ms: u32, f: *const c_void) -> usize;

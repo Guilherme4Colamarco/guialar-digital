@@ -975,6 +975,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: usize, lp: isize) ->
                 let mut st = STATE.lock().unwrap();
                 st.snapshot = Some(*s);
                 if st.message.starts_with("Verificando") {
+                    st.error_detail.clear(); // verificação ok: erro antigo não vale mais
                     let state = theme::ui_state(st.snapshot.as_ref(), false);
                     st.message = theme::verdict(state, st.snapshot.as_ref());
                 }
@@ -1022,6 +1023,13 @@ pub fn run() -> Result<()> {
             lpszClassName: class.as_ptr(),
             hIconSm: LoadImageW(inst, int_resource(1), 1, 16, 16, 0x8000),
         };
+        // Instância única: se já há janela, só a traz para a frente.
+        let existing = FindWindowW(class.as_ptr(), std::ptr::null());
+        if !existing.is_null() {
+            ShowWindow(existing, 9); // SW_RESTORE
+            SetForegroundWindow(existing);
+            return Ok(());
+        }
         if RegisterClassExW(&wc) == 0 {
             bail!("não foi possível registrar a janela");
         }

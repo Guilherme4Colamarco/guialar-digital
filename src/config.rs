@@ -28,6 +28,16 @@ pub enum BackendKind {
     WindowsPowerShell,
 }
 
+/// DNS "original" nunca pode ser o filtro do próprio GuiaLar (apply sem manifesto sobre
+/// rede já filtrada): nesse caso a interface é tratada como DHCP, sem IPs fixos.
+pub fn sanitize_original_dns(ips: Vec<Ipv4Addr>, was_dhcp: bool) -> (Vec<Ipv4Addr>, bool) {
+    if !ips.is_empty() && ips.iter().all(|ip| CLOUDFLARE_IPV4.contains(ip)) {
+        (Vec::new(), true)
+    } else {
+        (ips, was_dhcp)
+    }
+}
+
 /// Backup do estado de uma conexão específica (usado no NetworkManager ou Windows).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConnectionBackup {
@@ -252,5 +262,23 @@ mod qa_tests {
             "applied_at_utc deve ser epoch numérico, veio {:?}",
             m.applied_at_utc
         );
+    }
+
+    #[test]
+    fn dns_original_nunca_e_o_filtro() {
+        let cf = vec![CLOUDFLARE_IPV4[0], CLOUDFLARE_IPV4[1]];
+        assert_eq!(sanitize_original_dns(cf.clone(), false), (Vec::new(), true));
+        assert_eq!(
+            sanitize_original_dns(vec![CLOUDFLARE_IPV4[0]], false),
+            (Vec::new(), true)
+        );
+        let casa = vec![Ipv4Addr::new(192, 168, 0, 1)];
+        assert_eq!(
+            sanitize_original_dns(casa.clone(), false),
+            (casa.clone(), false)
+        );
+        let misto = vec![CLOUDFLARE_IPV4[0], Ipv4Addr::new(9, 9, 9, 9)];
+        assert_eq!(sanitize_original_dns(misto.clone(), false), (misto, false));
+        assert_eq!(sanitize_original_dns(Vec::new(), true), (Vec::new(), true));
     }
 }
