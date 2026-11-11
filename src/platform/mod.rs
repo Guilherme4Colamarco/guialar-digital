@@ -1,5 +1,7 @@
 //! Despacho de plataforma em tempo de compilação.
 
+pub mod runner;
+
 #[cfg(target_os = "linux")]
 pub mod linux;
 
@@ -38,20 +40,37 @@ pub fn plan_apply(
     }
 }
 
+/// Primeiro passo de todo `apply`: olha o manifesto e decide.
+enum ApplyStep {
+    /// Já protegido com o DNS do modo: nada a fazer.
+    AlreadyActive,
+    /// Há manifesto: reaplica o DNS do modo, mantendo o DNS original gravado.
+    Switch(DnsStateManifest),
+    /// Sem manifesto: aplica do zero.
+    Fresh,
+}
+
+fn next_apply_step(configured: impl FnOnce() -> Vec<std::net::IpAddr>) -> Result<ApplyStep> {
+    let Some(m) = DnsStateManifest::load()? else {
+        return Ok(ApplyStep::Fresh);
+    };
+    if plan_apply(Some(&m), crate::config::current_mode(), &configured())
+        == ApplyPlan::AlreadyActive
+    {
+        println!("ℹ️  A proteção já está ativa. Use 'guialar revert' antes de aplicar de novo.");
+        return Ok(ApplyStep::AlreadyActive);
+    }
+    Ok(ApplyStep::Switch(m))
+}
+
 pub fn apply_dns() -> Result<()> {
     let _guard = crate::sysutil::guard_operation()?;
     // Idempotente: um segundo `apply` regravaria o manifesto com o DNS já da Cloudflare
     // como "original" e o `revert` nunca restauraria o DNS verdadeiro.
-    if let Some(m) = DnsStateManifest::load()? {
-        if plan_apply(Some(&m), crate::config::current_mode(), &configured_dns())
-            == ApplyPlan::AlreadyActive
-        {
-            println!(
-                "ℹ️  A proteção já está ativa. Use 'guialar revert' antes de aplicar de novo."
-            );
-            return Ok(());
-        }
-        return switch_mode(m); // reaplica o DNS do modo, mantendo o DNS original do manifesto
+    match next_apply_step(configured_dns)? {
+        ApplyStep::AlreadyActive => return Ok(()),
+        ApplyStep::Switch(m) => return switch_mode(m), // mantém o DNS original do manifesto
+        ApplyStep::Fresh => {}
     }
     #[cfg(target_os = "linux")]
     {
@@ -98,16 +117,10 @@ pub fn elevate_if_needed(subcomando: &str) -> Result<bool> {
 /// Linux: só o DNS (o bloqueador é um passo separado, "Proteger navegadores").
 pub fn apply_all() -> Result<()> {
     let _guard = crate::sysutil::guard_operation()?;
-    if let Some(m) = DnsStateManifest::load()? {
-        if plan_apply(Some(&m), crate::config::current_mode(), &configured_dns())
-            == ApplyPlan::AlreadyActive
-        {
-            println!(
-                "ℹ️  A proteção já está ativa. Use 'guialar revert' antes de aplicar de novo."
-            );
-            return Ok(());
-        }
-        return switch_mode(m);
+    match next_apply_step(configured_dns)? {
+        ApplyStep::AlreadyActive => return Ok(()),
+        ApplyStep::Switch(m) => return switch_mode(m),
+        ApplyStep::Fresh => {}
     }
     #[cfg(target_os = "windows")]
     {

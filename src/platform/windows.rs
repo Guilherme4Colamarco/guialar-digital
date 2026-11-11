@@ -2,8 +2,8 @@
 
 use anyhow::{bail, Context, Result};
 use std::net::Ipv4Addr;
-use std::process::Command;
 
+use super::runner::{Cmd, CommandRunner, RealRunner};
 use crate::config::{current_mode, BackendKind, ConnectionBackup, DnsStateManifest};
 use crate::sysutil::{encode_powershell, is_safe_ps_alias};
 
@@ -11,40 +11,37 @@ use crate::sysutil::{encode_powershell, is_safe_ps_alias};
 const PS_PREFIX: &str =
     "[Console]::OutputEncoding=[Text.Encoding]::UTF8; $ErrorActionPreference='Stop'; ";
 
-/// `CREATE_NO_WINDOW`: nenhuma janela de console pisca ao chamar o PowerShell.
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-
-fn powershell(script: &str) -> Command {
-    use std::os::windows::process::CommandExt;
-    let mut cmd = Command::new("powershell");
-    cmd.creation_flags(CREATE_NO_WINDOW)
-        .args([
+fn powershell(script: &str) -> Cmd {
+    Cmd::output(
+        "powershell",
+        &[
             "-NoProfile",
             "-NonInteractive",
             "-ExecutionPolicy",
             "Bypass",
             "-EncodedCommand",
-        ])
-        .arg(encode_powershell(&format!("{PS_PREFIX}{script}")));
-    cmd
+            &encode_powershell(&format!("{PS_PREFIX}{script}")),
+        ],
+    )
+    .no_window() // CREATE_NO_WINDOW: nenhuma janela de console pisca
 }
 
-fn powershell_output(script: &str) -> Result<String> {
-    let out = powershell(script)
-        .output()
+fn powershell_output(r: &dyn CommandRunner, script: &str) -> Result<String> {
+    let out = r
+        .run(&powershell(script))
         .context("Falha ao executar PowerShell")?;
-    if !out.status.success() {
+    if !out.success() {
         bail!(
             "PowerShell falhou ({:?}): {}",
-            out.status.code(),
+            out.code,
             String::from_utf8_lossy(&out.stderr).trim()
         );
     }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    Ok(out.stdout_text())
 }
 
-fn run_powershell(script: &str) -> Result<()> {
-    powershell_output(script).map(|_| ())
+fn run_powershell(r: &dyn CommandRunner, script: &str) -> Result<()> {
+    powershell_output(r, script).map(|_| ())
 }
 
 fn is_admin() -> bool {
@@ -89,6 +86,24 @@ pub fn switch_mode(mut manifest: DnsStateManifest) -> Result<()> {
     }
     let _lock = crate::sysutil::OpLock::acquire()?;
     let mode = current_mode();
+    set_servers_on_connections(&RealRunner, &manifest, mode)?;
+    if mode == crate::config::FilterMode::AdsOnly {
+        crate::policy::revert_all()?;
+    } else {
+        crate::policy::install_all()?; // voltou ao familiar: o bloqueador de anúncios volta junto
+    }
+    manifest.mode = mode;
+    manifest.save_atomic()?;
+    flush_dns(&RealRunner);
+    Ok(())
+}
+
+/// Troca o DNS de cada conexão do manifesto pelo do `mode` (alias por nome).
+fn set_servers_on_connections(
+    r: &dyn CommandRunner,
+    manifest: &DnsStateManifest,
+    mode: crate::config::FilterMode,
+) -> Result<()> {
     let servers = format!(
         "'{}','{}','{}','{}'",
         mode.ipv4()[0],
@@ -100,19 +115,14 @@ pub fn switch_mode(mut manifest: DnsStateManifest) -> Result<()> {
         if !is_safe_ps_alias(&conn.id) {
             bail!("alias inválido no manifesto: {:?}", conn.id);
         }
-        run_powershell(&format!(
-            "Set-DnsClientServerAddress -InterfaceAlias '{}' -ServerAddresses @({servers})",
-            conn.id
-        ))?;
+        run_powershell(
+            r,
+            &format!(
+                "Set-DnsClientServerAddress -InterfaceAlias '{}' -ServerAddresses @({servers})",
+                conn.id
+            ),
+        )?;
     }
-    if mode == crate::config::FilterMode::AdsOnly {
-        crate::policy::revert_all()?;
-    } else {
-        crate::policy::install_all()?; // voltou ao familiar: o bloqueador de anúncios volta junto
-    }
-    manifest.mode = mode;
-    manifest.save_atomic()?;
-    flush_dns();
     Ok(())
 }
 
@@ -133,8 +143,12 @@ pub fn apply_all() -> Result<()> {
 
 /// Já elevado: grava o DNS e o manifesto.
 fn apply_core() -> Result<()> {
+    apply_core_with(&RealRunner)
+}
+
+fn apply_core_with(r: &dyn CommandRunner) -> Result<()> {
     let _lock = crate::sysutil::OpLock::acquire()?;
-    let interfaces = list_active_interfaces()?;
+    let interfaces = list_active_interfaces(r)?;
     if interfaces.is_empty() {
         bail!("Nenhuma interface de rede ativa encontrada no Windows");
     }
@@ -152,13 +166,16 @@ fn apply_core() -> Result<()> {
         }
         manifest
             .connections
-            .push(inspect_interface_state(*index, alias)?);
-        run_powershell(&format!(
-            "Set-DnsClientServerAddress -InterfaceIndex {index} -ServerAddresses @({servers})"
-        ))?;
+            .push(inspect_interface_state(r, *index, alias)?);
+        run_powershell(
+            r,
+            &format!(
+                "Set-DnsClientServerAddress -InterfaceIndex {index} -ServerAddresses @({servers})"
+            ),
+        )?;
     }
     manifest.save_atomic()?;
-    flush_dns();
+    flush_dns(r);
     Ok(())
 }
 
@@ -167,6 +184,15 @@ pub fn revert_dns(manifest: &DnsStateManifest) -> Result<()> {
         return Ok(());
     }
     let _lock = crate::sysutil::OpLock::acquire()?;
+    restore_connections(&RealRunner, manifest)?;
+    DnsStateManifest::remove_manifest()?;
+    crate::policy::revert_all()?;
+    flush_dns(&RealRunner);
+    Ok(())
+}
+
+/// Devolve cada interface ao DNS de antes (automático ou os IPs gravados).
+fn restore_connections(r: &dyn CommandRunner, manifest: &DnsStateManifest) -> Result<()> {
     let mut falhas: Vec<String> = Vec::new();
     for conn in &manifest.connections {
         // O alias vem do manifesto em disco: pode ter sido adulterado.
@@ -194,7 +220,7 @@ pub fn revert_dns(manifest: &DnsStateManifest) -> Result<()> {
         } else {
             continue;
         };
-        if let Err(e) = run_powershell(&script) {
+        if let Err(e) = run_powershell(r, &script) {
             falhas.push(format!("{}: {e:#}", conn.id));
         }
     }
@@ -205,14 +231,12 @@ pub fn revert_dns(manifest: &DnsStateManifest) -> Result<()> {
             falhas.join(" | ")
         );
     }
-    DnsStateManifest::remove_manifest()?;
-    crate::policy::revert_all()?;
-    flush_dns();
     Ok(())
 }
 
-fn list_active_interfaces() -> Result<Vec<(String, u32)>> {
+fn list_active_interfaces(r: &dyn CommandRunner) -> Result<Vec<(String, u32)>> {
     let out = powershell_output(
+        r,
         "Get-NetIPInterface -AddressFamily IPv4 -ConnectionState Connected | Where-Object { $_.InterfaceAlias -notmatch 'Loopback|vEthernet' } | Sort-Object InterfaceIndex -Unique | ForEach-Object { \"$($_.InterfaceAlias)|$($_.InterfaceIndex)\" }",
     )?;
     Ok(out
@@ -224,10 +248,17 @@ fn list_active_interfaces() -> Result<Vec<(String, u32)>> {
         .collect())
 }
 
-fn inspect_interface_state(index: u32, alias: &str) -> Result<ConnectionBackup> {
-    let out = powershell_output(&format!(
+fn inspect_interface_state(
+    r: &dyn CommandRunner,
+    index: u32,
+    alias: &str,
+) -> Result<ConnectionBackup> {
+    let out = powershell_output(
+        r,
+        &format!(
         "(Get-DnsClientServerAddress -InterfaceIndex {index} -AddressFamily IPv4).ServerAddresses -join ','"
-    ))
+        ),
+    )
     .context("Falha ao consultar DNS atual no Windows")?;
     let ips: Vec<Ipv4Addr> = out
         .trim()
@@ -247,14 +278,21 @@ fn inspect_interface_state(index: u32, alias: &str) -> Result<ConnectionBackup> 
 
 /// DNS configurados nas interfaces ativas (IPv4 e IPv6).
 pub fn configured_dns() -> Vec<std::net::IpAddr> {
-    let Ok(ifaces) = list_active_interfaces() else {
+    configured_dns_with(&RealRunner)
+}
+
+fn configured_dns_with(r: &dyn CommandRunner) -> Vec<std::net::IpAddr> {
+    let Ok(ifaces) = list_active_interfaces(r) else {
         return Vec::new();
     };
     let mut out: Vec<std::net::IpAddr> = Vec::new();
     for (_, index) in ifaces {
-        let Ok(text) = powershell_output(&format!(
-            "(Get-DnsClientServerAddress -InterfaceIndex {index}).ServerAddresses -join ','"
-        )) else {
+        let Ok(text) = powershell_output(
+            r,
+            &format!(
+                "(Get-DnsClientServerAddress -InterfaceIndex {index}).ServerAddresses -join ','"
+            ),
+        ) else {
             continue;
         };
         for tok in text.trim().split(',') {
@@ -270,14 +308,17 @@ pub fn configured_dns() -> Vec<std::net::IpAddr> {
 
 /// `true` se alguma interface ativa ainda usa o DNS do filtro do GuiaLar.
 pub fn cloudflare_dns_active() -> bool {
-    powershell_output("(Get-DnsClientServerAddress -AddressFamily IPv4).ServerAddresses -join ','")
-        .map(|o| {
-            o.trim()
-                .split(',')
-                .filter_map(|s| s.trim().parse::<Ipv4Addr>().ok())
-                .any(|ip| crate::config::is_filter_ipv4(&ip))
-        })
-        .unwrap_or(false)
+    powershell_output(
+        &RealRunner,
+        "(Get-DnsClientServerAddress -AddressFamily IPv4).ServerAddresses -join ','",
+    )
+    .map(|o| {
+        o.trim()
+            .split(',')
+            .filter_map(|s| s.trim().parse::<Ipv4Addr>().ok())
+            .any(|ip| crate::config::is_filter_ipv4(&ip))
+    })
+    .unwrap_or(false)
 }
 
 /// Reversão de emergência sem manifesto: DNS automático em todas as interfaces.
@@ -286,21 +327,24 @@ pub fn revert_dns_fallback() -> Result<()> {
         return Ok(());
     }
     let _lock = crate::sysutil::OpLock::acquire()?;
-    for (_, index) in list_active_interfaces()? {
-        run_powershell(&format!(
-            "Set-DnsClientServerAddress -InterfaceIndex {index} -ResetServerAddresses"
-        ))?;
-    }
+    reset_all_interfaces(&RealRunner)?;
     crate::policy::revert_all()?;
-    flush_dns();
+    flush_dns(&RealRunner);
     DnsStateManifest::remove_manifest()?;
     Ok(())
 }
 
-fn flush_dns() {
-    use std::os::windows::process::CommandExt;
-    let _ = Command::new("ipconfig")
-        .arg("/flushdns")
-        .creation_flags(CREATE_NO_WINDOW)
-        .output();
+/// DNS automático em todas as interfaces ativas (por índice).
+fn reset_all_interfaces(r: &dyn CommandRunner) -> Result<()> {
+    for (_, index) in list_active_interfaces(r)? {
+        run_powershell(
+            r,
+            &format!("Set-DnsClientServerAddress -InterfaceIndex {index} -ResetServerAddresses"),
+        )?;
+    }
+    Ok(())
+}
+
+fn flush_dns(r: &dyn CommandRunner) {
+    let _ = r.run(&Cmd::output("ipconfig", &["/flushdns"]).no_window());
 }
