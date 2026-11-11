@@ -341,9 +341,10 @@ mod qa_tests {
             prot(Family, &["127.0.0.53", "1.1.1.3"], true),
             ProtectionStatus::Protected
         );
+        // só stub local: o DNS não foi lido, a sonda sozinha não basta (ADR-027)
         assert_eq!(
             prot(Family, &["127.0.0.53"], true),
-            ProtectionStatus::Protected
+            ProtectionStatus::PartiallyConfigured(MSG_DNS_UNREADABLE.into())
         );
         assert!(parcial(prot(Family, &["127.0.0.53"], false)));
         assert_eq!(
