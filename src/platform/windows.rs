@@ -57,8 +57,15 @@ pub fn elevate_if_needed(subcomando: &str) -> Result<bool> {
     }
     crate::sysutil::OpLock::check_free()?;
     let exe = std::env::current_exe().context("não foi possível localizar o executável")?;
-    let code = crate::win32::run_elevated_hidden(&exe.to_string_lossy(), subcomando)
-        .map_err(anyhow::Error::msg)?;
+    elevation_result(crate::win32::run_elevated_hidden(
+        &exe.to_string_lossy(),
+        subcomando,
+    ))
+}
+
+/// Resultado do UAC: negado/timeout (`Err`) ou código de saída da instância elevada.
+fn elevation_result(r: Result<u32, String>) -> Result<bool> {
+    let code = r.map_err(anyhow::Error::msg)?;
     if code != 0 {
         bail!("a operação elevada falhou (código {code})");
     }
@@ -348,3 +355,7 @@ fn reset_all_interfaces(r: &dyn CommandRunner) -> Result<()> {
 fn flush_dns(r: &dyn CommandRunner) {
     let _ = r.run(&Cmd::output("ipconfig", &["/flushdns"]).no_window());
 }
+
+#[cfg(test)]
+#[path = "windows_tests.rs"]
+mod runner_tests;

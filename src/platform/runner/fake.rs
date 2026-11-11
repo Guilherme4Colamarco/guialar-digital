@@ -1,6 +1,8 @@
 //! `FakeRunner`: grava o argv de cada comando e simula o estado de DNS que o
 //! NetworkManager, o `tee`/`rm`/`mkdir` e o `resolvconf` alterariam. Nada toca o sistema.
 
+#![cfg_attr(not(unix), allow(dead_code))]
+
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
@@ -302,10 +304,12 @@ impl CommandRunner for FakeRunner {
         self.st.borrow().files.get(path).cloned()
     }
 
+    #[cfg(unix)]
     fn is_root(&self) -> bool {
         self.st.borrow().root
     }
 
+    #[cfg(unix)]
     fn privilege_prefix(&self) -> Vec<&'static str> {
         self.st.borrow().prefix.clone()
     }
