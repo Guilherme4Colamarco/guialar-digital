@@ -178,11 +178,10 @@ fn smoke_once(mode: FilterMode) -> bool {
 mod qa_tests {
     use super::*;
     use crate::config::BackendKind;
-    use std::sync::Mutex;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     /// Serializa testes que mutam $HOME (variável de ambiente é global ao processo).
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    use crate::testenv::lock as env_lock;
 
     fn unique_temp_home(tag: &str) -> std::path::PathBuf {
         let nanos = SystemTime::now()
@@ -208,7 +207,7 @@ mod qa_tests {
     /// QA-CONTRACT: sem manifesto => Unprotected (determinístico, sem rede).
     #[test]
     fn status_is_unprotected_without_manifest() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = env_lock();
         let old_home = std::env::var("HOME").ok();
         let home = unique_temp_home("unprotected");
         std::fs::create_dir_all(home.join(".config")).unwrap();
@@ -224,7 +223,7 @@ mod qa_tests {
     /// QA-CONTRACT: manifesto corrompido => PartiallyConfigured (nunca Protected).
     #[test]
     fn status_is_partial_on_corrupted_manifest() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = env_lock();
         let old_home = std::env::var("HOME").ok();
         let home = unique_temp_home("corrupt");
         let state_dir = home.join(".config").join("guialar");
@@ -249,7 +248,7 @@ mod qa_tests {
     /// QA-CONTRACT: manifesto válido salvo com save_atomic é recarregado (load).
     #[test]
     fn manifest_save_then_load_round_trip_on_disk() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = env_lock();
         let old_home = std::env::var("HOME").ok();
         let home = unique_temp_home("roundtrip");
         std::env::set_var("HOME", &home);
@@ -372,7 +371,7 @@ mod qa_tests {
 
     #[test]
     fn sem_manifesto_continua_desprotegido() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         let old = std::env::var("HOME").ok();
         let home = unique_temp_home("semmanifesto");
         std::fs::create_dir_all(&home).unwrap();

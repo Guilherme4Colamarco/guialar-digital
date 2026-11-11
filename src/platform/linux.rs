@@ -729,6 +729,10 @@ fn run_privileged_command(r: &dyn CommandRunner, program: &str, args: &[&str]) -
 }
 
 #[cfg(test)]
+#[path = "linux_tests.rs"]
+mod runner_tests;
+
+#[cfg(test)]
 mod dns_parse_tests {
     use super::parse_dns_ips;
 

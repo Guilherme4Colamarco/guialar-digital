@@ -10,6 +10,8 @@ mod integration;
 mod platform;
 mod policy;
 mod sysutil;
+#[cfg(test)]
+mod testenv;
 mod ui;
 mod verify;
 #[cfg(windows)]

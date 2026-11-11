@@ -216,6 +216,9 @@ impl CommandRunner for RealRunner {
 }
 
 #[cfg(test)]
+pub mod fake;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
