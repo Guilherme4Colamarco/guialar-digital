@@ -65,18 +65,39 @@ fn unknown_subcommand_is_rejected() {
 
 /// Regressão do achado do QA (T10): segundo `apply` não pode tocar no sistema nem
 /// sobrescrever o manifesto com o DNS já filtrado como se fosse o original.
-#[cfg(unix)]
+///
+/// Este teste roda o `apply` de verdade. Ele só é inofensivo se o plano responder "já ativa",
+/// e isso depende de `GUIALAR_TEST_DNS`, que só existe em build de depuração. Por isso:
+/// (a) só compila em `debug_assertions`; (b) é pulado como root (um `Reapply` gravaria o
+/// /etc/resolv.conf real); (c) roda com PATH apontando para uma pasta vazia, então nenhum
+/// nmcli/sudo/pkexec/resolvectl real é achado mesmo se o plano regredir.
+#[cfg(all(unix, debug_assertions))]
 #[test]
 fn apply_twice_keeps_original_manifest_untouched() {
+    let euid_zero = std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|t| {
+            t.lines()
+                .find(|l| l.starts_with("Uid:"))
+                .and_then(|l| l.split_whitespace().nth(2).map(|u| u == "0"))
+        })
+        .unwrap_or(false);
+    if euid_zero {
+        eprintln!("PULADO: como root um apply fora do plano gravaria o /etc/resolv.conf real");
+        return;
+    }
     let home = std::env::temp_dir().join(format!("guialar-dup-{}", std::process::id()));
     let dir = home.join(".config").join("guialar");
     std::fs::create_dir_all(&dir).unwrap();
     let manifest = r#"{"backend":"DirectResolvConf","applied_at_utc":"1","connections":[],"previous_resolv_conf":"nameserver 9.9.9.9\n"}"#;
     std::fs::write(dir.join("state.json"), manifest).unwrap();
+    let empty_bin = home.join("bin-vazio");
+    std::fs::create_dir_all(&empty_bin).unwrap();
 
     let out = bin()
         .arg("apply")
         .env("HOME", &home)
+        .env("PATH", &empty_bin)
         // DNS "configurado" fixo (só em build de depuração): o do modo família, sem ler a
         // rede do host. Com DNS de fora o apply reaplicaria em vez de dizer "já está ativa".
         .env(

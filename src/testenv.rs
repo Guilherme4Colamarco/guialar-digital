@@ -166,10 +166,34 @@ mod tests {
             .unwrap()
             .starts_with(s.dir()));
         assert!(s.manifest_path().starts_with(s.dir()));
+        // assert_inside aceita o que é do sandbox e nega o resto
+        assert_inside(&s.manifest_path(), "manifesto");
+        let fora = std::panic::catch_unwind(|| {
+            assert_inside(Path::new("/tmp/fora-do-sandbox/state.json"), "x")
+        });
+        assert!(fora.is_err(), "assert_inside deve negar caminho de fora");
         drop(s);
         // ao sair, volta o ambiente de ANTES do Sandbox: o preset do teste não vaza
         assert_ne!(std::env::var("SUDO_USER").as_deref(), Ok("nobody"));
         assert_ne!(std::env::var("PKEXEC_UID").as_deref(), Ok("1000"));
+    }
+
+    #[test]
+    fn sandbox_restaura_o_ambiente_ao_sair() {
+        let (home_antes, local_antes) = {
+            let _g = lock();
+            (std::env::var_os("HOME"), std::env::var_os("LOCALAPPDATA"))
+        };
+        let s = Sandbox::new("restaura");
+        assert_ne!(std::env::var_os("HOME"), home_antes);
+        assert!(std::env::var_os("HOME").is_some_and(|h| Path::new(&h).starts_with(s.dir())));
+        let dir = s.dir().to_path_buf();
+        drop(s);
+        assert_eq!(std::env::var_os("HOME"), home_antes);
+        assert_eq!(std::env::var_os("LOCALAPPDATA"), local_antes);
+        assert!(!dir.exists(), "a pasta temporária some");
+        assert!(!sandboxed());
+        assert!(lock_dir().is_none());
     }
 
     #[test]
