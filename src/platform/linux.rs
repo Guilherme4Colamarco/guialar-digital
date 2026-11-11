@@ -758,4 +758,44 @@ mod dns_parse_tests {
         );
         assert!(parse_dns_ips("# nameserver 8.8.8.8\nsearch lan").is_empty());
     }
+
+    #[test]
+    fn entradas_vazias_ou_sem_ip() {
+        assert!(parse_dns_ips("").is_empty());
+        assert!(parse_dns_ips("   \n\t\n").is_empty());
+        assert!(parse_dns_ips("options edns0 trust-ad\nsearch lan").is_empty());
+        assert!(parse_dns_ips("Link 3 (wlan0):").is_empty());
+        assert!(parse_dns_ips("nameserver 999.1.1.1\nnameserver nao-e-ip").is_empty());
+    }
+
+    #[test]
+    fn ignora_comentarios_e_duplicados() {
+        assert!(parse_dns_ips("; nameserver 8.8.8.8").is_empty());
+        assert_eq!(
+            parse_dns_ips("nameserver 1.1.1.3\n# x\nnameserver 1.1.1.3\nnameserver 1.0.0.3"),
+            s(&["1.1.1.3", "1.0.0.3"])
+        );
+    }
+
+    #[test]
+    fn aceita_tab_virgula_sufixos_e_escopo_ipv6() {
+        assert_eq!(parse_dns_ips("nameserver\t9.9.9.9"), s(&["9.9.9.9"]));
+        assert_eq!(
+            parse_dns_ips("Link 2 (eth0): 192.168.0.1, 8.8.8.8"),
+            s(&["192.168.0.1", "8.8.8.8"])
+        );
+        assert_eq!(
+            parse_dns_ips("nameserver fe80::1%eth0\nGlobal: 1.1.1.3#cloudflare-dns.com"),
+            s(&["fe80::1", "1.1.1.3"])
+        );
+    }
+
+    #[test]
+    fn stub_local_tambem_e_devolvido() {
+        // Quem decide o que conta é verify::check_configured_dns, não o parser.
+        assert_eq!(
+            parse_dns_ips("nameserver 127.0.0.53\noptions edns0"),
+            s(&["127.0.0.53"])
+        );
+    }
 }

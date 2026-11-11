@@ -344,4 +344,72 @@ mod tests {
         let novo = remove_firefox_policy(&so_nosso).unwrap().unwrap();
         assert!(is_empty_policies(&novo));
     }
+
+    #[test]
+    fn mescla_e_idempotente() {
+        let uma = merge_firefox_policies(None).unwrap();
+        let duas = merge_firefox_policies(Some(&uma)).unwrap();
+        assert_eq!(uma, duas);
+    }
+
+    #[test]
+    fn mescla_com_arquivo_vazio_ou_so_espacos_cria_do_zero() {
+        let esperado = merge_firefox_policies(None).unwrap();
+        assert_eq!(merge_firefox_policies(Some("")).unwrap(), esperado);
+        assert_eq!(merge_firefox_policies(Some("  \n ")).unwrap(), esperado);
+    }
+
+    #[test]
+    fn mescla_preserva_outras_politicas_e_extensoes() {
+        let atual = r#"{"policies":{"Homepage":{"URL":"https://a.b"},"ExtensionSettings":{"*":{"installation_mode":"allowed"},"x@y":{"installation_mode":"blocked"}}},"outro":1}"#;
+        let v: Value = serde_json::from_str(&merge_firefox_policies(Some(atual)).unwrap()).unwrap();
+        assert_eq!(v["outro"], 1);
+        assert_eq!(v["policies"]["Homepage"]["URL"], "https://a.b");
+        assert_eq!(
+            v["policies"]["ExtensionSettings"]["*"]["installation_mode"],
+            "allowed"
+        );
+        assert_eq!(
+            v["policies"]["ExtensionSettings"]["x@y"]["installation_mode"],
+            "blocked"
+        );
+        assert_eq!(
+            v["policies"]["ExtensionSettings"][FIREFOX_UBO_ID]["install_url"],
+            FIREFOX_UBO_XPI
+        );
+    }
+
+    #[test]
+    fn mescla_sobrescreve_so_a_entrada_do_guialar() {
+        let atual = format!(
+            r#"{{"policies":{{"ExtensionSettings":{{"{FIREFOX_UBO_ID}":{{"installation_mode":"blocked"}}}}}}}}"#
+        );
+        let v: Value =
+            serde_json::from_str(&merge_firefox_policies(Some(&atual)).unwrap()).unwrap();
+        assert_eq!(
+            v["policies"]["ExtensionSettings"][FIREFOX_UBO_ID]["installation_mode"],
+            "force_installed"
+        );
+    }
+
+    #[test]
+    fn mescla_rejeita_formas_inesperadas_sem_perder_o_arquivo() {
+        for ruim in [
+            "[]",
+            r#"{"policies":[]}"#,
+            r#"{"policies":{"ExtensionSettings":"x"}}"#,
+            r#"{"policies":{"ExtensionSettings":[1]}}"#,
+        ] {
+            assert!(merge_firefox_policies(Some(ruim)).is_err(), "{ruim}");
+        }
+    }
+
+    #[test]
+    fn mescla_e_remocao_se_desfazem() {
+        let atual = r#"{"policies":{"DisableTelemetry":true}}"#;
+        let mesclado = merge_firefox_policies(Some(atual)).unwrap();
+        let removido = remove_firefox_policy(&mesclado).unwrap().unwrap();
+        let v: Value = serde_json::from_str(&removido).unwrap();
+        assert_eq!(v, serde_json::from_str::<Value>(atual).unwrap());
+    }
 }

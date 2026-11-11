@@ -234,4 +234,44 @@ mod plan_tests {
             ApplyPlan::Reapply
         );
     }
+
+    #[test]
+    fn tabela_completa_do_plan_apply() {
+        use crate::config::{ADGUARD_IPV4, ADGUARD_IPV6, CLOUDFLARE_IPV4, CLOUDFLARE_IPV6};
+        let fam: Vec<std::net::IpAddr> = CLOUDFLARE_IPV4.iter().map(|i| (*i).into()).collect();
+        let ads: Vec<std::net::IpAddr> = ADGUARD_IPV4.iter().map(|i| (*i).into()).collect();
+        let fam6: Vec<std::net::IpAddr> = CLOUDFLARE_IPV6.iter().map(|i| (*i).into()).collect();
+        let ads6: Vec<std::net::IpAddr> = ADGUARD_IPV6.iter().map(|i| (*i).into()).collect();
+        let (f, a) = (FilterMode::Family, FilterMode::AdsOnly);
+
+        // sem manifesto: sempre do zero, seja qual for o DNS
+        for dns in [&fam, &ads, &vec![]] {
+            assert_eq!(plan_apply(None, f, dns), ApplyPlan::Fresh);
+            assert_eq!(plan_apply(None, a, dns), ApplyPlan::Fresh);
+        }
+        // DNS do modo (v4, v6 ou os dois): nada a fazer
+        assert_eq!(plan_apply(Some(&m(a)), a, &ads), ApplyPlan::AlreadyActive);
+        assert_eq!(plan_apply(Some(&m(f)), f, &fam6), ApplyPlan::AlreadyActive);
+        assert_eq!(plan_apply(Some(&m(a)), a, &ads6), ApplyPlan::AlreadyActive);
+        let ambos: Vec<_> = fam.iter().chain(fam6.iter()).copied().collect();
+        assert_eq!(plan_apply(Some(&m(f)), f, &ambos), ApplyPlan::AlreadyActive);
+        // stub local (127.0.0.53) não conta contra nem a favor
+        let com_stub = ips(&["127.0.0.53", "1.1.1.3"]);
+        assert_eq!(
+            plan_apply(Some(&m(f)), f, &com_stub),
+            ApplyPlan::AlreadyActive
+        );
+        // DNS de fora, sozinho ou misturado com o do modo: reaplica
+        assert_eq!(plan_apply(Some(&m(f)), f, &ads), ApplyPlan::Reapply);
+        assert_eq!(plan_apply(Some(&m(a)), a, &fam), ApplyPlan::Reapply);
+        let misto = ips(&["1.1.1.3", "8.8.8.8"]);
+        assert_eq!(plan_apply(Some(&m(f)), f, &misto), ApplyPlan::Reapply);
+        // DNS ilegível (vazio ou só stub): reaplica
+        assert_eq!(plan_apply(Some(&m(a)), a, &[]), ApplyPlan::Reapply);
+        let so_stub = ips(&["127.0.0.53", "::1"]);
+        assert_eq!(plan_apply(Some(&m(f)), f, &so_stub), ApplyPlan::Reapply);
+        // troca de modo, mesmo com o DNS do modo antigo em uso: reaplica
+        assert_eq!(plan_apply(Some(&m(f)), a, &fam), ApplyPlan::Reapply);
+        assert_eq!(plan_apply(Some(&m(a)), f, &ads), ApplyPlan::Reapply);
+    }
 }

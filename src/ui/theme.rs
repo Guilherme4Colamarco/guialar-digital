@@ -758,4 +758,77 @@ mod tests {
             [Action::Check, Action::Restore]
         );
     }
+
+    /// Estado -> rótulos dos botões exatamente como a janela os desenha (sem GTK/WinUI).
+    fn botoes(s: Option<&Snapshot>, busy: bool) -> Vec<&'static str> {
+        let st = ui_state(s, busy);
+        let missing = s.is_some_and(|x| x.needs_blocker());
+        let orphan = s.is_some_and(|x| x.filter_without_record);
+        actions_for(st, missing, orphan)
+            .into_iter()
+            .map(|a| button_label(a, st))
+            .collect()
+    }
+
+    #[test]
+    fn botoes_por_estado_do_sistema() {
+        let un = snap(ProtectionStatus::Unprotected, &[]);
+        let on = snap(ProtectionStatus::Protected, &[]);
+        let on_sem = snap(ProtectionStatus::Protected, &["Edge"]);
+        let parcial = snap(
+            ProtectionStatus::PartiallyConfigured("DNS de fora".into()),
+            &[],
+        );
+        let corrompido = snap(
+            ProtectionStatus::PartiallyConfigured("Manifesto corrompido em x".into()),
+            &["Edge"],
+        );
+        assert_eq!(
+            botoes(Some(&un), false),
+            ["Proteger este computador", "Verificar"]
+        );
+        assert_eq!(
+            botoes(Some(&on), false),
+            ["Verificar novamente", "Desativar proteção"]
+        );
+        assert_eq!(
+            botoes(Some(&on_sem), false),
+            ["Proteger navegadores", "Desativar proteção"]
+        );
+        assert_eq!(
+            botoes(Some(&parcial), false),
+            ["Verificar", "Desativar proteção"]
+        );
+        // manifesto ilegível não vira "falta bloqueador"
+        assert_eq!(
+            botoes(Some(&corrompido), false),
+            ["Verificar", "Desativar proteção"]
+        );
+        // trabalhando ou sem leitura: nenhum botão novo
+        assert!(botoes(Some(&on), true).is_empty());
+        assert!(botoes(None, false).is_empty());
+    }
+
+    #[test]
+    fn filtro_sem_registro_troca_a_primaria_por_desativar() {
+        let mut orfao = snap(ProtectionStatus::Unprotected, &[]);
+        orfao.filter_without_record = true;
+        assert_eq!(
+            botoes(Some(&orfao), false),
+            ["Desativar proteção", "Verificar"]
+        );
+        // enquanto trabalha, o órfão também não oferece nada
+        assert!(botoes(Some(&orfao), true).is_empty());
+    }
+
+    #[test]
+    fn seletor_de_modo_some_enquanto_trabalha_e_no_orfao() {
+        let un = snap(ProtectionStatus::Unprotected, &[]);
+        assert!(show_mode_selector(Some(&un), false));
+        assert!(!show_mode_selector(Some(&un), true));
+        assert!(!show_mode_selector(None, false));
+        let mut orfao = un.clone();
+        orfao.filter_without_record = true;
+        assert!(!show_mode_selector(Some(&orfao), false));
+    }
 }

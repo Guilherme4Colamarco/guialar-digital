@@ -469,4 +469,44 @@ mod qa_tests {
         assert!(!line_has_filter_ip("nameserver 10.0.2.3"));
         assert!(!line_has_filter_ip("# 94.140.14.14x"));
     }
+
+    #[test]
+    fn manifesto_antigo_sem_campos_opcionais_migra() {
+        // v0.2: sem `mode` e sem `previous_resolv_conf`
+        let antigo = r#"{"backend":"DirectResolvConf","applied_at_utc":"1","connections":[]}"#;
+        let m: DnsStateManifest = serde_json::from_str(antigo).unwrap();
+        assert_eq!(m.mode, FilterMode::Family);
+        assert!(m.previous_resolv_conf.is_none());
+        // ao regravar, o manifesto já sai no formato novo e relê igual
+        let novo = serde_json::to_string(&m).unwrap();
+        assert!(novo.contains("\"mode\":\"family\""));
+        let de_novo: DnsStateManifest = serde_json::from_str(&novo).unwrap();
+        assert_eq!(de_novo.backend, BackendKind::DirectResolvConf);
+        assert_eq!(de_novo.mode, FilterMode::Family);
+    }
+
+    #[test]
+    fn manifesto_com_conexoes_antigas_preserva_o_dns_original() {
+        let antigo = r#"{"backend":"NetworkManager","applied_at_utc":"1","connections":[{"id":"u-1","original_ipv4_dns":["192.168.0.1"],"original_ipv6_dns":[],"was_dhcp_ipv4":false,"was_dhcp_ipv6":true}],"previous_resolv_conf":null}"#;
+        let m: DnsStateManifest = serde_json::from_str(antigo).unwrap();
+        assert_eq!(m.connections.len(), 1);
+        assert_eq!(
+            m.connections[0].original_ipv4_dns,
+            [Ipv4Addr::new(192, 168, 0, 1)]
+        );
+        assert!(!m.connections[0].was_dhcp_ipv4);
+    }
+
+    #[test]
+    fn manifesto_ignora_campo_desconhecido_e_rejeita_valor_invalido() {
+        let futuro = r#"{"backend":"SystemdResolved","applied_at_utc":"1","connections":[],"previous_resolv_conf":null,"mode":"ads","campo_novo":42}"#;
+        let m: DnsStateManifest = serde_json::from_str(futuro).unwrap();
+        assert_eq!(m.mode, FilterMode::AdsOnly);
+        let backend_ruim = r#"{"backend":"Inexistente","applied_at_utc":"1","connections":[]}"#;
+        assert!(serde_json::from_str::<DnsStateManifest>(backend_ruim).is_err());
+        let modo_ruim =
+            r#"{"backend":"NetworkManager","applied_at_utc":"1","connections":[],"mode":"xyz"}"#;
+        assert!(serde_json::from_str::<DnsStateManifest>(modo_ruim).is_err());
+        assert!(serde_json::from_str::<DnsStateManifest>("{}").is_err());
+    }
 }
