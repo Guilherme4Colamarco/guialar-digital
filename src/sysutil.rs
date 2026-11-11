@@ -210,7 +210,23 @@ const LOCK_BUSY: &str =
     "Outra operação do GuiaLar já está em andamento. Aguarde terminar e tente de novo.";
 
 fn lock_path() -> PathBuf {
+    #[cfg(test)]
+    crate::testenv::assert_sandboxed("guialar-op.lock");
+    lock_path_raw()
+}
+
+/// Sem a guarda de teste: só calcula/compara o caminho (usado no `Drop`).
+fn lock_path_raw() -> PathBuf {
+    #[cfg(test)]
+    if let Some(d) = crate::testenv::lock_dir() {
+        return d.join("guialar-op.lock");
+    }
     std::env::temp_dir().join("guialar-op.lock")
+}
+
+#[cfg(test)]
+pub fn lock_path_for_test() -> PathBuf {
+    lock_path()
 }
 
 /// Trava abandonada: velha (>120 s), vazia/sem PID válido (ex.: `touch`) ou com dono morto
@@ -296,7 +312,7 @@ impl Drop for OpLock {
     fn drop(&mut self) {
         if let Some(p) = &self.0 {
             let _ = std::fs::remove_file(p);
-            if *p == lock_path() {
+            if *p == lock_path_raw() {
                 HELD.store(false, std::sync::atomic::Ordering::SeqCst);
             }
         }

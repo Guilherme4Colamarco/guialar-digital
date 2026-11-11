@@ -230,6 +230,11 @@ fn nm_apply_depois_revert_devolve_o_estado_original() {
     revert(&r).unwrap();
     assert_eq!(r.state(), original);
     assert!(!s.manifest_path().exists(), "o revert apaga o manifesto");
+    assert_eq!(
+        crate::verify::check_status(),
+        crate::verify::ProtectionStatus::Unprotected,
+        "depois do revert o status volta a desprotegido"
+    );
 }
 
 #[test]

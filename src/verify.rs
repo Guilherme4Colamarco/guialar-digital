@@ -178,64 +178,24 @@ fn smoke_once(mode: FilterMode) -> bool {
 mod qa_tests {
     use super::*;
     use crate::config::BackendKind;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
-    /// Serializa testes que mutam $HOME (variável de ambiente é global ao processo).
-    use crate::testenv::lock as env_lock;
-
-    fn unique_temp_home(tag: &str) -> std::path::PathBuf {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        std::env::temp_dir().join(format!(
-            "guialar-qa-{}-{}-{}",
-            tag,
-            std::process::id(),
-            nanos
-        ))
-    }
-
-    fn restore_home(old_home: Option<String>) {
-        if let Some(h) = old_home {
-            std::env::set_var("HOME", h);
-        } else {
-            std::env::remove_var("HOME");
-        }
-    }
+    use crate::testenv::Sandbox;
 
     /// QA-CONTRACT: sem manifesto => Unprotected (determinístico, sem rede).
     #[test]
     fn status_is_unprotected_without_manifest() {
-        let _guard = env_lock();
-        let old_home = std::env::var("HOME").ok();
-        let home = unique_temp_home("unprotected");
-        std::fs::create_dir_all(home.join(".config")).unwrap();
-        std::env::set_var("HOME", &home);
-
-        let status = check_status();
-
-        restore_home(old_home);
-        std::fs::remove_dir_all(&home).ok();
-        assert_eq!(status, ProtectionStatus::Unprotected);
+        let _s = Sandbox::new("unprotected");
+        assert_eq!(check_status(), ProtectionStatus::Unprotected);
     }
 
     /// QA-CONTRACT: manifesto corrompido => PartiallyConfigured (nunca Protected).
     #[test]
     fn status_is_partial_on_corrupted_manifest() {
-        let _guard = env_lock();
-        let old_home = std::env::var("HOME").ok();
-        let home = unique_temp_home("corrupt");
-        let state_dir = home.join(".config").join("guialar");
-        std::fs::create_dir_all(&state_dir).unwrap();
-        std::fs::write(state_dir.join("state.json"), "{ corrompido").unwrap();
-        std::env::set_var("HOME", &home);
-
-        let status = check_status();
-
-        restore_home(old_home);
-        std::fs::remove_dir_all(&home).ok();
-        match status {
+        let s = Sandbox::new("corrupt");
+        let path = s.manifest_path();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "{ corrompido").unwrap();
+        match check_status() {
             ProtectionStatus::PartiallyConfigured(msg) => assert!(
                 msg.starts_with("Manifesto corrompido"),
                 "mensagem inesperada: {}",
@@ -248,22 +208,14 @@ mod qa_tests {
     /// QA-CONTRACT: manifesto válido salvo com save_atomic é recarregado (load).
     #[test]
     fn manifest_save_then_load_round_trip_on_disk() {
-        let _guard = env_lock();
-        let old_home = std::env::var("HOME").ok();
-        let home = unique_temp_home("roundtrip");
-        std::env::set_var("HOME", &home);
-
+        let _s = Sandbox::new("roundtrip");
         let manifest = DnsStateManifest::new(BackendKind::SystemdResolved);
         manifest.save_atomic().expect("save_atomic deve funcionar");
         let loaded = DnsStateManifest::load().expect("load não deve falhar");
-
-        restore_home(old_home);
-        std::fs::remove_dir_all(&home).ok();
         assert!(loaded.is_some(), "manifesto salvo deve ser carregado");
         assert_eq!(loaded.unwrap().backend, BackendKind::SystemdResolved);
     }
 
-    /// QA-001: DNS sequestrado ou que responde normalmente NÃO conta como filtro.
     #[test]
     fn qa001_so_resposta_bloqueada_conta_como_protegido() {
         let un = |s: &str| -> IpAddr { s.parse().unwrap() };
@@ -371,16 +323,9 @@ mod qa_tests {
 
     #[test]
     fn sem_manifesto_continua_desprotegido() {
-        let _g = env_lock();
-        let old = std::env::var("HOME").ok();
-        let home = unique_temp_home("semmanifesto");
-        std::fs::create_dir_all(&home).unwrap();
-        std::env::set_var("HOME", &home);
+        let _s = Sandbox::new("semmanifesto");
         std::env::remove_var("SUDO_USER");
-        let st = check_status();
-        restore_home(old);
-        std::fs::remove_dir_all(&home).ok();
-        assert_eq!(st, ProtectionStatus::Unprotected);
+        assert_eq!(check_status(), ProtectionStatus::Unprotected);
     }
 
     #[test]
@@ -391,6 +336,111 @@ mod qa_tests {
                 assert!(m.contains("Desative a proteção e proteja de novo"));
             }
             o => panic!("{o:?}"),
+        }
+    }
+
+    // ---- ADR-029 camada 3: estado isolado em disco (manifesto) ----
+
+    fn manifesto_completo() -> DnsStateManifest {
+        let mut m = DnsStateManifest::new(BackendKind::NetworkManager);
+        m.mode = FilterMode::AdsOnly;
+        m.previous_resolv_conf = Some("nameserver 192.168.1.1\n".into());
+        m.connections.push(crate::config::ConnectionBackup {
+            id: "uuid-1".into(),
+            original_ipv4_dns: vec!["192.168.0.1".parse().unwrap(), "8.8.8.8".parse().unwrap()],
+            original_ipv6_dns: vec!["2001:db8::1".parse().unwrap()],
+            was_dhcp_ipv4: false,
+            was_dhcp_ipv6: true,
+        });
+        m
+    }
+
+    #[test]
+    fn grava_e_rele_todos_os_campos() {
+        let _s = Sandbox::new("campos");
+        let m = manifesto_completo();
+        m.save_atomic().unwrap();
+        let l = DnsStateManifest::load().unwrap().unwrap();
+        assert_eq!(l.backend, m.backend);
+        assert_eq!(l.mode, FilterMode::AdsOnly);
+        assert_eq!(l.applied_at_utc, m.applied_at_utc);
+        assert_eq!(l.previous_resolv_conf, m.previous_resolv_conf);
+        assert_eq!(l.connections.len(), 1);
+        assert_eq!(l.connections[0].id, "uuid-1");
+        assert_eq!(
+            l.connections[0].original_ipv4_dns,
+            m.connections[0].original_ipv4_dns
+        );
+        assert_eq!(
+            l.connections[0].original_ipv6_dns,
+            m.connections[0].original_ipv6_dns
+        );
+        assert!(!l.connections[0].was_dhcp_ipv4);
+    }
+
+    #[test]
+    fn gravar_de_novo_substitui_e_nao_deixa_temporario() {
+        let s = Sandbox::new("regrava");
+        manifesto_completo().save_atomic().unwrap();
+        let mut outro = DnsStateManifest::new(BackendKind::DirectResolvConf);
+        outro.mode = FilterMode::Family;
+        outro.save_atomic().unwrap();
+        let l = DnsStateManifest::load().unwrap().unwrap();
+        assert_eq!(l.backend, BackendKind::DirectResolvConf);
+        assert!(l.connections.is_empty());
+        let nomes: Vec<String> = std::fs::read_dir(s.manifest_path().parent().unwrap())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(nomes, ["state.json"], "só o manifesto, sem .tmp: {nomes:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn manifesto_so_o_dono_le() {
+        use std::os::unix::fs::PermissionsExt;
+        let s = Sandbox::new("perm");
+        manifesto_completo().save_atomic().unwrap();
+        let mode = std::fs::metadata(s.manifest_path())
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[test]
+    fn remover_apaga_e_o_status_volta_a_desprotegido() {
+        let s = Sandbox::new("remove");
+        manifesto_completo().save_atomic().unwrap();
+        assert!(s.manifest_path().exists());
+        DnsStateManifest::remove_manifest().unwrap();
+        assert!(!s.manifest_path().exists());
+        assert!(DnsStateManifest::load().unwrap().is_none());
+        assert_eq!(check_status(), ProtectionStatus::Unprotected);
+        // remover sem arquivo não é erro (revert repetido)
+        DnsStateManifest::remove_manifest().unwrap();
+    }
+
+    #[test]
+    fn manifestos_ilegiveis_viram_parcial_e_nunca_protegido() {
+        let s = Sandbox::new("ilegivel");
+        let path = s.manifest_path();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        for ruim in [
+            "",
+            "{}",
+            "[]",
+            "nao json",
+            r#"{"backend":"Inexistente","applied_at_utc":"1","connections":[]}"#,
+            r#"{"backend":"NetworkManager","applied_at_utc":"1","connections":[],"mode":"xyz"}"#,
+        ] {
+            std::fs::write(&path, ruim).unwrap();
+            match check_status() {
+                ProtectionStatus::PartiallyConfigured(m) => {
+                    assert!(m.starts_with("Manifesto corrompido"), "{ruim:?} -> {m}")
+                }
+                o => panic!("{ruim:?} -> {o:?}"),
+            }
         }
     }
 }
