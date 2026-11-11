@@ -195,8 +195,16 @@ impl DnsStateManifest {
 
     /// Retorna o caminho canônico do arquivo de estado conforme o sistema operacional.
     pub fn file_path() -> Result<PathBuf> {
+        let path = Self::file_path_raw()?;
         #[cfg(test)]
-        crate::testenv::assert_sandboxed("state.json");
+        {
+            crate::testenv::assert_sandboxed("state.json");
+            crate::testenv::assert_inside(&path, "state.json");
+        }
+        Ok(path)
+    }
+
+    fn file_path_raw() -> Result<PathBuf> {
         #[cfg(target_os = "windows")]
         {
             let base = std::env::var("LOCALAPPDATA")

@@ -83,7 +83,11 @@ fn apply_twice_keeps_original_manifest_untouched() {
             "GUIALAR_TEST_DNS",
             "1.1.1.3,1.0.0.3,2606:4700:4700::1113,2606:4700:4700::1003",
         )
+        // Como root via sudo/pkexec o binário usaria o home do usuário real, não o HOME acima.
         .env_remove("SUDO_USER")
+        .env_remove("SUDO_UID")
+        .env_remove("SUDO_GID")
+        .env_remove("PKEXEC_UID")
         .output()
         .expect("executa apply");
 

@@ -710,3 +710,11 @@ fn sem_manifesto_o_resolv_conf_so_perde_as_linhas_do_filtro() {
         Some("nameserver 192.168.1.1\n")
     );
 }
+
+#[test]
+fn deny_do_programa_vale_mesmo_com_prefixo_de_elevacao() {
+    let r = FakeRunner::new().not_root(&["sudo", "-n"]).deny("tee", 1);
+    let e = write_privileged_file(&r, "/etc/x", "a").unwrap_err();
+    assert!(format!("{e:#}").contains("Falha ao gravar"));
+    assert!(r.state().files.is_empty());
+}

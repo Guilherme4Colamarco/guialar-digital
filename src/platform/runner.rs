@@ -197,6 +197,8 @@ impl CommandRunner for RealRunner {
                 ..Outcome::default()
             });
         }
+        // NOTA: com `In::Data` + `Out::Capture` o filho pode travar se a saída encher o
+        // pipe antes de o stdin terminar. Nenhum uso de produção combina os dois.
         let mut child = c.spawn()?;
         if let In::Data(data) = &cmd.stdin {
             // O pipe fecha ao fim do bloco: o filho vê EOF.

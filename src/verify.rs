@@ -324,7 +324,6 @@ mod qa_tests {
     #[test]
     fn sem_manifesto_continua_desprotegido() {
         let _s = Sandbox::new("semmanifesto");
-        std::env::remove_var("SUDO_USER");
         assert_eq!(check_status(), ProtectionStatus::Unprotected);
     }
 

@@ -24,6 +24,15 @@ pub fn sandboxed() -> bool {
     ACTIVE.with(|a| a.get())
 }
 
+/// O caminho está dentro do `Sandbox` desta thread? (Falha alto se não.)
+pub fn assert_inside(path: &Path, what: &str) {
+    let root = lock_dir().and_then(|d| d.parent().map(Path::to_path_buf));
+    assert!(
+        root.is_some_and(|r| path.starts_with(&r)),
+        "teste tocou {what} fora do Sandbox: {path:?}"
+    );
+}
+
 /// Guarda (só em `cargo test`): quem toca o manifesto ou a trava de operação precisa estar
 /// num `Sandbox`; senão o teste gravaria no estado REAL da máquina (`%LOCALAPPDATA%`, `$HOME`,
 /// pasta temporária). Falha alto em vez de sujar a máquina.
@@ -39,7 +48,15 @@ pub fn lock() -> MutexGuard<'static, ()> {
     ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-const VARS: [&str; 3] = ["HOME", "LOCALAPPDATA", "APPIMAGE"];
+const VARS: [&str; 7] = [
+    "HOME",
+    "LOCALAPPDATA",
+    "APPIMAGE",
+    "SUDO_UID",
+    "SUDO_GID",
+    "SUDO_USER",
+    "PKEXEC_UID",
+];
 
 /// Pasta de estado temporária: `HOME` e `LOCALAPPDATA` apontam para ela e a trava de
 /// operação fica em `<pasta>/tmp`; modo de filtro volta para `family`. Restaura tudo ao sair.
@@ -51,6 +68,16 @@ pub struct Sandbox {
 
 impl Sandbox {
     pub fn new(tag: &str) -> Self {
+        Self::build(tag, &[])
+    }
+
+    /// Como `new`, mas antes define `preset` (ex.: `SUDO_USER`) para provar que o Sandbox
+    /// limpa um ambiente de sudo/pkexec em vez de herdá-lo.
+    pub fn with_preset(tag: &str, preset: &[(&str, &str)]) -> Self {
+        Self::build(tag, preset)
+    }
+
+    fn build(tag: &str, preset: &[(&str, &str)]) -> Self {
         let guard = lock();
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -60,10 +87,22 @@ impl Sandbox {
             std::env::temp_dir().join(format!("guialar-sbx-{tag}-{}-{nanos}", std::process::id()));
         std::fs::create_dir_all(dir.join("tmp")).unwrap();
         let old = VARS.iter().map(|v| (*v, std::env::var_os(v))).collect();
+        for (k, v) in preset {
+            std::env::set_var(k, v);
+        }
         std::env::set_var("HOME", &dir);
         std::env::set_var("LOCALAPPDATA", &dir);
         LOCK_DIR.with(|d| *d.borrow_mut() = Some(dir.join("tmp")));
-        std::env::remove_var("APPIMAGE");
+        // Rodando como root via sudo/pkexec, o home sairia do /etc/passwd e não do HOME.
+        for v in [
+            "APPIMAGE",
+            "SUDO_UID",
+            "SUDO_GID",
+            "SUDO_USER",
+            "PKEXEC_UID",
+        ] {
+            std::env::remove_var(v);
+        }
         crate::config::set_mode(crate::config::FilterMode::Family);
         ACTIVE.with(|a| a.set(true));
         Self {
@@ -109,6 +148,28 @@ mod tests {
         let m = s.manifest_path();
         assert!(m.starts_with(s.dir()), "{m:?} fora de {:?}", s.dir());
         assert!(crate::sysutil::lock_path_for_test().starts_with(s.dir()));
+    }
+
+    #[test]
+    fn ambiente_de_sudo_ou_pkexec_nao_escapa_do_sandbox() {
+        let preset = [
+            ("SUDO_UID", "1000"),
+            ("SUDO_GID", "1000"),
+            ("SUDO_USER", "nobody"),
+            ("PKEXEC_UID", "1000"),
+        ];
+        let s = Sandbox::with_preset("sudo", &preset);
+        for (k, _) in preset {
+            assert!(std::env::var_os(k).is_none(), "{k} deveria ter sido limpo");
+        }
+        assert!(crate::sysutil::effective_home()
+            .unwrap()
+            .starts_with(s.dir()));
+        assert!(s.manifest_path().starts_with(s.dir()));
+        drop(s);
+        // ao sair, volta o ambiente de ANTES do Sandbox: o preset do teste não vaza
+        assert_ne!(std::env::var("SUDO_USER").as_deref(), Ok("nobody"));
+        assert_ne!(std::env::var("PKEXEC_UID").as_deref(), Ok("1000"));
     }
 
     #[test]

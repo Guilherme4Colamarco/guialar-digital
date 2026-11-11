@@ -268,12 +268,26 @@ impl CommandRunner for FakeRunner {
             argv: argv.clone(),
             stdin: stdin.clone(),
         });
+        // Tira o prefixo de elevação (só se o argv começa mesmo com ele).
+        let prefix: Vec<String> = self
+            .st
+            .borrow()
+            .prefix
+            .iter()
+            .map(|p| p.to_string())
+            .collect();
+        let real = if !prefix.is_empty() && argv.len() > prefix.len() && argv.starts_with(&prefix) {
+            &argv[prefix.len()..]
+        } else {
+            &argv[..]
+        };
+        // `deny` casa com o programa de verdade ou com a ferramenta de elevação.
         let denied = self
             .st
             .borrow()
             .deny
             .iter()
-            .find(|(p, _)| *p == argv[0])
+            .find(|(p, _)| *p == real[0] || *p == argv[0])
             .map(|(_, c)| *c);
         if let Some(code) = denied {
             return Ok(Outcome {
@@ -281,13 +295,6 @@ impl CommandRunner for FakeRunner {
                 ..Outcome::default()
             });
         }
-        // Tira o prefixo de elevação para simular o comando de verdade.
-        let prefix_len = self.st.borrow().prefix.len();
-        let real = if prefix_len > 0 && argv.len() > prefix_len {
-            &argv[prefix_len..]
-        } else {
-            &argv[..]
-        };
         self.handle(real, stdin.as_deref())
     }
 

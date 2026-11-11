@@ -132,6 +132,10 @@ impl PsFake {
 
 impl CommandRunner for PsFake {
     fn run(&self, cmd: &Cmd) -> io::Result<Outcome> {
+        assert!(
+            cmd.no_window,
+            "powershell/ipconfig precisam de CREATE_NO_WINDOW"
+        );
         if cmd.program == "ipconfig" {
             self.calls
                 .borrow_mut()
@@ -350,6 +354,10 @@ fn dns_configurado_junta_ipv4_e_ipv6_sem_repetir() {
     assert_eq!(ips, ["1.1.1.3", "2606:4700:4700::1113"]);
 }
 
+// LIMITE (ADR-029, «Limites»): `run_elevated_hidden` (UAC) fica fora da costura, então aqui só
+// se prova a tradução do resultado do UAC. Que um UAC negado deixa manifesto e DNS intactos no
+// Windows real é coberto pelo E2E do gl-qa (scripts/e2e.ps1) e pela checagem manual do release
+// candidate. No Linux o mesmo critério passa pela costura (linux_tests.rs).
 #[test]
 fn uac_negado_ou_falho_nao_conta_como_feito() {
     let negado =
