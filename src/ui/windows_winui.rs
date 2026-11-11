@@ -1178,8 +1178,25 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: usize, lp: isize) ->
                         crate::config::FilterMode::Family
                     };
                     if !busy && ativo.is_some_and(|m| m != chosen) {
-                        crate::config::set_mode(chosen);
-                        spawn_action(hwnd, super::action_activate);
+                        let dns = STATE
+                            .lock()
+                            .unwrap()
+                            .snapshot
+                            .as_ref()
+                            .map(|x| x.configured_dns.clone())
+                            .unwrap_or_default();
+                        let texto = format!(
+                            "{}\n\n{}",
+                            theme::plan_heading(ativo, chosen),
+                            theme::plan_body(&dns, ativo, chosen)
+                        );
+                        // 0x24 | 0x100: Sim/Não, padrão Não. Sem confirmar, nada muda.
+                        if message_box_owned(hwnd, &texto, "GuiaLar Digital", 0x24 | 0x100) == 6 {
+                            crate::config::set_mode(chosen);
+                            spawn_action(hwnd, super::action_activate);
+                        } else {
+                            place_buttons(hwnd); // o rádio volta ao modo que está valendo
+                        }
                     }
                 }
                 ID_RECS => {
@@ -1194,12 +1211,31 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: usize, lp: isize) ->
                     open_url(theme::RECOMMENDED_BROWSERS[i - ID_OPEN_BASE].url);
                 }
                 ID_ACTIVATE => {
-                    crate::config::set_mode(if MODE_ADS.load(Ordering::Relaxed) {
+                    let chosen = if MODE_ADS.load(Ordering::Relaxed) {
                         crate::config::FilterMode::AdsOnly
                     } else {
                         crate::config::FilterMode::Family
-                    });
-                    spawn_action(hwnd, super::action_activate)
+                    };
+                    let (ativo, dns) = {
+                        let st = STATE.lock().unwrap();
+                        (
+                            st.snapshot.as_ref().and_then(|x| x.mode),
+                            st.snapshot
+                                .as_ref()
+                                .map(|x| x.configured_dns.clone())
+                                .unwrap_or_default(),
+                        )
+                    };
+                    let texto = format!(
+                        "{}\n\n{}",
+                        theme::plan_heading(ativo, chosen),
+                        theme::plan_body(&dns, ativo, chosen)
+                    );
+                    // 0x24 | 0x100: Sim/Não, padrão Não. Sem confirmar, nada muda.
+                    if message_box_owned(hwnd, &texto, "GuiaLar Digital", 0x24 | 0x100) == 6 {
+                        crate::config::set_mode(chosen);
+                        spawn_action(hwnd, super::action_activate)
+                    }
                 }
                 ID_BROWSERS => spawn_action(hwnd, super::action_browsers),
                 ID_RESTORE => {

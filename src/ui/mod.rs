@@ -80,6 +80,7 @@ pub fn snapshot() -> Snapshot {
             .map(|p| p.display().to_string())
             .unwrap_or_default(),
         backend: backend_name(),
+        configured_dns: crate::platform::configured_dns(),
     }
 }
 

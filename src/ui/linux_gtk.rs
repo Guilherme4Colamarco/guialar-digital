@@ -15,7 +15,7 @@ pub use imp::run;
 #[cfg(target_env = "gnu")]
 mod imp {
     use std::ffi::{c_char, c_int, c_uint, c_void, CString};
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Mutex, OnceLock};
 
     use anyhow::Result;
@@ -111,7 +111,10 @@ mod imp {
         gtk_window_set_default_size: unsafe extern "C" fn(P, c_int, c_int),
         gtk_window_set_icon_name: unsafe extern "C" fn(P, *const c_char),
         gtk_window_present: unsafe extern "C" fn(P),
-        adw_toast_dismiss: unsafe extern "C" fn(P),
+        adw_message_dialog_new: unsafe extern "C" fn(P, *const c_char, *const c_char) -> P,
+        adw_message_dialog_add_response: unsafe extern "C" fn(P, *const c_char, *const c_char),
+        adw_message_dialog_set_default_response: unsafe extern "C" fn(P, *const c_char),
+        adw_message_dialog_set_close_response: unsafe extern "C" fn(P, *const c_char),
         gtk_check_button_new: unsafe extern "C" fn() -> P,
         gtk_check_button_set_group: unsafe extern "C" fn(P, P),
         gtk_check_button_set_active: unsafe extern "C" fn(P, c_int),
@@ -119,7 +122,6 @@ mod imp {
         adw_action_row_add_prefix: unsafe extern "C" fn(P, P),
         adw_action_row_set_activatable_widget: unsafe extern "C" fn(P, P),
         gtk_link_button_new_with_label: unsafe extern "C" fn(*const c_char, *const c_char) -> P,
-        g_object_ref: unsafe extern "C" fn(P) -> P,
         gtk_widget_remove_css_class: unsafe extern "C" fn(P, *const c_char),
         gtk_button_set_label: unsafe extern "C" fn(P, *const c_char),
         gtk_progress_bar_new: unsafe extern "C" fn() -> P,
@@ -155,11 +157,17 @@ mod imp {
     }
 
     static BUSY: AtomicBool = AtomicBool::new(false);
-    static ARMED: AtomicBool = AtomicBool::new(false);
     /// `true` enquanto o programa mexe nos rádios (não é escolha do usuário).
     static SYNCING: AtomicBool = AtomicBool::new(false);
-    /// Toast "clique de novo…" ainda na tela (com referência própria) para poder dispensá-lo.
-    static ARM_TOAST: AtomicUsize = AtomicUsize::new(0);
+    /// Ação à espera de confirmação (diálogo aberto). Sem confirmar, nada muda.
+    static PENDING: Mutex<Option<Pending>> = Mutex::new(None);
+
+    #[derive(Clone, Copy)]
+    enum Pending {
+        /// Ativar ou trocar para este modo.
+        Apply(crate::config::FilterMode),
+        Restore,
+    }
     /// Verificação pedida pelo usuário: ao terminar, mostra o veredito.
     static CHECKING: AtomicBool = AtomicBool::new(false);
     /// Último veredito de "Verificar": fica na tela (o toast some sozinho).
@@ -342,12 +350,7 @@ mod imp {
                 let pos = actions.iter().position(|x| *x == action);
                 (a.gtk_widget_set_visible)(b, pos.is_some() as c_int);
                 (a.gtk_widget_set_sensitive)(b, (!busy) as c_int);
-                let label = if action == Action::Restore && ARMED.load(Ordering::Relaxed) {
-                    "Confirmar desativação"
-                } else {
-                    theme::button_label(action, layout_state)
-                };
-                (a.gtk_button_set_label)(b, cs(label).as_ptr());
+                (a.gtk_button_set_label)(b, cs(theme::button_label(action, layout_state)).as_ptr());
                 let accent = cs("suggested-action");
                 if pos == Some(0) {
                     (a.gtk_widget_add_css_class)(b, accent.as_ptr());
@@ -448,34 +451,71 @@ mod imp {
         }
     }
 
-    /// Mostra um toast e devolve o ponteiro (com referência extra: libere com `dismiss_arm_toast`).
-    fn toast_ref(msg: &str) -> usize {
+    fn toast(msg: &str) {
         let u = ui();
         let a = api();
-        // SAFETY: thread principal. O overlay assume uma referência; guardamos outra.
+        // SAFETY: thread principal; o overlay assume a referência do toast.
         unsafe {
-            let t = (a.adw_toast_new)(cs(msg).as_ptr());
-            (a.g_object_ref)(t);
-            (a.adw_toast_overlay_add_toast)(u.toasts as P, t);
-            t as usize
+            (a.adw_toast_overlay_add_toast)(u.toasts as P, (a.adw_toast_new)(cs(msg).as_ptr()));
         }
     }
 
-    fn toast(msg: &str) {
-        let t = toast_ref(msg);
-        // SAFETY: devolve a referência extra; o overlay mantém a dele.
-        unsafe { (api().g_object_unref)(t as P) };
+    /// Pergunta antes de mudar o DNS. Sem "Continuar", nada muda; o padrão é "Cancelar".
+    fn confirm(pending: Pending) {
+        let u = ui();
+        let a = api();
+        let snap = LAST.lock().unwrap().clone();
+        let (heading, body, ok_label) = match pending {
+            Pending::Apply(to) => {
+                let from = snap.as_ref().and_then(|s| s.mode);
+                let dns = snap.map(|s| s.configured_dns).unwrap_or_default();
+                (
+                    theme::plan_heading(from, to),
+                    theme::plan_body(&dns, from, to),
+                    "Continuar",
+                )
+            }
+            Pending::Restore => (
+                "Desativar a proteção?".to_string(),
+                theme::confirm_disable_text(snap.and_then(|s| s.mode)).to_string(),
+                "Desativar",
+            ),
+        };
+        *PENDING.lock().unwrap() = Some(pending);
+        // SAFETY: thread principal; o diálogo se destrói ao responder.
+        unsafe {
+            let d = (a.adw_message_dialog_new)(
+                u.window as P,
+                cs(&heading).as_ptr(),
+                cs(&body).as_ptr(),
+            );
+            (a.adw_message_dialog_add_response)(d, cs("cancel").as_ptr(), cs("Cancelar").as_ptr());
+            (a.adw_message_dialog_add_response)(d, cs("ok").as_ptr(), cs(ok_label).as_ptr());
+            (a.adw_message_dialog_set_default_response)(d, cs("cancel").as_ptr());
+            (a.adw_message_dialog_set_close_response)(d, cs("cancel").as_ptr());
+            (a.g_signal_connect_data)(
+                d,
+                cs("response").as_ptr(),
+                on_confirm_response as P,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                0,
+            );
+            (a.gtk_window_present)(d);
+        }
     }
 
-    /// Dispensa o aviso de "confirmar desativação" (já não vale) e libera a referência.
-    fn dismiss_arm_toast() {
-        let t = ARM_TOAST.swap(0, Ordering::Relaxed);
-        if t != 0 {
-            // SAFETY: referência própria guardada em `toast_ref`; dispensar duas vezes é inofensivo.
-            unsafe {
-                (api().adw_toast_dismiss)(t as P);
-                (api().g_object_unref)(t as P);
+    unsafe extern "C" fn on_confirm_response(_d: P, response: *const c_char, _data: P) {
+        let ok = !response.is_null() && std::ffi::CStr::from_ptr(response).to_bytes() == b"ok";
+        let pending = PENDING.lock().unwrap().take();
+        match (ok, pending) {
+            (true, Some(Pending::Apply(m))) => {
+                crate::config::set_mode(m);
+                run_action(crate::ui::action_activate);
             }
+            (true, Some(Pending::Restore)) => run_action(crate::ui::action_restore),
+            // Cancelou: o rádio volta ao modo que está valendo.
+            _ => render(),
         }
     }
 
@@ -546,43 +586,22 @@ mod imp {
         };
         let active = LAST.lock().unwrap().as_ref().and_then(|s| s.mode);
         if active.is_some_and(|m| m != chosen) {
-            crate::config::set_mode(chosen);
-            run_action(crate::ui::action_activate);
+            confirm(Pending::Apply(chosen));
         }
     }
 
     unsafe extern "C" fn on_activate_btn(_b: P, _d: P) {
         // Filtro escolhido no seletor (padrão: proteção familiar).
         let ads = (api().gtk_check_button_get_active)(ui().check_ads as P) != 0;
-        crate::config::set_mode(if ads {
+        confirm(Pending::Apply(if ads {
             crate::config::FilterMode::AdsOnly
         } else {
             crate::config::FilterMode::Family
-        });
-        run_action(crate::ui::action_activate);
+        }));
     }
-    /// Desativar pede confirmação (E5): o 1º clique arma, o 2º executa; desarma em 5 s.
+    /// Desativar pede confirmação (texto conforme o modo; o padrão é não desfazer).
     unsafe extern "C" fn on_restore_btn(_b: P, _d: P) {
-        if ARMED.swap(false, Ordering::Relaxed) {
-            dismiss_arm_toast();
-            render();
-            run_action(crate::ui::action_restore);
-        } else {
-            ARMED.store(true, Ordering::Relaxed);
-            render();
-            dismiss_arm_toast();
-            ARM_TOAST.store(
-                toast_ref("Clique de novo em \"Confirmar desativação\" para desligar a proteção."),
-                Ordering::Relaxed,
-            );
-            (api().g_timeout_add)(5000, disarm, std::ptr::null_mut());
-        }
-    }
-    unsafe extern "C" fn disarm(_d: P) -> c_int {
-        ARMED.store(false, Ordering::Relaxed);
-        dismiss_arm_toast();
-        render();
-        0
+        confirm(Pending::Restore);
     }
     unsafe extern "C" fn on_browsers_btn(_b: P, _d: P) {
         run_action(crate::ui::action_browsers);

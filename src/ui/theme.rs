@@ -57,6 +57,8 @@ pub struct Snapshot {
     /// Backend de DNS detectado.
     #[cfg_attr(windows, allow(dead_code))]
     pub backend: String,
+    /// DNS configurados agora (o mesmo que o check_status lê; inclui stubs locais).
+    pub configured_dns: Vec<std::net::IpAddr>,
 }
 
 impl Snapshot {
@@ -265,9 +267,85 @@ pub fn state_color(p: &Palette, state: UiState) -> u32 {
     }
 }
 
+/// DNS de agora, em frase: ignora o resolvedor local do sistema (stub); sem nada legível,
+/// diz que é o automático da rede.
+pub fn current_dns_text(configured: &[std::net::IpAddr]) -> String {
+    let reais: Vec<String> = configured
+        .iter()
+        .filter(|ip| !crate::config::is_local_stub(ip))
+        .map(|ip| ip.to_string())
+        .collect();
+    if reais.is_empty() {
+        "automático (o da sua rede)".into()
+    } else {
+        reais.join(", ")
+    }
+}
+
+fn mode_dns_text(mode: crate::config::FilterMode) -> String {
+    let [a, b] = mode.ipv4();
+    format!("{a}, {b}")
+}
+
+/// Título da pergunta antes de mudar o DNS (`from` = modo ligado agora, se houver).
+pub fn plan_heading(
+    from: Option<crate::config::FilterMode>,
+    to: crate::config::FilterMode,
+) -> String {
+    match from {
+        Some(_) => format!("Trocar para \"{}\"?", to.label()),
+        None => format!("Ativar \"{}\"?", to.label()),
+    }
+}
+
+/// Corpo da pergunta: DNS de agora e DNS que vai entrar. Sem confirmar, nada muda.
+pub fn plan_body(
+    configured: &[std::net::IpAddr],
+    from: Option<crate::config::FilterMode>,
+    to: crate::config::FilterMode,
+) -> String {
+    let agora = match from {
+        Some(m) => format!("{} ({})", mode_dns_text(m), m.label()),
+        None => current_dns_text(configured),
+    };
+    let depois = format!("{} ({})", mode_dns_text(to), to.label());
+    let fecho = match from {
+        Some(_) => "Se você cancelar, nada muda.",
+        None => "Se você cancelar, nada muda. Depois você pode voltar ao DNS de antes em \"Desativar proteção\".",
+    };
+    format!("DNS de agora: {agora}\nDNS depois: {depois}\n\n{fecho}")
+}
+
+/// Frase fixa do diagnóstico: o programa não olha o navegador (sem detector de DoH).
+pub const DOH_LIMIT_NOTE: &str = "Não dá para ver daqui se o seu navegador usa DNS próprio (DoH). Se usar, o filtro do GuiaLar não vale para ele.";
+
+/// DNS configurados, para os detalhes: reais primeiro; stubs locais marcados como tal.
+pub fn configured_dns_text(configured: &[std::net::IpAddr]) -> String {
+    let reais: Vec<String> = configured
+        .iter()
+        .filter(|ip| !crate::config::is_local_stub(ip))
+        .map(|ip| ip.to_string())
+        .collect();
+    let locais: Vec<String> = configured
+        .iter()
+        .filter(|ip| crate::config::is_local_stub(ip))
+        .map(|ip| format!("{ip} (resolvedor local do sistema)"))
+        .collect();
+    let todos: Vec<String> = reais.into_iter().chain(locais).collect();
+    if todos.is_empty() {
+        "não consegui ler".into()
+    } else {
+        todos.join(", ")
+    }
+}
+
 /// Texto de detalhes técnicos (jargão fica só aqui).
 pub fn technical_details(s: &Snapshot, last_error: &str) -> String {
-    let mut t = format!("Backend de DNS: {}\n", s.backend);
+    let mut t = format!(
+        "Gerenciador de rede: {}\nDNS configurados: {}\n",
+        s.backend,
+        configured_dns_text(&s.configured_dns)
+    );
     // O filtro só é citado quando há proteção gravada.
     if !matches!(s.status, ProtectionStatus::Unprotected) {
         match s.mode.unwrap_or_default() {
@@ -293,6 +371,7 @@ pub fn technical_details(s: &Snapshot, last_error: &str) -> String {
     if let ProtectionStatus::PartiallyConfigured(m) = &s.status {
         t.push_str(&format!("Aviso: {m}\n"));
     }
+    t.push_str(&format!("{DOH_LIMIT_NOTE}\n"));
     if !last_error.is_empty() {
         t.push_str(&format!("Último erro: {last_error}\n"));
     }
@@ -373,6 +452,7 @@ mod tests {
             mode: None,
             manifest_path: String::new(),
             backend: String::new(),
+            configured_dns: Vec::new(),
         }
     }
 
@@ -579,5 +659,43 @@ mod tests {
         assert!(!confirm_disable_text(Some(AdsOnly)).contains("adultos"));
         assert!(confirm_disable_text(Some(Family)).contains("adultos"));
         assert!(confirm_disable_text(None).contains("adultos"));
+    }
+
+    fn ipv(v: &[&str]) -> Vec<std::net::IpAddr> {
+        v.iter().map(|x| x.parse().unwrap()).collect()
+    }
+
+    #[test]
+    fn plano_mostra_dns_de_agora_e_o_novo() {
+        use crate::config::FilterMode::{AdsOnly, Family};
+        let b = plan_body(&ipv(&["10.0.2.3"]), None, Family);
+        assert!(b.contains("DNS de agora: 10.0.2.3"));
+        assert!(b.contains("DNS depois: 1.1.1.3, 1.0.0.3 (Proteção familiar)"));
+        assert!(b.contains("nada muda"));
+        assert!(plan_heading(None, Family).contains("Ativar"));
+        // só stub local: "automático"
+        assert!(
+            plan_body(&ipv(&["127.0.0.53"]), None, AdsOnly).contains("DNS de agora: automático")
+        );
+        assert!(plan_body(&[], None, AdsOnly).contains("automático"));
+        // troca: de agora = modo ligado
+        let t = plan_body(&ipv(&["1.1.1.3"]), Some(Family), AdsOnly);
+        assert!(t.contains("DNS de agora: 1.1.1.3, 1.0.0.3 (Proteção familiar)"));
+        assert!(t.contains("DNS depois: 94.140.14.14, 94.140.15.15 (Só bloquear anúncios)"));
+        assert!(plan_heading(Some(Family), AdsOnly).contains("Trocar"));
+    }
+
+    #[test]
+    fn diagnostico_tem_gerenciador_dns_e_a_frase_do_doh() {
+        let mut s = snap(ProtectionStatus::Unprotected, &[]);
+        s.backend = "NetworkManager".into();
+        s.configured_dns = ipv(&["127.0.0.53", "10.0.2.3"]);
+        let t = technical_details(&s, "");
+        assert!(t.contains("Gerenciador de rede: NetworkManager"));
+        assert!(t.contains("DNS configurados: 10.0.2.3, 127.0.0.53 (resolvedor local do sistema)"));
+        assert!(t.contains(DOH_LIMIT_NOTE));
+        assert!(DOH_LIMIT_NOTE.contains("Não dá para ver daqui"));
+        s.configured_dns.clear();
+        assert!(technical_details(&s, "").contains("DNS configurados: não consegui ler"));
     }
 }
