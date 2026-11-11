@@ -77,6 +77,12 @@ fn apply_twice_keeps_original_manifest_untouched() {
     let out = bin()
         .arg("apply")
         .env("HOME", &home)
+        // DNS "configurado" fixo (só em build de depuração): o do modo família, sem ler a
+        // rede do host. Com DNS de fora o apply reaplicaria em vez de dizer "já está ativa".
+        .env(
+            "GUIALAR_TEST_DNS",
+            "1.1.1.3,1.0.0.3,2606:4700:4700::1113,2606:4700:4700::1003",
+        )
         .env_remove("SUDO_USER")
         .output()
         .expect("executa apply");

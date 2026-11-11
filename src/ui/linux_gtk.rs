@@ -318,6 +318,7 @@ mod imp {
         let actions = theme::actions_for(
             layout_state,
             snap.as_ref().is_some_and(|s| s.needs_blocker()),
+            snap.as_ref().is_some_and(|s| s.filter_without_record),
         );
         let (head, desc) = if snap.is_none() {
             (

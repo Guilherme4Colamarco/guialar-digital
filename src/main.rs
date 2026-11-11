@@ -215,7 +215,14 @@ fn handle_status() -> anyhow::Result<()> {
         ProtectionStatus::Unprotected => {
             println!("  Estado:  🔴 [NÃO PROTEGIDO]");
             println!("  Info:    O sistema está utilizando o DNS padrão da rede/provedor.");
-            println!("  Ação:    Execute 'guialar apply' para ativar a proteção.");
+            if platform::cloudflare_dns_active() {
+                println!(
+                    "  Aviso:   O filtro do GuiaLar ainda está na rede, mas não há registro dele."
+                );
+                println!("  Ação:    Execute 'guialar revert' para voltar ao DNS da rede.");
+            } else {
+                println!("  Ação:    Execute 'guialar apply' para ativar a proteção.");
+            }
         }
     }
 
@@ -246,16 +253,21 @@ fn handle_apply() -> anyhow::Result<()> {
 fn apply_flow(with_browsers: bool) -> anyhow::Result<()> {
     let _guard = sysutil::guard_operation()?;
     if let Some(m) = DnsStateManifest::load()? {
-        if m.mode == config::current_mode() {
-            println!(
-                "ℹ️  A proteção já está ativa. Use 'guialar revert' antes de aplicar de novo."
-            );
-            return Ok(());
+        let wanted = config::current_mode();
+        match platform::plan_apply(Some(&m), wanted, &platform::configured_dns()) {
+            platform::ApplyPlan::AlreadyActive => {
+                println!(
+                    "ℹ️  A proteção já está ativa. Use 'guialar revert' antes de aplicar de novo."
+                );
+                return Ok(());
+            }
+            _ if m.mode != wanted => {
+                println!("🔁 Trocando o filtro para: {}", wanted.label());
+            }
+            _ => {
+                println!("🔁 O DNS deste computador não é o do GuiaLar: reaplicando o filtro...");
+            }
         }
-        println!(
-            "🔁 Trocando o filtro para: {}",
-            config::current_mode().label()
-        );
     }
     println!(
         "⚙️  Aplicando \"{}\" no sistema...",

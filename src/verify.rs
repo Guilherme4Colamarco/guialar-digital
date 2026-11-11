@@ -40,7 +40,7 @@ pub enum DnsCheck {
     Ours,
     /// Há DNS configurado que não é do conjunto do modo.
     Foreign(Vec<IpAddr>),
-    /// Não deu para ler nenhum DNS (só stub local ou nada): vale só a sonda.
+    /// Não deu para ler nenhum DNS fora de stub local (ou nada): não dá para provar o DNS.
     Unknown,
 }
 
@@ -69,19 +69,28 @@ pub fn check_configured_dns(mode: FilterMode, configured: &[IpAddr]) -> DnsCheck
     }
 }
 
-/// Decide o estado com manifesto presente. `probe` só é chamada se o DNS é nosso ou
-/// desconhecido (DNS de fora já é Parcial sem gastar rede).
+/// Frase do Parcial quando nenhum DNS pôde ser lido (a sonda sozinha não prova nada).
+pub const MSG_DNS_UNREADABLE: &str = "Não consegui ler o DNS que este computador usa.";
+
+/// Decide o estado com manifesto presente. `probe` só roda se o DNS é do modo (DNS de fora
+/// e DNS ilegível já são Parcial sem gastar rede).
 pub fn decide_status(
     mode: FilterMode,
     configured: &[IpAddr],
     probe: impl FnOnce() -> bool,
 ) -> ProtectionStatus {
-    if let DnsCheck::Foreign(f) = check_configured_dns(mode, configured) {
-        let lista: Vec<String> = f.iter().map(|i| i.to_string()).collect();
-        return ProtectionStatus::PartiallyConfigured(format!(
-            "Este computador usa outro DNS ({}), não o do GuiaLar. Clique em \"Proteger\" de novo ou em \"Desativar proteção\".",
-            lista.join(", ")
-        ));
+    match check_configured_dns(mode, configured) {
+        DnsCheck::Foreign(f) => {
+            let lista: Vec<String> = f.iter().map(|i| i.to_string()).collect();
+            return ProtectionStatus::PartiallyConfigured(format!(
+                "Este computador usa outro DNS ({}), não o do GuiaLar. Desative a proteção e proteja de novo.",
+                lista.join(", ")
+            ));
+        }
+        DnsCheck::Unknown => {
+            return ProtectionStatus::PartiallyConfigured(MSG_DNS_UNREADABLE.into());
+        }
+        DnsCheck::Ours => {}
     }
     if probe() {
         ProtectionStatus::Protected
@@ -341,8 +350,11 @@ mod qa_tests {
             prot(Family, &["fec0:0:0:ffff::1", "1.1.1.3"], true),
             ProtectionStatus::Protected
         );
-        // sem DNS legível: só a sonda decide
-        assert_eq!(prot(Family, &[], true), ProtectionStatus::Protected);
+        // sem DNS legível: Parcial, mesmo com a sonda bloqueando
+        assert_eq!(
+            prot(Family, &[], true),
+            ProtectionStatus::PartiallyConfigured(MSG_DNS_UNREADABLE.into())
+        );
         assert!(parcial(prot(Family, &[], false)));
     }
 
@@ -369,5 +381,16 @@ mod qa_tests {
         restore_home(old);
         std::fs::remove_dir_all(&home).ok();
         assert_eq!(st, ProtectionStatus::Unprotected);
+    }
+
+    #[test]
+    fn parcial_por_dns_de_fora_nao_cita_botao_proteger() {
+        match decide_status(FilterMode::Family, &ips(&["8.8.8.8"]), || true) {
+            ProtectionStatus::PartiallyConfigured(m) => {
+                assert!(!m.contains("Proteger"), "{m}");
+                assert!(m.contains("Desative a proteção e proteja de novo"));
+            }
+            o => panic!("{o:?}"),
+        }
     }
 }

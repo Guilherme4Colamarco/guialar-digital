@@ -374,7 +374,8 @@ fn create_button(parent: HWND, id: usize, text: &str, primary: bool) -> HWND {
 fn actions_of(snapshot: &Option<Snapshot>) -> Vec<theme::Action> {
     let state = theme::ui_state(snapshot.as_ref(), false);
     let missing = snapshot.as_ref().is_some_and(|s| s.needs_blocker());
-    theme::actions_for(state, missing)
+    let orphan = snapshot.as_ref().is_some_and(|s| s.filter_without_record);
+    theme::actions_for(state, missing, orphan)
 }
 
 fn current_actions() -> Vec<theme::Action> {

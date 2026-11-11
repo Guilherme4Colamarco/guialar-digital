@@ -57,6 +57,8 @@ pub struct Snapshot {
     /// Backend de DNS detectado.
     #[cfg_attr(windows, allow(dead_code))]
     pub backend: String,
+    /// O DNS ainda é um filtro do GuiaLar, mas não há manifesto (não há DNS de antes gravado).
+    pub filter_without_record: bool,
     /// DNS configurados agora (o mesmo que o check_status lê; inclui stubs locais).
     pub configured_dns: Vec<std::net::IpAddr>,
 }
@@ -168,8 +170,11 @@ pub fn ui_state(snapshot: Option<&Snapshot>, busy: bool) -> UiState {
 
 /// Ações visíveis: `[primária, secundária]` (no máximo duas). `Trabalhando` não tem
 /// ação: os botões do último estado ficam desabilitados.
-pub fn actions_for(state: UiState, missing_blocker: bool) -> Vec<Action> {
+pub fn actions_for(state: UiState, missing_blocker: bool, orphan: bool) -> Vec<Action> {
     match state {
+        // Filtro na rede sem registro: a primária é Desativar (revert), não Proteger, para
+        // não gravar o IP do filtro como "DNS de antes".
+        UiState::Desprotegido if orphan => vec![Action::Restore, Action::Check],
         UiState::Desprotegido => vec![Action::Activate, Action::Check],
         UiState::Protegido => vec![Action::Check, Action::Restore],
         UiState::Parcial if missing_blocker => vec![Action::Browsers, Action::Restore],
@@ -211,7 +216,7 @@ pub fn card_subtitle(action: Action, missing: &[String]) -> String {
 /// Os rádios de modo aparecem em Desprotegido, Protegido e Parcial; não enquanto trabalha
 /// nem antes da primeira leitura.
 pub fn show_mode_selector(snapshot: Option<&Snapshot>, busy: bool) -> bool {
-    !busy && snapshot.is_some()
+    !busy && snapshot.is_some_and(|s| !s.filter_without_record)
 }
 
 /// Pergunta antes de desativar: o texto segue o modo (anúncios não fala em conteúdo adulto).
@@ -235,6 +240,10 @@ pub fn headline(state: UiState) -> &'static str {
 
 pub fn description(state: UiState, snapshot: Option<&Snapshot>) -> String {
     match state {
+        UiState::Desprotegido if snapshot.is_some_and(|s| s.filter_without_record) => {
+            "O filtro do GuiaLar ainda está na rede, mas o registro dele sumiu. Clique em \"Desativar proteção\" para voltar ao DNS da rede."
+                .into()
+        }
         UiState::Desprotegido => "Ative a proteção para bloquear sites perigosos e adultos.".into(),
         UiState::Protegido => match snapshot.and_then(|s| s.mode) {
             Some(crate::config::FilterMode::AdsOnly) => {
@@ -251,6 +260,10 @@ pub fn description(state: UiState, snapshot: Option<&Snapshot>) -> String {
                 "Falta o bloqueador de anúncios em: {}.",
                 s.missing_blocker.join(", ")
             ),
+            Some(Snapshot {
+                status: ProtectionStatus::PartiallyConfigured(m),
+                ..
+            }) => m.clone(),
             _ => "A proteção está ativa, mas o teste de conexão não respondeu.".into(),
         },
         UiState::Trabalhando => "Aguarde, isto leva alguns segundos.".into(),
@@ -453,6 +466,7 @@ mod tests {
             manifest_path: String::new(),
             backend: String::new(),
             configured_dns: Vec::new(),
+            filter_without_record: false,
         }
     }
 
@@ -474,14 +488,26 @@ mod tests {
     #[test]
     fn tabela_de_acoes_do_adr_020() {
         use Action::*;
-        assert_eq!(actions_for(UiState::Desprotegido, false), [Activate, Check]);
-        assert_eq!(actions_for(UiState::Protegido, false), [Check, Restore]);
-        assert_eq!(actions_for(UiState::Parcial, true), [Browsers, Restore]);
-        assert_eq!(actions_for(UiState::Parcial, false), [Check, Restore]);
-        assert!(actions_for(UiState::Trabalhando, false).is_empty());
+        assert_eq!(
+            actions_for(UiState::Desprotegido, false, false),
+            [Activate, Check]
+        );
+        assert_eq!(
+            actions_for(UiState::Protegido, false, false),
+            [Check, Restore]
+        );
+        assert_eq!(
+            actions_for(UiState::Parcial, true, false),
+            [Browsers, Restore]
+        );
+        assert_eq!(
+            actions_for(UiState::Parcial, false, false),
+            [Check, Restore]
+        );
+        assert!(actions_for(UiState::Trabalhando, false, false).is_empty());
         for st in [UiState::Desprotegido, UiState::Protegido, UiState::Parcial] {
             for miss in [false, true] {
-                let a = actions_for(st, miss);
+                let a = actions_for(st, miss, false);
                 assert!(a.len() <= 2);
                 // nunca Restaurar sem proteção, nunca Proteger com proteção
                 assert_eq!(a.contains(&Restore), st != UiState::Desprotegido);
@@ -592,7 +618,7 @@ mod tests {
         );
         assert!(s.manifest_corrupt() && !s.needs_blocker());
         assert_eq!(
-            actions_for(ui_state(Some(&s), false), s.needs_blocker()),
+            actions_for(ui_state(Some(&s), false), s.needs_blocker(), false),
             [Action::Check, Action::Restore]
         );
         assert!(description(UiState::Parcial, Some(&s)).contains("danificado"));
@@ -697,5 +723,39 @@ mod tests {
         assert!(DOH_LIMIT_NOTE.contains("Não dá para ver daqui"));
         s.configured_dns.clear();
         assert!(technical_details(&s, "").contains("DNS configurados: não consegui ler"));
+    }
+
+    #[test]
+    fn filtro_sem_registro_oferece_desativar_e_nao_proteger() {
+        use Action::*;
+        assert_eq!(
+            actions_for(UiState::Desprotegido, false, true),
+            [Restore, Check]
+        );
+        let mut s = snap(ProtectionStatus::Unprotected, &[]);
+        s.filter_without_record = true;
+        assert_eq!(ui_state(Some(&s), false), UiState::Desprotegido);
+        let d = description(UiState::Desprotegido, Some(&s));
+        assert!(d.contains("ainda está na rede") && d.contains("Desativar proteção"));
+        assert!(!show_mode_selector(Some(&s), false));
+        // sem filtro na rede continua oferecendo Proteger
+        s.filter_without_record = false;
+        assert!(show_mode_selector(Some(&s), false));
+    }
+
+    #[test]
+    fn parcial_mostra_a_frase_do_dns_ilegivel_e_sem_proteger() {
+        let s = snap(
+            ProtectionStatus::PartiallyConfigured(crate::verify::MSG_DNS_UNREADABLE.into()),
+            &[],
+        );
+        assert_eq!(
+            description(UiState::Parcial, Some(&s)),
+            "Não consegui ler o DNS que este computador usa."
+        );
+        assert_eq!(
+            actions_for(UiState::Parcial, false, false),
+            [Action::Check, Action::Restore]
+        );
     }
 }
