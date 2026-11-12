@@ -13,7 +13,7 @@ Desativar a proteção devolve o DNS que estava antes. Se o registro da proteç�
 
 > **Limites do filtro por DNS.** Ele bloqueia por **domínio**: não pega anúncio servido pelo mesmo domínio do site, nem navegador ou app com DNS próprio (DoH), nem tráfego que sai por uma VPN. Se a rede já tem outro bloqueador (um Pi-hole, por exemplo), o bloqueio pode vir dele e não do GuiaLar; por isso o programa só diz "Protegido" quando o DNS configurado é o do modo escolhido e o teste de bloqueio responde.
 
-> **Limites do bloqueador nos navegadores (Windows).** O Chromium não é detectado nem configurado (só Chrome, Edge, Brave e Firefox). O programa grava a política, mas a extensão só aparece quando o navegador é reaberto.
+> **Limites do bloqueador nos navegadores (Windows).** O Chromium não é detectado nem configurado (só Chrome, Edge, Brave e Firefox). Um **Firefox instalado só para o seu usuário** (em `%LOCALAPPDATA%`) não recebe a política: instale o uBlock Origin pela [página do Firefox](https://addons.mozilla.org/pt-BR/firefox/addon/ublock-origin/). Se uma política da sua organização já usa o mesmo valor de política num navegador, o programa não o altera e avisa («gerenciado pela organização»). O programa grava a política, mas a extensão só aparece quando o navegador é reaberto.
 
 Reescrita em Rust com interface nativa: **GTK 4 / Libadwaita** no Linux (carregado em tempo de execução) e **Win32 / Fluent (Mica)** no Windows. Há também uma seção informativa de **navegadores recomendados** (Brave, Helium, Zen Browser + uBlock Origin, Mullvad Browser, LibreWolf); o programa só mostra os links oficiais e não instala nada.
 
