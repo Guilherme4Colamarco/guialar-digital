@@ -440,7 +440,9 @@ impl OpLock {
                     {
                         bail!("a trava de operação é um link; recuso seguir");
                     }
-                    if lock_is_stale(path) {
+                    // trava de dono alheio (uma conta comum a plantou numa pasta que ficou
+                    // aberta) não é uma operação nossa: conta como abandonada (ADR-031)
+                    if lock_is_stale(path) || !crate::statedir::is_trusted(path) {
                         let _ = std::fs::remove_file(path);
                         continue;
                     }
@@ -507,6 +509,8 @@ pub fn require_privileged() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::os::unix::fs::MetadataExt;
 
     #[test]
     fn uid_efetivo_vem_da_terceira_coluna() {
@@ -556,6 +560,8 @@ mod tests {
 
     #[test]
     fn trava_impede_operacao_paralela() {
+        // dentro do Sandbox o «dono do sistema» é quem roda o teste (ver `is_trusted`)
+        let _s = crate::testenv::Sandbox::new("lock-paralela");
         let f = std::env::temp_dir().join(format!("guialar-lock-test-{}", std::process::id()));
         let _ = std::fs::remove_file(&f);
         let a = OpLock::acquire_in(&f).unwrap();
@@ -654,6 +660,32 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn trava_de_dono_alheio_conta_como_abandonada_mesmo_com_dono_vivo() {
+        let s = crate::testenv::Sandbox::new("lock-alheia");
+        let trava = s.dir().join("op.lock");
+        // uma conta comum plantou a trava com o PID de um processo VIVO (este) e a renova
+        std::fs::write(&trava, std::process::id().to_string()).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(80));
+        assert!(
+            !lock_is_stale(&trava),
+            "premissa: parece uma operação em andamento"
+        );
+        // dono confiável: bloqueia
+        assert!(OpLock::acquire_in(&trava).is_err());
+        // dono que não é o do sistema: não bloqueia, e a trava passa a ser nossa
+        let uid = std::fs::metadata(&trava).unwrap().uid();
+        crate::testenv::set_trusted_uid(Some(uid + 1));
+        let l = OpLock::acquire_in(&trava).expect("trava alheia é substituída");
+        crate::testenv::set_trusted_uid(None);
+        assert_eq!(
+            std::fs::read_to_string(&trava).unwrap().trim(),
+            std::process::id().to_string()
+        );
+        drop(l);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn umask_fechada_do_root_nao_esconde_a_trava_do_usuario() {
         use std::os::unix::fs::PermissionsExt;
         extern "C" {
@@ -694,6 +726,7 @@ mod tests {
 
     #[test]
     fn trava_orfa_e_substituida() {
+        let _s = crate::testenv::Sandbox::new("lock-orfa");
         let base = std::env::temp_dir().join(format!("gl-orfa-{}", std::process::id()));
         let _ = std::fs::remove_file(&base);
         // vazio (touch) com > 50 ms

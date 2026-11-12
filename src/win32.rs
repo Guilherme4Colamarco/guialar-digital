@@ -499,8 +499,65 @@ extern "system" {
     pub fn LocalFree(h: *mut c_void) -> *mut c_void;
 }
 
+#[repr(C)]
+pub struct LUID {
+    pub LowPart: u32,
+    pub HighPart: i32,
+}
+
+#[repr(C)]
+pub struct TOKEN_PRIVILEGES {
+    pub PrivilegeCount: u32,
+    pub Luid: LUID,
+    pub Attributes: u32,
+}
+
+pub const TOKEN_ADJUST_PRIVILEGES: u32 = 0x20;
+pub const TOKEN_QUERY: u32 = 0x8;
+pub const SE_PRIVILEGE_ENABLED: u32 = 2;
+pub const DACL_SECURITY_INFORMATION: u32 = 4;
+pub const PROTECTED_DACL_SECURITY_INFORMATION: u32 = 0x8000_0000;
+
+#[link(name = "kernel32")]
+extern "system" {
+    pub fn GetCurrentProcess() -> HANDLE;
+}
+
 #[link(name = "advapi32")]
 extern "system" {
+    pub fn OpenProcessToken(process: HANDLE, access: u32, token: *mut HANDLE) -> i32;
+    pub fn LookupPrivilegeValueW(system: *const u16, name: *const u16, luid: *mut LUID) -> i32;
+    pub fn AdjustTokenPrivileges(
+        token: HANDLE,
+        disable_all: i32,
+        new_state: *const TOKEN_PRIVILEGES,
+        buffer_len: u32,
+        previous: *mut c_void,
+        return_len: *mut u32,
+    ) -> i32;
+    pub fn SetNamedSecurityInfoW(
+        name: *const u16,
+        object_type: u32,
+        info: u32,
+        owner: *mut c_void,
+        group: *mut c_void,
+        dacl: *mut c_void,
+        sacl: *mut c_void,
+    ) -> u32;
+    pub fn GetSecurityDescriptorOwner(
+        sd: *mut c_void,
+        owner: *mut *mut c_void,
+        defaulted: *mut i32,
+    ) -> i32;
+    pub fn GetSecurityDescriptorDacl(
+        sd: *mut c_void,
+        present: *mut i32,
+        dacl: *mut *mut c_void,
+        defaulted: *mut i32,
+    ) -> i32;
+    /// `RtlGenRandom`: bytes aleatórios criptográficos.
+    #[link_name = "SystemFunction036"]
+    pub fn RtlGenRandom(buf: *mut u8, len: u32) -> u8;
     pub fn ConvertStringSecurityDescriptorToSecurityDescriptorW(
         sddl: *const u16,
         revision: u32,

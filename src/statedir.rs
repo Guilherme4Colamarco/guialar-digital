@@ -285,15 +285,49 @@ mod imp {
         owner_sid(path).is_some_and(|s| TRUSTED_SIDS.contains(&s.as_str()))
     }
 
-    /// Cria a pasta com a DACL protegida e o dono Administradores num passo só.
-    fn create_protected(dir: &Path) -> Result<()> {
-        #[cfg(test)]
-        if crate::testenv::sandboxed() {
-            return std::fs::create_dir(dir).map_err(Into::into);
+    /// Só para testes de ACL real: troca o dono de `path` (SDDL tipo `O:BU`).
+    #[cfg(test)]
+    pub fn test_set_owner(path: &Path, owner_sddl: &str) -> Result<()> {
+        enable_privilege("SeTakeOwnershipPrivilege");
+        enable_privilege("SeRestorePrivilege");
+        let sd = security_descriptor_from(owner_sddl)?;
+        let mut owner: *mut std::ffi::c_void = std::ptr::null_mut();
+        let mut defaulted = 0i32;
+        // SAFETY: `sd` válido; ponteiro de saída interno a `sd`.
+        let ok = unsafe { win32::GetSecurityDescriptorOwner(sd, &mut owner, &mut defaulted) };
+        let w = wide(path.as_os_str());
+        // SAFETY: caminho terminado em NUL; `owner` pertence a `sd`.
+        let r = unsafe {
+            win32::SetNamedSecurityInfoW(
+                w.as_ptr(),
+                win32::SE_FILE_OBJECT,
+                win32::OWNER_SECURITY_INFORMATION,
+                owner,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        // SAFETY: `sd` veio da conversão.
+        unsafe { win32::LocalFree(sd) };
+        if ok == 0 || r != 0 {
+            bail!(
+                "não foi possível trocar o dono de {} (erro {r})",
+                path.display()
+            );
         }
-        let sddl: Vec<u16> = SDDL.encode_utf16().chain(std::iter::once(0)).collect();
+        Ok(())
+    }
+
+    /// Descritor de segurança do GuiaLar a partir do SDDL (liberar com `LocalFree`).
+    fn security_descriptor() -> Result<*mut std::ffi::c_void> {
+        security_descriptor_from(SDDL)
+    }
+
+    fn security_descriptor_from(sddl: &str) -> Result<*mut std::ffi::c_void> {
+        let sddl: Vec<u16> = sddl.encode_utf16().chain(std::iter::once(0)).collect();
         let mut sd: *mut std::ffi::c_void = std::ptr::null_mut();
-        // SAFETY: SDDL terminado em NUL; `sd` é liberado com LocalFree.
+        // SAFETY: SDDL terminado em NUL; `sd` é liberado por quem chama.
         let ok = unsafe {
             win32::ConvertStringSecurityDescriptorToSecurityDescriptorW(
                 sddl.as_ptr(),
@@ -302,9 +336,19 @@ mod imp {
                 std::ptr::null_mut(),
             )
         };
-        if ok == 0 {
+        if ok == 0 || sd.is_null() {
             bail!("não foi possível montar a ACL da pasta de estado");
         }
+        Ok(sd)
+    }
+
+    /// Cria a pasta com a DACL protegida e o dono Administradores num passo só.
+    fn create_protected(dir: &Path) -> Result<()> {
+        #[cfg(test)]
+        if crate::testenv::sandboxed() {
+            return std::fs::create_dir(dir).map_err(Into::into);
+        }
+        let sd = security_descriptor()?;
         let sa = win32::SECURITY_ATTRIBUTES {
             nLength: std::mem::size_of::<win32::SECURITY_ATTRIBUTES>() as u32,
             lpSecurityDescriptor: sd,
@@ -322,34 +366,188 @@ mod imp {
         Ok(())
     }
 
+    /// 128 bits aleatórios em hexadecimal (`RtlGenRandom`).
+    fn random_hex() -> Result<String> {
+        let mut b = [0u8; 16];
+        // SAFETY: buffer válido de 16 bytes.
+        if unsafe { win32::RtlGenRandom(b.as_mut_ptr(), 16) } == 0 {
+            bail!("não foi possível gerar bytes aleatórios");
+        }
+        Ok(b.iter().map(|x| format!("{x:02x}")).collect())
+    }
+
+    /// Liga um privilégio do token (best effort: administradores têm, mas desligados).
+    fn enable_privilege(name: &str) {
+        let n: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+        let mut token: win32::HANDLE = std::ptr::null_mut();
+        // SAFETY: ponteiros de saída válidos; o handle é fechado abaixo.
+        unsafe {
+            if win32::OpenProcessToken(
+                win32::GetCurrentProcess(),
+                win32::TOKEN_ADJUST_PRIVILEGES | win32::TOKEN_QUERY,
+                &mut token,
+            ) == 0
+            {
+                return;
+            }
+            let mut luid = win32::LUID {
+                LowPart: 0,
+                HighPart: 0,
+            };
+            if win32::LookupPrivilegeValueW(std::ptr::null(), n.as_ptr(), &mut luid) != 0 {
+                let tp = win32::TOKEN_PRIVILEGES {
+                    PrivilegeCount: 1,
+                    Luid: luid,
+                    Attributes: win32::SE_PRIVILEGE_ENABLED,
+                };
+                win32::AdjustTokenPrivileges(
+                    token,
+                    0,
+                    &tp,
+                    0,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                );
+            }
+            win32::CloseHandle(token);
+        }
+    }
+
+    /// Reaplica o descritor do GuiaLar a uma pasta que já existe: dono Administradores e DACL
+    /// protegida (Administradores/SYSTEM total, Usuários leitura, sem herança do pai). É
+    /// idempotente, vale mesmo com a pasta criada pelo Explorer (ACL herdada de `ProgramData`)
+    /// e com handles abertos por outra conta; assume a posse com `SeTakeOwnership/SeRestore`.
+    fn harden(dir: &Path) -> Result<()> {
+        #[cfg(test)]
+        if crate::testenv::sandboxed() {
+            return Ok(());
+        }
+        enable_privilege("SeTakeOwnershipPrivilege");
+        enable_privilege("SeRestorePrivilege");
+        let sd = security_descriptor()?;
+        let mut owner: *mut std::ffi::c_void = std::ptr::null_mut();
+        let mut dacl: *mut std::ffi::c_void = std::ptr::null_mut();
+        let (mut present, mut defaulted) = (0i32, 0i32);
+        // SAFETY: `sd` é um descritor válido; ponteiros de saída válidos e internos a `sd`.
+        let ok = unsafe {
+            win32::GetSecurityDescriptorOwner(sd, &mut owner, &mut defaulted) != 0
+                && win32::GetSecurityDescriptorDacl(sd, &mut present, &mut dacl, &mut defaulted)
+                    != 0
+        };
+        let r = if ok && present != 0 && !owner.is_null() {
+            let w = wide(dir.as_os_str());
+            // SAFETY: caminho terminado em NUL; dono e DACL pertencem a `sd` (vivo até o free).
+            unsafe {
+                win32::SetNamedSecurityInfoW(
+                    w.as_ptr(),
+                    win32::SE_FILE_OBJECT,
+                    win32::OWNER_SECURITY_INFORMATION
+                        | win32::DACL_SECURITY_INFORMATION
+                        | win32::PROTECTED_DACL_SECURITY_INFORMATION,
+                    owner,
+                    std::ptr::null_mut(),
+                    dacl,
+                    std::ptr::null_mut(),
+                )
+            }
+        } else {
+            u32::MAX
+        };
+        // SAFETY: `sd` veio da conversão.
+        unsafe { win32::LocalFree(sd) };
+        if r != 0 {
+            bail!(
+                "não foi possível aplicar a ACL protegida em {} (erro {r})",
+                dir.display()
+            );
+        }
+        Ok(())
+    }
+
+    /// Apaga o que há na pasta e não é de Administradores/SYSTEM (uma conta comum pode ter
+    /// plantado `op.lock`, um `.tmp` previsível ou uma pasta). Não segue junção: remove a junção.
+    fn remove_foreign_entries(dir: &Path) -> Result<()> {
+        for e in std::fs::read_dir(dir)
+            .with_context(|| format!("não foi possível listar {}", dir.display()))?
+            .flatten()
+        {
+            let p = e.path();
+            if is_trusted(&p) {
+                continue;
+            }
+            let Ok(m) = std::fs::symlink_metadata(&p) else {
+                continue;
+            };
+            let reparse = m.file_type().is_symlink()
+                || m.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0;
+            let r = if m.is_dir() && !reparse {
+                std::fs::remove_dir_all(&p)
+            } else if m.is_dir() {
+                std::fs::remove_dir(&p)
+            } else {
+                std::fs::remove_file(&p)
+            };
+            r.with_context(|| format!("não foi possível remover {} (dono alheio)", p.display()))?;
+            eprintln!("⚠️ Removido {} (não era do sistema).", p.display());
+        }
+        Ok(())
+    }
+
+    /// Prepara a pasta de estado:
+    /// - não existe: cria já protegida;
+    /// - ponto de reparse (junção/link): sai do caminho (renomeada, sem seguir) com sufixo
+    ///   aleatório e a certa é criada;
+    /// - pasta de verdade, nossa ou de outro dono: assume (dono Administradores + DACL
+    ///   protegida) e apaga o que for de dono alheio. Nunca renomeia pasta real, que uma conta
+    ///   comum poderia travar com um handle aberto.
     pub fn ensure_dir() -> Result<PathBuf> {
         let dir = state_dir()?;
-        for _ in 0..2 {
+        for tentativa in 0..3 {
             match std::fs::symlink_metadata(&dir) {
-                Ok(m) if m.is_dir() && is_trusted(&dir) => return Ok(dir),
+                Ok(m)
+                    if m.file_type().is_symlink()
+                        || m.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+                        || !m.is_dir() =>
+                {
+                    let aside = dir.with_file_name(format!("GuiaLar.recusada-{}", random_hex()?));
+                    match std::fs::rename(&dir, &aside) {
+                        Ok(()) => eprintln!(
+                            "⚠️ {} era um link; renomeada para {} e recriada.",
+                            dir.display(),
+                            aside.display()
+                        ),
+                        // outro nome ao acaso na próxima volta; esgotadas, o erro sobe
+                        Err(e) if tentativa < 2 => {
+                            let _ = e;
+                            continue;
+                        }
+                        Err(e) => {
+                            return Err(e).with_context(|| {
+                                format!("não foi possível afastar {}", dir.display())
+                            })
+                        }
+                    }
+                }
                 Ok(_) => {
-                    // pasta que não é nossa (outro dono, link ou reparse): sai do caminho,
-                    // sem seguir a junção, e a certa é recriada. Recusar para sempre deixaria
-                    // a proteção bloqueada por qualquer conta comum.
-                    let ts = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_secs())
-                        .unwrap_or(0);
-                    let aside = dir.with_file_name(format!("GuiaLar.recusada-{ts}"));
-                    std::fs::rename(&dir, &aside).with_context(|| {
-                        format!("não foi possível afastar {} (não é nossa)", dir.display())
-                    })?;
-                    eprintln!(
-                        "⚠️ {} não era do sistema; renomeada para {} e recriada.",
-                        dir.display(),
-                        aside.display()
-                    );
+                    harden(&dir)?;
+                    remove_foreign_entries(&dir)?;
+                    if !is_trusted(&dir) {
+                        bail!("{} continua sem dono do sistema", dir.display());
+                    }
+                    return Ok(dir);
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    if create_protected(&dir).is_ok() {
-                        return Ok(dir);
+                    match create_protected(&dir) {
+                        Ok(()) => {
+                            if !is_trusted(&dir) {
+                                bail!("{} nasceu sem dono do sistema", dir.display());
+                            }
+                            return Ok(dir);
+                        }
+                        // alguém criou no meio: a volta seguinte a trata como pasta existente
+                        Err(_) if tentativa < 2 => continue,
+                        Err(e) => return Err(e),
                     }
-                    // alguém criou no meio: o laço confere de novo
                 }
                 Err(e) => return Err(e).context("não foi possível checar a pasta de estado"),
             }
@@ -358,7 +556,12 @@ mod imp {
     }
 
     pub fn write_atomic(dir: &Path, name: &str, data: &[u8]) -> Result<()> {
-        let tmp = dir.join(format!(".{name}.{}.tmp", std::process::id()));
+        // nome aleatório (128 bits) e `create_new`: uma conta comum não adivinha nem pré-cria
+        let tmp = dir.join(format!(
+            ".{name}.{}.{}.tmp",
+            std::process::id(),
+            random_hex()?
+        ));
         let target = dir.join(name);
         let result = (|| -> Result<()> {
             let mut f = std::fs::OpenOptions::new()
@@ -644,5 +847,112 @@ mod tests_win {
         assert_eq!(afastadas, 1);
         limpar(&dir, &pai);
         let _ = std::fs::remove_dir_all(&fora);
+    }
+
+    fn limpar_real(dir: &Path) {
+        let pai = dir.parent().unwrap();
+        // um processo recém-morto ainda pode segurar a pasta por instantes
+        for _ in 0..20 {
+            if std::fs::remove_dir_all(dir).is_ok() || !dir.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        for e in std::fs::read_dir(pai).unwrap().flatten() {
+            if e.file_name()
+                .to_string_lossy()
+                .starts_with("GuiaLar.recusada-")
+            {
+                let _ = std::fs::remove_dir_all(e.path());
+            }
+        }
+    }
+
+    fn icacls(p: &Path) -> String {
+        let o = std::process::Command::new("icacls")
+            .arg(p)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&o.stdout).into_owned()
+    }
+
+    /// S1: pasta que já existe com a ACL HERDADA de `ProgramData` (criada pelo Explorer, por um
+    /// `mkdir` elevado ou pela beta). O `ensure_dir` a fecha: DACL protegida, dono do sistema,
+    /// e apaga o `op.lock` plantado com dono alheio.
+    #[test]
+    #[ignore = "cria %ProgramData%\\GuiaLar de verdade (administrador, VM)"]
+    fn acl_real_pasta_preexistente_com_acl_herdada_e_fechada() {
+        let dir = state_dir().unwrap();
+        limpar_real(&dir);
+        std::fs::create_dir(&dir).unwrap(); // herda a ACL de ProgramData
+        let antes = icacls(&dir);
+        println!("ANTES:\n{antes}");
+        assert!(
+            antes.contains("(I)"),
+            "a pasta nasce com ACL herdada: {antes}"
+        );
+        // uma conta comum plantou a trava (dono Usuários) e um .tmp
+        let trava = dir.join("op.lock");
+        std::fs::write(&trava, "99999").unwrap();
+        imp::test_set_owner(&trava, "O:BU").unwrap();
+        assert!(!is_trusted(&trava), "dono Usuários não é confiável");
+        let d = ensure_dir().unwrap();
+        let depois = icacls(&d);
+        println!("DEPOIS:\n{depois}");
+        assert!(is_trusted(&d));
+        assert!(!depois.contains("(I)"), "sem herança: {depois}");
+        assert!(depois.contains("Administrators:(OI)(CI)(F)"), "{depois}");
+        assert!(depois.contains("Users:(OI)(CI)(R)"), "{depois}");
+        assert!(!trava.exists(), "a trava de dono alheio foi removida");
+        // e o apply seguiria: a trava de verdade é criada
+        let l = crate::sysutil::OpLock::acquire_in(&d.join("op.lock")).unwrap();
+        drop(l);
+        limpar_real(&dir);
+    }
+
+    /// S2: pasta REAL de outro dono, com um processo da conta comum com ela como diretório
+    /// atual (handle aberto). Não é renomeada: a posse é assumida e a ACL reaplicada.
+    #[test]
+    #[ignore = "cria %ProgramData%\\GuiaLar de verdade (administrador, VM)"]
+    fn acl_real_pasta_alheia_com_handle_aberto_e_assumida_sem_renomear() {
+        let dir = state_dir().unwrap();
+        limpar_real(&dir);
+        std::fs::create_dir(&dir).unwrap();
+        imp::test_set_owner(&dir, "O:BU").unwrap();
+        assert!(!is_trusted(&dir), "dono Usuários não é confiável");
+        // processo com a pasta como diretório atual (impede o rename)
+        let mut filho = std::process::Command::new("ping")
+            .args(["-n", "20", "127.0.0.1"])
+            .stdout(std::process::Stdio::null())
+            .current_dir(&dir)
+            .spawn()
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        assert!(
+            std::fs::rename(&dir, dir.with_file_name("GuiaLar.teste-rename")).is_err(),
+            "premissa: com o handle aberto o rename falha"
+        );
+        let r = ensure_dir();
+        let _ = filho.kill();
+        let _ = filho.wait();
+        let d = r.unwrap();
+        assert_eq!(d, dir, "a mesma pasta, assumida");
+        assert!(is_trusted(&d), "dono voltou a ser Administradores");
+        let acl = icacls(&d);
+        assert!(
+            !acl.contains("(I)") && acl.contains("Users:(OI)(CI)(R)"),
+            "{acl}"
+        );
+        let afastadas = std::fs::read_dir(dir.parent().unwrap())
+            .unwrap()
+            .flatten()
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("GuiaLar.recusada-")
+            })
+            .count();
+        assert_eq!(afastadas, 0, "nada foi renomeado para o lado");
+        limpar_real(&dir);
     }
 }
