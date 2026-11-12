@@ -7,8 +7,13 @@
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 
-/// uBlock Origin Lite (MV3): o uBO clássico (MV2) saiu da Chrome Web Store.
-pub const UBOL_CHROMIUM_ID: &str = "ddkjiahejlhfcafbddmgiahcphecmpfh";
+/// uBlock Origin Lite (MV3): o uBO clássico (MV2) saiu da Chrome Web Store. Cada loja tem o
+/// seu ID: o do Chrome/Brave não existe na loja do Edge (o serviço do Edge responde
+/// `error-unknownApplication`), e vice-versa.
+pub const UBOL_CWS_ID: &str = "ddkjiahejlhfcafbddmgiahcphecmpfh";
+pub const UBOL_EDGE_ID: &str = "cimighlppcgcoapaliogpjjdehbnofhn";
+pub const CWS_UPDATE_URL: &str = "https://clients2.google.com/service/update2/crx";
+pub const EDGE_UPDATE_URL: &str = "https://edge.microsoft.com/extensionwebstorebase/v1/crx";
 pub const FIREFOX_UBO_ID: &str = "uBlock0@raymondhill.net";
 pub const FIREFOX_UBO_XPI: &str =
     "https://addons.mozilla.org/firefox/downloads/latest/ublock-origin/latest.xpi";
@@ -16,25 +21,68 @@ pub const POLICY_VALUE_NAME: &str = "9101";
 
 /// (navegador, chave HKLM, dado `id;update_url`).
 pub fn chromium_policies() -> Vec<(&'static str, &'static str, String)> {
-    let chrome = "https://clients2.google.com/service/update2/crx";
-    let edge = "https://edge.microsoft.com/extensionwebstorebase/v1/crx";
     vec![
         (
             "Google Chrome",
             r"HKLM\SOFTWARE\Policies\Google\Chrome\ExtensionInstallForcelist",
-            format!("{UBOL_CHROMIUM_ID};{chrome}"),
+            format!("{UBOL_CWS_ID};{CWS_UPDATE_URL}"),
         ),
         (
             "Microsoft Edge",
             r"HKLM\SOFTWARE\Policies\Microsoft\Edge\ExtensionInstallForcelist",
-            format!("{UBOL_CHROMIUM_ID};{edge}"),
+            format!("{UBOL_EDGE_ID};{EDGE_UPDATE_URL}"),
         ),
         (
             "Brave",
             r"HKLM\SOFTWARE\Policies\BraveSoftware\Brave\ExtensionInstallForcelist",
-            format!("{UBOL_CHROMIUM_ID};{chrome}"),
+            format!("{UBOL_CWS_ID};{CWS_UPDATE_URL}"),
         ),
     ]
+}
+
+/// Dado que versões anteriores gravaram por engano para este navegador: o Edge recebia o ID
+/// da loja do Chrome e não instalava nada. A limpeza ainda o reconhece como nosso.
+fn legacy_policy_data(browser: &str) -> Option<String> {
+    (browser == "Microsoft Edge").then(|| format!("{UBOL_CWS_ID};{EDGE_UPDATE_URL}"))
+}
+
+/// O dado gravado é o que **hoje** instala o bloqueador neste navegador?
+pub fn policy_value_covers(browser: &str, data: &str) -> bool {
+    chromium_policies()
+        .iter()
+        .any(|(name, _, expected)| *name == browser && expected == data.trim())
+}
+
+/// O que a limpeza faz com o valor `9101` encontrado na chave do navegador.
+#[derive(Debug, PartialEq, Eq)]
+pub enum PolicyCleanup {
+    /// Não há valor `9101`.
+    Absent,
+    /// É nosso (o atual ou o antigo errado): apagar.
+    Remove,
+    /// Outro programa ou administrador usou o mesmo nome de valor: não tocar.
+    Keep,
+}
+
+pub fn cleanup_action(browser: &str, existing: Option<&str>) -> PolicyCleanup {
+    let Some(data) = existing.map(str::trim) else {
+        return PolicyCleanup::Absent;
+    };
+    if policy_value_covers(browser, data) || legacy_policy_data(browser).as_deref() == Some(data) {
+        PolicyCleanup::Remove
+    } else {
+        PolicyCleanup::Keep
+    }
+}
+
+/// Dado `REG_SZ` do valor `name` na saída de `reg query <chave> /v <name>`.
+pub fn parse_reg_sz(stdout: &str, name: &str) -> Option<String> {
+    stdout.lines().find_map(|l| {
+        let l = l.trim();
+        let rest = l.strip_prefix(name)?.trim_start();
+        let data = rest.strip_prefix("REG_SZ")?;
+        Some(data.trim().to_string())
+    })
 }
 
 /// Mescla a política do uBlock num `policies.json` existente, preservando o resto.
@@ -135,6 +183,10 @@ mod win {
             }
             if let Some((_, key, data)) = chromium_policies().into_iter().find(|p| p.0 == name) {
                 reg_add(key, &data)?;
+                // só diz que instalou o que a leitura de volta confirma
+                if !read_policy_value(key).is_some_and(|d| policy_value_covers(name, &d)) {
+                    anyhow::bail!("{name}: a política não ficou gravada como esperado");
+                }
                 done.push(format!(
                     "{name}: uBlock Origin Lite instalado ao reabrir o navegador"
                 ));
@@ -172,13 +224,9 @@ mod win {
             let Some((_, key, _)) = chromium_policies().into_iter().find(|p| p.0 == name) else {
                 continue;
             };
-            let has = hidden(Command::new("reg").args(["query", key, "/v", POLICY_VALUE_NAME]))
-                .output()
-                .map(|o| {
-                    o.status.success()
-                        && String::from_utf8_lossy(&o.stdout).contains(UBOL_CHROMIUM_ID)
-                })
-                .unwrap_or(false);
+            // coberto só se a política gravada é a certa DESTA loja (o valor antigo do Edge,
+            // com o ID da loja do Chrome, não instala nada e conta como «sem bloqueador»)
+            let has = read_policy_value(key).is_some_and(|d| policy_value_covers(name, &d));
             if !has {
                 out.push(name.to_string());
             }
@@ -199,12 +247,11 @@ mod win {
 
     /// Remove as políticas gravadas pelo GuiaLar. Chaves/valores ausentes não são erro.
     pub fn revert_all() -> Result<()> {
-        for (_, key, _) in chromium_policies() {
-            let existe = hidden(Command::new("reg").args(["query", key, "/v", POLICY_VALUE_NAME]))
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false);
-            if !existe {
+        for (name, key, _) in chromium_policies() {
+            // só apaga o valor se o dado é do GuiaLar (o atual ou o antigo errado do Edge);
+            // um `9101` de terceiros fica intacto
+            let existing = read_policy_value(key);
+            if cleanup_action(name, existing.as_deref()) != PolicyCleanup::Remove {
                 continue;
             }
             let status =
@@ -233,6 +280,17 @@ mod win {
             }
         }
         Ok(())
+    }
+
+    /// Dado do valor `9101` da chave, se existir.
+    fn read_policy_value(key: &str) -> Option<String> {
+        let out = hidden(Command::new("reg").args(["query", key, "/v", POLICY_VALUE_NAME]))
+            .output()
+            .ok()?;
+        out.status
+            .success()
+            .then(|| parse_reg_sz(&String::from_utf8_lossy(&out.stdout), POLICY_VALUE_NAME))
+            .flatten()
     }
 
     /// Sem janela de console piscando (CREATE_NO_WINDOW).
@@ -293,15 +351,121 @@ mod tests {
         assert!(merge_firefox_policies(Some("{nao json")).is_err());
     }
 
+    fn politica(browser: &str) -> (&'static str, String) {
+        chromium_policies()
+            .into_iter()
+            .find(|p| p.0 == browser)
+            .map(|(_, k, d)| (k, d))
+            .unwrap_or_else(|| panic!("sem política para {browser}"))
+    }
+
     #[test]
     fn chromium_tres_navegadores() {
         let p = chromium_policies();
         assert_eq!(p.len(), 3);
         assert!(p
             .iter()
-            .all(|(_, k, d)| k.starts_with(r"HKLM\SOFTWARE\Policies")
-                && d.starts_with(UBOL_CHROMIUM_ID)
-                && d.contains(";https://")));
+            .all(|(_, k, d)| k.starts_with(r"HKLM\SOFTWARE\Policies") && d.contains(";https://")));
+    }
+
+    #[test]
+    fn chrome_recebe_o_ubo_lite_da_chrome_web_store() {
+        let (k, d) = politica("Google Chrome");
+        assert!(k.contains(r"Policies\Google\Chrome"));
+        assert_eq!(
+            d,
+            "ddkjiahejlhfcafbddmgiahcphecmpfh;https://clients2.google.com/service/update2/crx"
+        );
+    }
+
+    #[test]
+    fn brave_recebe_o_ubo_lite_da_chrome_web_store() {
+        let (k, d) = politica("Brave");
+        assert!(k.contains(r"Policies\BraveSoftware\Brave"));
+        assert_eq!(
+            d,
+            "ddkjiahejlhfcafbddmgiahcphecmpfh;https://clients2.google.com/service/update2/crx"
+        );
+    }
+
+    #[test]
+    fn edge_recebe_o_ubo_lite_da_loja_do_edge_e_nunca_o_id_da_chrome_web_store() {
+        let (k, d) = politica("Microsoft Edge");
+        assert!(k.contains(r"Policies\Microsoft\Edge"));
+        assert_eq!(
+            d,
+            "cimighlppcgcoapaliogpjjdehbnofhn;https://edge.microsoft.com/extensionwebstorebase/v1/crx"
+        );
+        assert!(
+            !d.contains(UBOL_CWS_ID),
+            "o serviço do Edge não conhece esse ID"
+        );
+        assert!(!d.contains("clients2.google.com"));
+    }
+
+    #[test]
+    fn cobertura_so_vale_para_a_politica_certa_da_loja() {
+        let (_, edge) = politica("Microsoft Edge");
+        let (_, chrome) = politica("Google Chrome");
+        let antigo = format!("{UBOL_CWS_ID};{EDGE_UPDATE_URL}");
+        assert!(policy_value_covers("Microsoft Edge", &edge));
+        assert!(policy_value_covers(
+            "Google Chrome",
+            &format!("  {chrome} ")
+        ));
+        // o valor antigo do Edge e o dado de outra loja NÃO contam como bloqueador instalado
+        assert!(!policy_value_covers("Microsoft Edge", &antigo));
+        assert!(!policy_value_covers("Microsoft Edge", &chrome));
+        assert!(!policy_value_covers("Google Chrome", &edge));
+        assert!(!policy_value_covers("Brave", &edge));
+        assert!(!policy_value_covers("Chromium", &chrome));
+    }
+
+    #[test]
+    fn limpeza_remove_o_valor_antigo_errado_do_edge_sem_tocar_em_terceiros() {
+        let (_, edge) = politica("Microsoft Edge");
+        let (_, chrome) = politica("Google Chrome");
+        let antigo = format!("{UBOL_CWS_ID};{EDGE_UPDATE_URL}");
+        // o valor antigo errado e o atual saem
+        assert_eq!(
+            cleanup_action("Microsoft Edge", Some(&antigo)),
+            PolicyCleanup::Remove
+        );
+        assert_eq!(
+            cleanup_action("Microsoft Edge", Some(&edge)),
+            PolicyCleanup::Remove
+        );
+        assert_eq!(
+            cleanup_action("Google Chrome", Some(&chrome)),
+            PolicyCleanup::Remove
+        );
+        // um `9101` de outro programa/administrador fica
+        assert_eq!(
+            cleanup_action("Microsoft Edge", Some("abcdefgh;https://exemplo.test/crx")),
+            PolicyCleanup::Keep
+        );
+        // o «antigo» só vale para o Edge: no Chrome o mesmo dado não é nosso
+        assert_eq!(
+            cleanup_action("Google Chrome", Some(&antigo)),
+            PolicyCleanup::Keep
+        );
+        assert_eq!(
+            cleanup_action("Microsoft Edge", None),
+            PolicyCleanup::Absent
+        );
+    }
+
+    #[test]
+    fn le_o_dado_da_saida_do_reg_query() {
+        let saida = "\r\nHKEY_LOCAL_MACHINE\\SOFTWARE\\Policies\\Microsoft\\Edge\\ExtensionInstallForcelist\r\n    9101    REG_SZ    cimighlppcgcoapaliogpjjdehbnofhn;https://edge.microsoft.com/extensionwebstorebase/v1/crx\r\n\r\n";
+        assert_eq!(
+            parse_reg_sz(saida, "9101").as_deref(),
+            Some("cimighlppcgcoapaliogpjjdehbnofhn;https://edge.microsoft.com/extensionwebstorebase/v1/crx")
+        );
+        assert_eq!(parse_reg_sz(saida, "1"), None);
+        assert_eq!(parse_reg_sz("", "9101"), None);
+        // `91011` não é o valor `9101`
+        assert_eq!(parse_reg_sz("    91011    REG_SZ    x\r\n", "9101"), None);
     }
 
     #[test]

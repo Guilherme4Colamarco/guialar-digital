@@ -10,9 +10,12 @@ pub struct BrowserInfo {
 }
 
 pub const UBLOCK_FIREFOX: &str = "https://addons.mozilla.org/pt-BR/firefox/addon/ublock-origin/";
+/// uBlock Origin Lite na Chrome Web Store (Chrome, Chromium, Brave). O uBO clássico (MV2)
+/// saiu dessa loja.
 pub const UBLOCK_CHROME: &str =
-    "https://chromewebstore.google.com/detail/ublock-origin/cjpalhdlnbpafiamejdnhcphjbkeiagm";
-pub const UBLOCK_EDGE: &str = "https://microsoftedge.microsoft.com/addons/detail/ublock-origin/odfafepnkmbhccpbejgmiehpchacaeak";
+    "https://chromewebstore.google.com/detail/ublock-origin-lite/ddkjiahejlhfcafbddmgiahcphecmpfh";
+/// uBlock Origin Lite na loja de complementos do Edge (ID próprio, diferente do da Chrome Web Store).
+pub const UBLOCK_EDGE: &str = "https://microsoftedge.microsoft.com/addons/detail/ublock-origin-lite/cimighlppcgcoapaliogpjjdehbnofhn";
 
 pub fn detect_browsers() -> Vec<BrowserInfo> {
     vec![
@@ -93,4 +96,42 @@ fn windows_install_exists(cmd: &str) -> bool {
 #[cfg(not(windows))]
 fn windows_install_exists(_cmd: &str) -> bool {
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn url(nome: &str) -> &'static str {
+        detect_browsers()
+            .into_iter()
+            .find(|b| b.name == nome)
+            .unwrap_or_else(|| panic!("sem {nome}"))
+            .extension_store_url
+    }
+
+    #[test]
+    fn chrome_chromium_e_brave_abrem_o_ubo_lite_da_chrome_web_store() {
+        for nome in ["Google Chrome", "Chromium", "Brave"] {
+            assert_eq!(url(nome), UBLOCK_CHROME, "{nome}");
+        }
+        assert!(UBLOCK_CHROME.contains("/ublock-origin-lite/ddkjiahejlhfcafbddmgiahcphecmpfh"));
+        assert!(
+            !UBLOCK_CHROME.contains("cjpalhdlnbpafiamejdnhcphjbkeiagm"),
+            "uBO MV2 saiu da loja"
+        );
+    }
+
+    #[test]
+    fn edge_abre_o_ubo_lite_da_loja_do_edge() {
+        assert_eq!(url("Microsoft Edge"), UBLOCK_EDGE);
+        assert!(UBLOCK_EDGE.starts_with("https://microsoftedge.microsoft.com/addons/detail/"));
+        assert!(UBLOCK_EDGE.ends_with("/ublock-origin-lite/cimighlppcgcoapaliogpjjdehbnofhn"));
+    }
+
+    #[test]
+    fn firefox_continua_no_ublock_origin_completo() {
+        assert_eq!(url("Firefox"), UBLOCK_FIREFOX);
+        assert!(UBLOCK_FIREFOX.contains("/addon/ublock-origin/"));
+    }
 }
