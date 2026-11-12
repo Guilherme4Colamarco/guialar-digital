@@ -667,6 +667,12 @@ mod tests {
         let trava = s.dir().join("op.lock");
         // uma conta comum plantou a trava com o PID de um processo VIVO (este) e a renova
         std::fs::write(&trava, std::process::id().to_string()).unwrap();
+        // o modo não pode depender da `umask` de quem roda o teste (0002 cria 0664, que
+        // `is_trusted` recusa por ser gravável pelo grupo): fixa o 0644 que a produção usa
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&trava, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
         std::thread::sleep(std::time::Duration::from_millis(80));
         assert!(
             !lock_is_stale(&trava),
