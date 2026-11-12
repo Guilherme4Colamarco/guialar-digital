@@ -181,6 +181,17 @@ mod qa_tests {
 
     use crate::testenv::Sandbox;
 
+    /// Grava o manifesto com o modo da produção (0644 no Linux), sem depender da `umask` de
+    /// quem roda o teste: com 0002 o `std::fs::write` cria 0664, que `is_trusted` recusa.
+    fn grava_como_a_producao(path: &std::path::Path, texto: &str) {
+        std::fs::write(path, texto).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+    }
+
     /// QA-CONTRACT: sem manifesto => Unprotected (determinístico, sem rede).
     #[test]
     fn status_is_unprotected_without_manifest() {
@@ -194,7 +205,7 @@ mod qa_tests {
         let s = Sandbox::new("corrupt");
         let path = s.manifest_path();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, "{ corrompido").unwrap();
+        grava_como_a_producao(&path, "{ corrompido");
         match check_status() {
             ProtectionStatus::PartiallyConfigured(msg) => assert!(
                 msg.starts_with("Manifesto corrompido"),
@@ -432,7 +443,7 @@ mod qa_tests {
             r#"{"backend":"Inexistente","applied_at_utc":"1","connections":[]}"#,
             r#"{"backend":"NetworkManager","applied_at_utc":"1","connections":[],"mode":"xyz"}"#,
         ] {
-            std::fs::write(&path, ruim).unwrap();
+            grava_como_a_producao(&path, ruim);
             match check_status() {
                 ProtectionStatus::PartiallyConfigured(m) => {
                     assert!(m.starts_with("Manifesto corrompido"), "{ruim:?} -> {m}")
