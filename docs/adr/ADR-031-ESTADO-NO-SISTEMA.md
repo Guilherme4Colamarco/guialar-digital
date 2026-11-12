@@ -30,3 +30,17 @@ O manifesto que permite desfazer, os backups e a trava eram gravados pelo proces
 
 ## Consequência
 Os itens 1 a 3 da ADR-030 deixam de ser necessários para o estado: o problema some na raiz. O README passa a dizer onde o estado fica e como apagá-lo.
+
+## Emenda 1 (2026-11-12, review do desenho)
+- **Windows, criação atômica e protegida:**
+  - O caminho vem de `SHGetKnownFolderPath(FOLDERID_ProgramData)`, não da variável de ambiente.
+  - A pasta é criada com `CreateDirectoryW` já com a DACL protegida (Administradores e SYSTEM com controle total, Usuários só leitura) e dono Administradores, num passo só. A ACL padrão do `ProgramData` deixa contas comuns criarem pastas lá, e uma pasta criada antes de receber a ACL abre uma janela de ataque.
+- **Pasta pré-existente que não é nossa** (outro dono, outra ACL, link ou ponto de reparse): o processo elevado a renomeia para o lado (`GuiaLar.recusada-<data>`), registra isso e recria a correta. Recusar para sempre deixaria a proteção bloqueada por qualquer conta comum. O item 4 fica valendo só para os arquivos dentro dela.
+- **Antes de ler `state.json` ou respeitar `op.lock`**, o processo elevado confere que o dono é Administradores ou SYSTEM no Windows, e root no Linux. Se não for, ignora o arquivo e registra.
+- **Linux:** `/run/guialar` com `root:root 0755` e `op.lock` com `0644`.
+- **Migração do manifesto antigo**, que é do usuário e pode ter sido forjado: antes de agir, o processo elevado valida.
+  - Cada conexão ou interface citada tem de existir agora.
+  - Cada DNS tem de ser um IP válido.
+  - `previous_resolv_conf` só pode ter linhas `nameserver`, `search`, `domain` e `options`, até 4 KB.
+  - Se qualquer item falhar, não aplica nada do manifesto: cai no fallback de DNS automático e avisa.
+  - A migração sai do código na v0.4.0.
