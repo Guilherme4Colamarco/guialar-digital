@@ -53,7 +53,15 @@ fn write_if_changed(path: &Path, content: &[u8]) -> std::io::Result<bool> {
 }
 
 /// Instala `.desktop` e ícone sob `data_home` (`~/.local/share`). Devolve o `.desktop` se mudou.
-pub fn install_into(data_home: &Path, exec_path: &str) -> std::io::Result<Option<PathBuf>> {
+///
+/// `overwrite`: só o AppImage em execução pode reescrever o atalho que já existe (o `Exec`
+/// aponta para ele mesmo). Um binário de outra pasta (build, `/tmp`) só cria o atalho quando
+/// ainda não há nenhum, e nunca troca o do usuário (ADR-028).
+pub fn install_into(
+    data_home: &Path,
+    exec_path: &str,
+    overwrite: bool,
+) -> std::io::Result<Option<PathBuf>> {
     let desktop = data_home
         .join("applications")
         .join("guialar-digital.desktop");
@@ -61,6 +69,9 @@ pub fn install_into(data_home: &Path, exec_path: &str) -> std::io::Result<Option
         .join("icons/hicolor/256x256/apps")
         .join(format!("{APP_ID}.png"));
     write_if_changed(&icon, ICON_PNG)?;
+    if !overwrite && desktop.exists() {
+        return Ok(None);
+    }
     let changed = write_if_changed(&desktop, desktop_entry(exec_path).as_bytes())?;
     Ok(changed.then_some(desktop))
 }
@@ -83,7 +94,8 @@ pub fn ensure_desktop_integration() {
         .filter(|p| p.is_absolute())
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")));
     let Some(data_home) = data_home else { return };
-    if let Ok(Some(desktop)) = install_into(&data_home, &exec_path) {
+    let from_appimage = appimage.as_deref().is_some_and(|a| !a.is_empty());
+    if let Ok(Some(desktop)) = install_into(&data_home, &exec_path, from_appimage) {
         let quiet = |mut c: std::process::Command| {
             let _ = c
                 .stdin(std::process::Stdio::null())
@@ -139,16 +151,63 @@ mod tests {
         );
     }
 
+    fn tmp(nome: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("gl-integ-{nome}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        d
+    }
+
+    fn exec_do_atalho(d: &Path) -> String {
+        std::fs::read_to_string(d.join("applications/guialar-digital.desktop"))
+            .unwrap()
+            .lines()
+            .find(|l| l.starts_with("Exec="))
+            .unwrap()
+            .to_string()
+    }
+
     #[test]
     fn instala_idempotente() {
-        let d = std::env::temp_dir().join(format!("gl-integ-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        assert!(install_into(&d, "/a/b").unwrap().is_some());
-        assert!(install_into(&d, "/a/b").unwrap().is_none()); // sem duplicar
-        assert!(install_into(&d, "/c/d").unwrap().is_some()); // caminho mudou: reescreve
+        let d = tmp("idem");
+        assert!(install_into(&d, "/a/b", true).unwrap().is_some());
+        assert!(install_into(&d, "/a/b", true).unwrap().is_none()); // sem duplicar
+        assert!(install_into(&d, "/c/d", true).unwrap().is_some()); // caminho mudou: reescreve
         assert!(d
             .join("icons/hicolor/256x256/apps/br.uniube.pi.guialar.png")
             .exists());
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn binario_de_outra_pasta_nao_reescreve_o_atalho_do_appimage() {
+        let d = tmp("outra-pasta");
+        // o AppImage instala o atalho
+        install_into(&d, "/home/u/GuiaLar.AppImage", true).unwrap();
+        // um binário de build (sem APPIMAGE) roda: não troca o atalho
+        assert!(install_into(&d, "/home/u/gl/target/release/guialar", false)
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            exec_do_atalho(&d),
+            "Exec=\"/home/u/GuiaLar.AppImage\" gui",
+            "o atalho continua no AppImage"
+        );
+        // o AppImage, mudado de lugar, reescreve
+        install_into(&d, "/home/u/Downloads/GuiaLar.AppImage", true).unwrap();
+        assert!(exec_do_atalho(&d).contains("Downloads/GuiaLar.AppImage"));
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn binario_sem_appimage_cria_o_atalho_quando_nao_existe() {
+        let d = tmp("cria");
+        assert!(install_into(&d, "/usr/local/bin/guialar", false)
+            .unwrap()
+            .is_some());
+        assert_eq!(exec_do_atalho(&d), "Exec=\"/usr/local/bin/guialar\" gui");
+        // um segundo binário, de outro lugar, não o troca
+        assert!(install_into(&d, "/tmp/guialar", false).unwrap().is_none());
+        assert_eq!(exec_do_atalho(&d), "Exec=\"/usr/local/bin/guialar\" gui");
         std::fs::remove_dir_all(&d).ok();
     }
 }

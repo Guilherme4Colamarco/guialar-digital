@@ -41,6 +41,18 @@ fn detect_active_backend_with(r: &dyn CommandRunner) -> BackendKind {
     BackendKind::DirectResolvConf
 }
 
+/// Roda o AppImage como root, extraindo numa pasta privada (`0700`, criada por `mktemp -d` com
+/// nome aleatório) em vez do `/tmp/appimage_extracted_<md5>` previsível, e a apaga ao final,
+/// com sucesso, erro ou sinal, devolvendo o código de saída do programa (ADR-028).
+/// `$0` é o AppImage e `$@` o subcomando (`internal-apply …`).
+const ELEVATED_APPIMAGE_SCRIPT: &str = concat!(
+    "d=$(mktemp -d /tmp/guialar-elev.XXXXXXXX) || exit 1; ",
+    "trap 'rm -rf -- \"$d\"' EXIT; ",
+    "trap 'exit 143' HUP INT TERM; ",
+    "TMPDIR=\"$d\" APPIMAGE_EXTRACT_AND_RUN=1 \"$0\" \"$@\"; ",
+    "exit $?"
+);
+
 /// Reexecuta este programa elevado **uma única vez** (um só pedido de senha) com
 /// `internal-apply` / `internal-revert`. Dentro de um AppImage usa o caminho do
 /// AppImage (o ponto de montagem FUSE não é acessível ao root).
@@ -57,10 +69,18 @@ fn elevate_self(r: &dyn CommandRunner, subcommand: &str) -> Result<()> {
             v.push("-n".into()); // nunca pede senha sem TTY
         }
         if appimage.is_some() {
-            // root não acessa o mount FUSE do usuário: extrai e roda.
-            v.extend(["env".into(), "APPIMAGE_EXTRACT_AND_RUN=1".into()]);
+            // root não acessa o mount FUSE do usuário: extrai e roda, mas numa pasta privada
+            // (ADR-028). O script é fixo; o AppImage e o subcomando entram só como argumentos
+            // (`$0` e `$@`), nunca dentro da string do script.
+            v.extend([
+                "/bin/sh".into(),
+                "-c".into(),
+                ELEVATED_APPIMAGE_SCRIPT.into(),
+                exe.clone().into_os_string(),
+            ]);
+        } else {
+            v.push(exe.clone().into_os_string());
         }
-        v.push(exe.clone().into_os_string());
         v.extend(subcommand.split_whitespace().map(std::ffi::OsString::from));
         v
     };

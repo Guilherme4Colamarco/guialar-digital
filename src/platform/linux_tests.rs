@@ -560,21 +560,97 @@ fn elevacao_tenta_sudo_sem_senha_e_so_depois_pkexec() {
 }
 
 #[test]
-fn elevacao_em_appimage_roda_pelo_appimage_com_extract_and_run() {
+fn elevacao_em_appimage_usa_pasta_privada_com_pkexec_e_sudo() {
     let _s = Sandbox::new("elev-appimage");
-    std::env::set_var("APPIMAGE", "/home/u/GuiaLar.AppImage");
+    std::env::set_var("APPIMAGE", "/home/u/Gui aLar; rm -rf $HOME.AppImage");
+    let ai = "/home/u/Gui aLar; rm -rf $HOME.AppImage";
+    // pkexec
     let r = FakeRunner::new().not_root(&[]).with_command("pkexec");
     elevate_self(&r, "internal-revert").unwrap();
     assert_eq!(
         r.argvs(),
         vec![v(&[
             "pkexec",
-            "env",
-            "APPIMAGE_EXTRACT_AND_RUN=1",
-            "/home/u/GuiaLar.AppImage",
+            "/bin/sh",
+            "-c",
+            ELEVATED_APPIMAGE_SCRIPT,
+            ai,
             "internal-revert"
         ])]
     );
+    // sudo: sonda e depois o mesmo comando, com `-n`
+    let r = FakeRunner::new()
+        .not_root(&[])
+        .with_command("sudo")
+        .with_command("pkexec");
+    elevate_self(&r, "internal-apply --mode ads").unwrap();
+    assert_eq!(
+        r.argvs(),
+        vec![
+            v(&["sudo", "-n", "true"]),
+            v(&[
+                "sudo",
+                "-n",
+                "/bin/sh",
+                "-c",
+                ELEVATED_APPIMAGE_SCRIPT,
+                ai,
+                "internal-apply",
+                "--mode",
+                "ads"
+            ])
+        ]
+    );
+    // nada vindo do usuário entra na string do script
+    assert!(!ELEVATED_APPIMAGE_SCRIPT.contains("AppImage"));
+    assert!(ELEVATED_APPIMAGE_SCRIPT.contains("mktemp -d"));
+    assert!(ELEVATED_APPIMAGE_SCRIPT.contains("TMPDIR=\"$d\""));
+    assert!(ELEVATED_APPIMAGE_SCRIPT.contains("APPIMAGE_EXTRACT_AND_RUN=1"));
+    assert!(ELEVATED_APPIMAGE_SCRIPT.contains("rm -rf -- \"$d\""));
+    std::env::remove_var("APPIMAGE");
+}
+
+/// Executa o script de verdade com um «AppImage» falso: pasta privada 0700, `TMPDIR` apontando
+/// para ela, código de saída preservado e pasta apagada (sucesso ou erro).
+#[cfg(unix)]
+#[test]
+fn script_elevado_cria_pasta_privada_preserva_o_codigo_e_apaga() {
+    use std::os::unix::fs::PermissionsExt;
+    let s = Sandbox::new("elev-script");
+    let fake = s.dir().join("fake appimage.sh");
+    // imprime o ambiente que o runtime veria e sai com o código pedido no 1º argumento
+    std::fs::write(
+        &fake,
+        "#!/bin/sh\necho \"TMPDIR=$TMPDIR\"\necho \"EXTRACT=$APPIMAGE_EXTRACT_AND_RUN\"\n\
+         echo \"MODE=$(stat -c %a \"$TMPDIR\")\"\necho \"ARGS=$*\"\ntouch \"$TMPDIR/extraido\"\nexit \"$1\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    for code in [0, 7] {
+        let out = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(ELEVATED_APPIMAGE_SCRIPT)
+            .arg(&fake)
+            .arg(code.to_string())
+            .arg("internal-apply")
+            .output()
+            .unwrap();
+        let so = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(out.status.code(), Some(code), "código preservado: {so}");
+        let tmpdir = so
+            .lines()
+            .find_map(|l| l.strip_prefix("TMPDIR="))
+            .unwrap()
+            .to_string();
+        assert!(tmpdir.starts_with("/tmp/guialar-elev."), "{tmpdir}");
+        assert!(so.contains("EXTRACT=1"), "{so}");
+        assert!(so.contains("MODE=700"), "{so}");
+        assert!(so.contains(&format!("ARGS={code} internal-apply")), "{so}");
+        assert!(
+            !std::path::Path::new(&tmpdir).exists(),
+            "a pasta privada some ao final (código {code})"
+        );
+    }
 }
 
 #[test]
