@@ -37,24 +37,60 @@ fn decode_ps(b64: &str) -> String {
     String::from_utf16(&units).unwrap()
 }
 
-/// PowerShell/ipconfig falsos: interfaces com DNS por índice.
+/// PowerShell/ipconfig falsos. Cada interface tem o DNS **estático** (`NameServer` do registro,
+/// v4 e v6) e o do DHCP; o DNS efetivo é o estático da família, se houver, senão o do DHCP.
 struct PsFake {
     ifaces: Vec<(String, u32)>,
-    dns: RefCell<BTreeMap<u32, Vec<String>>>,
+    reg4: RefCell<BTreeMap<u32, Vec<String>>>,
+    reg6: RefCell<BTreeMap<u32, Vec<String>>>,
+    dhcp: BTreeMap<u32, Vec<String>>,
     calls: RefCell<Vec<String>>,
     fail_on: RefCell<Option<String>>,
 }
 
+fn guid_of(index: u32) -> String {
+    format!("{{00000000-0000-0000-0000-{index:012}}}")
+}
+
+fn index_of_guid(text: &str) -> u32 {
+    let i = text.find("{00000000-0000-0000-0000-").unwrap() + 25;
+    text[i..i + 12].parse().unwrap()
+}
+
 impl PsFake {
+    /// `dns` = DNS configurado à mão (estático) na interface.
     fn new(ifaces: &[(&str, u32, &[&str])]) -> Self {
+        let f = Self::empty(ifaces);
+        for (_, i, d) in ifaces {
+            let all: Vec<String> = d.iter().map(|s| s.to_string()).collect();
+            f.reg4.borrow_mut().insert(
+                *i,
+                all.iter().filter(|s| !s.contains(':')).cloned().collect(),
+            );
+            f.reg6.borrow_mut().insert(
+                *i,
+                all.iter().filter(|s| s.contains(':')).cloned().collect(),
+            );
+        }
+        f
+    }
+
+    /// Interfaces por DHCP: sem DNS estático; `dns` é o que o roteador entrega.
+    fn new_dhcp(ifaces: &[(&str, u32, &[&str])]) -> Self {
+        let mut f = Self::empty(ifaces);
+        f.dhcp = ifaces
+            .iter()
+            .map(|(_, i, d)| (*i, d.iter().map(|s| s.to_string()).collect()))
+            .collect();
+        f
+    }
+
+    fn empty(ifaces: &[(&str, u32, &[&str])]) -> Self {
         Self {
             ifaces: ifaces.iter().map(|(a, i, _)| (a.to_string(), *i)).collect(),
-            dns: RefCell::new(
-                ifaces
-                    .iter()
-                    .map(|(_, i, d)| (*i, d.iter().map(|s| s.to_string()).collect()))
-                    .collect(),
-            ),
+            reg4: RefCell::new(ifaces.iter().map(|(_, i, _)| (*i, Vec::new())).collect()),
+            reg6: RefCell::new(ifaces.iter().map(|(_, i, _)| (*i, Vec::new())).collect()),
+            dhcp: BTreeMap::new(),
             calls: RefCell::new(Vec::new()),
             fail_on: RefCell::new(None),
         }
@@ -64,12 +100,41 @@ impl PsFake {
         self.calls.borrow().clone()
     }
 
+    /// DNS efetivo (o que `Get-DnsClientServerAddress` devolve).
     fn dns_of(&self, index: u32) -> Vec<String> {
-        self.dns.borrow()[&index].clone()
+        let (r4, r6) = (
+            self.reg4.borrow()[&index].clone(),
+            self.reg6.borrow()[&index].clone(),
+        );
+        let dhcp = self.dhcp.get(&index).cloned().unwrap_or_default();
+        let pick = |reg: Vec<String>, v6: bool| -> Vec<String> {
+            if reg.is_empty() {
+                dhcp.iter()
+                    .filter(|s| s.contains(':') == v6)
+                    .cloned()
+                    .collect()
+            } else {
+                reg
+            }
+        };
+        let mut out = pick(r4, false);
+        out.extend(pick(r6, true));
+        out
+    }
+
+    /// `NameServer` estático (v4, v6) da interface.
+    fn registry_of(&self, index: u32) -> (Vec<String>, Vec<String>) {
+        (
+            self.reg4.borrow()[&index].clone(),
+            self.reg6.borrow()[&index].clone(),
+        )
     }
 
     fn all_dns(&self) -> BTreeMap<u32, Vec<String>> {
-        self.dns.borrow().clone()
+        self.ifaces
+            .iter()
+            .map(|(_, i)| (*i, self.dns_of(*i)))
+            .collect()
     }
 
     fn index_of_alias(&self, alias: &str) -> u32 {
@@ -103,27 +168,43 @@ impl PsFake {
                 .map(|(a, i)| format!("{a}|{i}\n"))
                 .collect();
         }
+        if let Some(rest) = st.strip_prefix("(Get-NetAdapter -InterfaceIndex ") {
+            let idx: u32 = rest.split(')').next().unwrap().parse().unwrap();
+            return guid_of(idx);
+        }
+        if st.starts_with("(Get-ItemProperty -LiteralPath 'HKLM:") {
+            let idx = index_of_guid(st);
+            let reg = if st.contains("\\Tcpip6\\") {
+                &self.reg6
+            } else {
+                &self.reg4
+            };
+            return reg.borrow()[&idx].join(",");
+        }
         if let Some(rest) = st.strip_prefix("(Get-DnsClientServerAddress") {
             let idx = index(rest);
-            let all = self.dns_of(idx);
-            let v: Vec<String> = if rest.contains("-AddressFamily IPv4") {
-                all.into_iter().filter(|s| !s.contains(':')).collect()
-            } else {
-                all
-            };
-            return v.join(",");
+            return self.dns_of(idx).join(",");
         }
         if let Some(rest) = st.strip_prefix("Set-DnsClientServerAddress") {
             let idx = index(rest);
             if rest.contains("-ResetServerAddresses") {
-                self.dns.borrow_mut().insert(idx, Vec::new());
+                self.reg4.borrow_mut().insert(idx, Vec::new());
+                self.reg6.borrow_mut().insert(idx, Vec::new());
             } else {
                 let list = rest.split("@(").nth(1).unwrap().trim_end_matches(')');
-                let v = list
+                let v: Vec<String> = list
                     .split(',')
                     .map(|t| t.trim_matches('\'').to_string())
                     .collect();
-                self.dns.borrow_mut().insert(idx, v);
+                // como o cmdlet: troca só a família presente na lista
+                let v4: Vec<String> = v.iter().filter(|s| !s.contains(':')).cloned().collect();
+                let v6: Vec<String> = v.iter().filter(|s| s.contains(':')).cloned().collect();
+                if !v4.is_empty() {
+                    self.reg4.borrow_mut().insert(idx, v4);
+                }
+                if !v6.is_empty() {
+                    self.reg6.borrow_mut().insert(idx, v6);
+                }
             }
         }
         String::new()
@@ -209,9 +290,14 @@ fn apply_usa_os_scripts_de_producao_na_ordem() {
     let set = |i: u32| {
         format!("Set-DnsClientServerAddress -InterfaceIndex {i} -ServerAddresses @({FAMILY})")
     };
-    let ver = |i: u32| {
-        format!("(Get-DnsClientServerAddress -InterfaceIndex {i} -AddressFamily IPv4).ServerAddresses -join ','")
+    // por interface: GUID, NameServer v4 e v6 do registro, e só então o DNS do filtro
+    let reg = |i: u32, fam: &str| {
+        format!(
+            "(Get-ItemProperty -LiteralPath 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\{fam}\\Parameters\\Interfaces\\{}' -Name NameServer -ErrorAction SilentlyContinue).NameServer",
+            guid_of(i)
+        )
     };
+    let guid = |i: u32| format!("(Get-NetAdapter -InterfaceIndex {i}).InterfaceGuid");
     let calls = r.calls();
     assert!(
         calls[0].starts_with("Get-NetIPInterface -AddressFamily IPv4 -ConnectionState Connected")
@@ -219,9 +305,13 @@ fn apply_usa_os_scripts_de_producao_na_ordem() {
     assert_eq!(
         calls[1..],
         [
-            ver(5),
+            guid(5),
+            reg(5, "Tcpip"),
+            reg(5, "Tcpip6"),
             set(5),
-            ver(7),
+            guid(7),
+            reg(7, "Tcpip"),
+            reg(7, "Tcpip6"),
             set(7),
             "ipconfig /flushdns".to_string()
         ]
@@ -288,7 +378,7 @@ fn restaurar_segue_nas_outras_interfaces_e_relata_a_que_falhou() {
             was_dhcp_ipv6: true,
         });
     }
-    r.dns.borrow_mut().insert(7, vec!["1.1.1.3".into()]);
+    r.reg4.borrow_mut().insert(7, vec!["1.1.1.3".into()]);
     let e = restore_connections(&r, &m).unwrap_err();
     assert!(format!("{e:#}").contains("alias inválido"), "{e:#}");
     assert!(
@@ -380,4 +470,93 @@ fn limpar_cache_dns_chama_ipconfig_sem_janela() {
     let r = two_ifaces();
     flush_dns(&r);
     assert_eq!(r.calls(), ["ipconfig /flushdns"]);
+}
+
+// ------------------------------------- DHCP × estático pelo registro (NameServer)
+
+#[test]
+fn interface_dhcp_nao_guarda_o_dns_do_roteador_como_estatico_e_volta_com_namesever_vazio() {
+    let _s = Sandbox::new("win-dhcp");
+    // o roteador entrega 192.168.0.1 por DHCP; `NameServer` do registro está vazio
+    let r = PsFake::new_dhcp(&[("Wi-Fi", 7, &["192.168.0.1"])]);
+    let original = r.all_dns();
+    assert_eq!(r.registry_of(7), (vec![], vec![]));
+    apply_core_with(&r).unwrap();
+    // depois do apply o filtro está no registro
+    assert_eq!(r.registry_of(7).0, ["1.1.1.3", "1.0.0.3"]);
+    let m = DnsStateManifest::load().unwrap().unwrap();
+    assert!(m.connections[0].was_dhcp_ipv4 && m.connections[0].was_dhcp_ipv6);
+    assert!(
+        m.connections[0].original_ipv4_dns.is_empty(),
+        "o DNS do DHCP não vira «fixo»: {:?}",
+        m.connections[0].original_ipv4_dns
+    );
+    r.calls.borrow_mut().clear();
+    restore_connections(&r, &m).unwrap();
+    assert_eq!(
+        r.calls(),
+        ["Set-DnsClientServerAddress -InterfaceAlias 'Wi-Fi' -ResetServerAddresses"]
+    );
+    // NameServer vazio de novo (DHCP), e o DNS efetivo volta a ser o do roteador
+    assert_eq!(r.registry_of(7), (vec![], vec![]));
+    assert_eq!(r.all_dns(), original);
+}
+
+#[test]
+fn interface_com_dns_estatico_v4_e_v6_volta_com_os_dois() {
+    let _s = Sandbox::new("win-static46");
+    let r = PsFake::new(&[("Ethernet", 5, &["192.168.0.1", "8.8.8.8", "2001:db8::1"])]);
+    let (r4, r6) = r.registry_of(5);
+    apply_core_with(&r).unwrap();
+    let m = DnsStateManifest::load().unwrap().unwrap();
+    assert!(!m.connections[0].was_dhcp_ipv4 && !m.connections[0].was_dhcp_ipv6);
+    assert_eq!(m.connections[0].original_ipv6_dns.len(), 1);
+    restore_connections(&r, &m).unwrap();
+    assert_eq!(r.registry_of(5), (r4, r6));
+}
+
+#[test]
+fn v4_por_dhcp_e_v6_estatico_voltam_cada_um_como_eram() {
+    let _s = Sandbox::new("win-mix");
+    let mut r = PsFake::new_dhcp(&[("Ethernet", 5, &["192.168.0.1"])]);
+    r.reg6.borrow_mut().insert(5, vec!["2001:db8::1".into()]);
+    r.dhcp.insert(5, vec!["192.168.0.1".into()]);
+    apply_core_with(&r).unwrap();
+    let m = DnsStateManifest::load().unwrap().unwrap();
+    assert!(m.connections[0].was_dhcp_ipv4 && !m.connections[0].was_dhcp_ipv6);
+    restore_connections(&r, &m).unwrap();
+    assert_eq!(r.registry_of(5), (vec![], vec!["2001:db8::1".to_string()]));
+}
+
+#[test]
+fn dns_so_de_filtro_no_registro_vira_automatico() {
+    // apply sobre rede já filtrada: o «original» nunca é o filtro do GuiaLar
+    let _s = Sandbox::new("win-filtrado");
+    let r = PsFake::new(&[("Ethernet", 5, &["1.1.1.3", "1.0.0.3"])]);
+    apply_core_with(&r).unwrap();
+    let m = DnsStateManifest::load().unwrap().unwrap();
+    assert!(m.connections[0].was_dhcp_ipv4 && m.connections[0].original_ipv4_dns.is_empty());
+}
+
+#[test]
+fn guid_de_adaptador_invalido_nao_entra_no_caminho_do_registro() {
+    assert!(is_adapter_guid("{0a1b2c3d-0000-4abc-9def-0123456789ab}"));
+    for ruim in [
+        "",
+        "0a1b2c3d-0000-4abc-9def-0123456789ab",
+        "{x}",
+        "{0a1b2c3d-0000-4abc-9def-0123456789a'}",
+        "{0a1b2c3d-0000-4abc-9def-0123456789ab}; calc",
+    ] {
+        assert!(!is_adapter_guid(ruim), "{ruim:?}");
+    }
+}
+
+#[test]
+fn name_server_aceita_virgula_espaco_e_ponto_e_virgula() {
+    let v4: Vec<Ipv4Addr> = parse_name_server("8.8.8.8,8.8.4.4 1.1.1.1;9.9.9.9\r\n");
+    assert_eq!(v4.len(), 4);
+    let v6: Vec<std::net::Ipv6Addr> = parse_name_server("2001:db8::1, 2001:db8::2");
+    assert_eq!(v6.len(), 2);
+    assert!(parse_name_server::<Ipv4Addr>(" , ").is_empty());
 }

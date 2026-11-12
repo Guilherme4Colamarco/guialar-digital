@@ -209,22 +209,26 @@ fn restore_connections(r: &dyn CommandRunner, manifest: &DnsStateManifest) -> Re
             falhas.push(format!("alias inválido no manifesto: {:?}", conn.id));
             continue;
         }
-        let script = if conn.was_dhcp_ipv4 {
-            format!(
-                "Set-DnsClientServerAddress -InterfaceAlias '{}' -ResetServerAddresses",
-                conn.id
-            )
-        } else if !conn.original_ipv4_dns.is_empty() {
+        let static4 = !conn.was_dhcp_ipv4 && !conn.original_ipv4_dns.is_empty();
+        let static6 = !conn.was_dhcp_ipv6 && !conn.original_ipv6_dns.is_empty();
+        let script = if static4 || static6 {
             let ips: Vec<String> = conn
                 .original_ipv4_dns
                 .iter()
                 .map(|ip| format!("'{ip}'"))
+                .chain(conn.original_ipv6_dns.iter().map(|ip| format!("'{ip}'")))
                 .collect();
-            // ResetServerAddresses antes: senão o DNS IPv6 da Cloudflare ficaria na interface.
+            // ResetServerAddresses antes: senão o DNS da Cloudflare ficaria na interface.
+            // A família que era DHCP fica automática (o reset a limpou).
             format!(
                 "Set-DnsClientServerAddress -InterfaceAlias '{0}' -ResetServerAddresses; Set-DnsClientServerAddress -InterfaceAlias '{0}' -ServerAddresses @({1})",
                 conn.id,
                 ips.join(",")
+            )
+        } else if conn.was_dhcp_ipv4 || conn.was_dhcp_ipv6 {
+            format!(
+                "Set-DnsClientServerAddress -InterfaceAlias '{}' -ResetServerAddresses",
+                conn.id
             )
         } else {
             continue;
@@ -269,31 +273,73 @@ fn list_active_interfaces(r: &dyn CommandRunner) -> Result<Vec<(String, u32)>> {
         .collect())
 }
 
+/// GUID de adaptador (`{xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx}`): só isso entra no caminho do
+/// registro (nada vindo do sistema é interpolado sem conferir).
+fn is_adapter_guid(s: &str) -> bool {
+    let b = s.as_bytes();
+    b.len() == 38
+        && b[0] == b'{'
+        && b[37] == b'}'
+        && s[1..37].chars().enumerate().all(|(i, c)| {
+            if matches!(i, 8 | 13 | 18 | 23) {
+                c == '-'
+            } else {
+                c.is_ascii_hexdigit()
+            }
+        })
+}
+
+/// `NameServer` do registro da interface (`family` = `Tcpip` ou `Tcpip6`): o DNS **estático**
+/// configurado à mão. Vazio quando a interface usa o DNS do DHCP. O DNS efetivo
+/// (`Get-DnsClientServerAddress`) mistura os dois e não serve para decidir isso.
+fn read_name_server(r: &dyn CommandRunner, guid: &str, family: &str) -> Result<String> {
+    powershell_output(
+        r,
+        &format!(
+            "(Get-ItemProperty -LiteralPath 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\{family}\\Parameters\\Interfaces\\{guid}' -Name NameServer -ErrorAction SilentlyContinue).NameServer"
+        ),
+    )
+}
+
+/// IPs de um `NameServer` (separados por vírgula, espaço ou ponto e vírgula).
+fn parse_name_server<T: std::str::FromStr>(text: &str) -> Vec<T> {
+    text.split(|c: char| c == ',' || c == ';' || c.is_whitespace())
+        .filter_map(|t| t.trim().parse().ok())
+        .collect()
+}
+
 fn inspect_interface_state(
     r: &dyn CommandRunner,
     index: u32,
     alias: &str,
 ) -> Result<ConnectionBackup> {
-    let out = powershell_output(
+    let guid = powershell_output(
         r,
-        &format!(
-        "(Get-DnsClientServerAddress -InterfaceIndex {index} -AddressFamily IPv4).ServerAddresses -join ','"
-        ),
+        &format!("(Get-NetAdapter -InterfaceIndex {index}).InterfaceGuid"),
     )
-    .context("Falha ao consultar DNS atual no Windows")?;
-    let ips: Vec<Ipv4Addr> = out
-        .trim()
-        .split(',')
-        .filter_map(|s| s.trim().parse().ok())
-        .collect();
-    let dhcp = ips.is_empty();
-    let (ips, dhcp) = crate::config::sanitize_original_dns(ips, dhcp);
+    .context("Falha ao consultar o adaptador no Windows")?;
+    let guid = guid.trim();
+    if !is_adapter_guid(guid) {
+        bail!("GUID de adaptador inválido retornado pelo Windows: {guid:?}");
+    }
+    let ns4 =
+        read_name_server(r, guid, "Tcpip").context("Falha ao consultar DNS atual no Windows")?;
+    // IPv6 é melhor esforço: sem a chave (IPv6 desligado) vale «DHCP, sem fixos»
+    let ns6 = read_name_server(r, guid, "Tcpip6").unwrap_or_else(|e| {
+        eprintln!("⚠️ Não consegui ler o DNS IPv6 de {alias:?} ({e:#}); ao desativar, ele volta ao automático.");
+        String::new()
+    });
+    let ips4: Vec<Ipv4Addr> = parse_name_server(&ns4);
+    let ips6: Vec<std::net::Ipv6Addr> = parse_name_server(&ns6);
+    // `NameServer` vazio = DHCP: o DNS do roteador NÃO é guardado como se fosse fixo
+    let (ips4, dhcp4) = crate::config::sanitize_original_dns(ips4.clone(), ips4.is_empty());
+    let (ips6, dhcp6) = crate::config::sanitize_original_dns6(ips6.clone(), ips6.is_empty());
     Ok(ConnectionBackup {
         id: alias.to_string(),
-        was_dhcp_ipv4: dhcp,
-        original_ipv4_dns: ips,
-        original_ipv6_dns: Vec::new(),
-        was_dhcp_ipv6: true,
+        was_dhcp_ipv4: dhcp4,
+        original_ipv4_dns: ips4,
+        original_ipv6_dns: ips6,
+        was_dhcp_ipv6: dhcp6,
     })
 }
 
