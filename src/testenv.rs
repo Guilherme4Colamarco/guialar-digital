@@ -48,10 +48,13 @@ pub fn lock() -> MutexGuard<'static, ()> {
     ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-const VARS: [&str; 7] = [
+const VARS: [&str; 10] = [
     "HOME",
     "LOCALAPPDATA",
     "APPIMAGE",
+    "APPDIR",
+    "XDG_RUNTIME_DIR",
+    "XDG_CACHE_HOME",
     "SUDO_UID",
     "SUDO_GID",
     "SUDO_USER",
@@ -96,6 +99,9 @@ impl Sandbox {
         // Rodando como root via sudo/pkexec, o home sairia do /etc/passwd e não do HOME.
         for v in [
             "APPIMAGE",
+            "APPDIR",
+            "XDG_RUNTIME_DIR",
+            "XDG_CACHE_HOME",
             "SUDO_UID",
             "SUDO_GID",
             "SUDO_USER",

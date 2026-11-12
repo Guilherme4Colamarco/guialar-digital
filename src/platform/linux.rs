@@ -41,26 +41,105 @@ fn detect_active_backend_with(r: &dyn CommandRunner) -> BackendKind {
     BackendKind::DirectResolvConf
 }
 
-/// Roda o AppImage como root, extraindo numa pasta privada (`0700`, criada por `mktemp -d` com
-/// nome aleatório) em vez do `/tmp/appimage_extracted_<md5>` previsível, e a apaga ao final,
-/// com sucesso, erro ou sinal, devolvendo o código de saída do programa (ADR-028).
-/// `$0` é o AppImage e `$@` o subcomando (`internal-apply …`).
-const ELEVATED_APPIMAGE_SCRIPT: &str = concat!(
-    "d=$(mktemp -d /tmp/guialar-elev.XXXXXXXX) || exit 1; ",
-    "trap 'rm -rf -- \"$d\"' EXIT; ",
-    "trap 'exit 143' HUP INT TERM; ",
-    "TMPDIR=\"$d\" APPIMAGE_EXTRACT_AND_RUN=1 \"$0\" \"$@\"; ",
-    "exit $?"
-);
+/// Cópia privada do binário, para elevar a cópia e não o AppImage (ADR-028, rev. 2).
+///
+/// O root não acessa o ponto de montagem FUSE do usuário, então dentro de um AppImage o
+/// processo do usuário copia o próprio executável (`/proc/self/exe`, que ele lê) para uma
+/// pasta nova e aleatória, `0700`, e eleva essa cópia. Não há shell, extração como root nem
+/// `/tmp`; o polkit mostra o caminho do GuiaLar. A pasta é apagada ao sair (`Drop`), com
+/// sucesso ou com erro.
+struct StagedBinary {
+    dir: std::path::PathBuf,
+    exe: std::path::PathBuf,
+}
+
+impl Drop for StagedBinary {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// Pasta que só o usuário acessa, em memória, onde a cópia vive: `$XDG_RUNTIME_DIR` se for
+/// uma pasta `0700` do próprio usuário; senão `~/.cache/guialar` (também do usuário,
+/// `0700`). Nunca `/tmp`.
+fn staging_base() -> Result<std::path::PathBuf> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+    let uid = crate::sysutil::current_ids().map(|i| i.0);
+    let private = |p: &std::path::Path| {
+        std::fs::symlink_metadata(p)
+            .is_ok_and(|m| m.file_type().is_dir() && Some(m.uid()) == uid && m.mode() & 0o077 == 0)
+    };
+    if let Some(x) = std::env::var_os("XDG_RUNTIME_DIR").map(std::path::PathBuf::from) {
+        if x.is_absolute() && private(&x) {
+            return Ok(x);
+        }
+    }
+    let cache = std::env::var_os("XDG_CACHE_HOME")
+        .map(std::path::PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".cache")))
+        .context("sem $XDG_RUNTIME_DIR nem $HOME para guardar a cópia do programa")?;
+    let base = cache.join("guialar");
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&base)
+        .with_context(|| format!("não foi possível criar {}", base.display()))?;
+    if !private(&base) {
+        bail!("{} não é uma pasta privada do usuário", base.display());
+    }
+    Ok(base)
+}
+
+fn stage_binary() -> Result<StagedBinary> {
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+    let base = staging_base()?;
+    let mut last = None;
+    for _ in 0..8 {
+        let mut tag = [0u8; 6];
+        std::fs::File::open("/dev/urandom")
+            .and_then(|mut f| std::io::Read::read_exact(&mut f, &mut tag))
+            .context("não foi possível ler /dev/urandom")?;
+        let name: String = tag.iter().map(|b| format!("{b:02x}")).collect();
+        let dir = base.join(format!("guialar-{name}"));
+        match std::fs::DirBuilder::new().mode(0o700).create(&dir) {
+            Ok(()) => {
+                let exe = dir.join("guialar");
+                let staged = StagedBinary { dir, exe };
+                let mut src = std::fs::File::open("/proc/self/exe")
+                    .context("não foi possível ler o programa")?;
+                let mut dst = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o700)
+                    .open(&staged.exe)
+                    .context("não foi possível criar a cópia do programa")?;
+                std::io::copy(&mut src, &mut dst).context("não foi possível copiar o programa")?;
+                return Ok(staged);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => last = Some(e),
+            Err(e) => return Err(e).context("não foi possível criar a pasta privada"),
+        }
+    }
+    Err(last
+        .map(Into::into)
+        .unwrap_or_else(|| anyhow::anyhow!("sem pasta privada")))
+}
 
 /// Reexecuta este programa elevado **uma única vez** (um só pedido de senha) com
-/// `internal-apply` / `internal-revert`. Dentro de um AppImage usa o caminho do
-/// AppImage (o ponto de montagem FUSE não é acessível ao root).
+/// `internal-apply` / `internal-revert`. Dentro de um AppImage eleva uma cópia do binário
+/// (o ponto de montagem FUSE não é acessível ao root).
 fn elevate_self(r: &dyn CommandRunner, subcommand: &str) -> Result<()> {
     crate::sysutil::OpLock::check_free()?;
-    let appimage = std::env::var_os("APPIMAGE").filter(|v| !v.is_empty());
-    let exe = match &appimage {
-        Some(a) => std::path::PathBuf::from(a),
+    // `APPIMAGE` só vale se este executável está dentro do `APPDIR` (ADR-028, rev. 2)
+    let in_appimage = crate::sysutil::running_appimage().is_some();
+    let staged = if in_appimage {
+        Some(stage_binary()?)
+    } else {
+        None
+    };
+    let exe = match &staged {
+        Some(s) => s.exe.clone(),
         None => std::env::current_exe().context("não foi possível localizar o executável")?,
     };
     let args_for = |tool: &str| -> Vec<std::ffi::OsString> {
@@ -68,19 +147,7 @@ fn elevate_self(r: &dyn CommandRunner, subcommand: &str) -> Result<()> {
         if tool == "sudo" {
             v.push("-n".into()); // nunca pede senha sem TTY
         }
-        if appimage.is_some() {
-            // root não acessa o mount FUSE do usuário: extrai e roda, mas numa pasta privada
-            // (ADR-028). O script é fixo; o AppImage e o subcomando entram só como argumentos
-            // (`$0` e `$@`), nunca dentro da string do script.
-            v.extend([
-                "/bin/sh".into(),
-                "-c".into(),
-                ELEVATED_APPIMAGE_SCRIPT.into(),
-                exe.clone().into_os_string(),
-            ]);
-        } else {
-            v.push(exe.clone().into_os_string());
-        }
+        v.push(exe.clone().into_os_string());
         v.extend(subcommand.split_whitespace().map(std::ffi::OsString::from));
         v
     };
@@ -105,6 +172,7 @@ fn elevate_self(r: &dyn CommandRunner, subcommand: &str) -> Result<()> {
         let st = run("sudo").context("Falha ao executar sudo")?;
         return match st.code {
             Some(0) => Ok(()),
+            Some(126) | Some(127) if in_appimage => bail!(NOT_EXECUTABLE),
             code => bail!("a operação com privilégios falhou (código {code:?})"),
         };
     }
@@ -114,6 +182,8 @@ fn elevate_self(r: &dyn CommandRunner, subcommand: &str) -> Result<()> {
     let status = run("pkexec").context("Falha ao pedir permissão de administrador")?;
     match status.code {
         Some(0) => Ok(()),
+        // 126 = janela fechada ou senha negada; 127 = não autorizado ou não executou
+        Some(127) if in_appimage => bail!(NOT_EXECUTABLE),
         Some(126) | Some(127) => {
             bail!(
                 "a permissão de administrador foi negada (código {:?})",
@@ -123,6 +193,11 @@ fn elevate_self(r: &dyn CommandRunner, subcommand: &str) -> Result<()> {
         code => bail!("a operação com privilégios falhou (código {code:?})"),
     }
 }
+
+/// Dentro de um AppImage, 126/127 na elevação quer dizer que a cópia do programa não rodou
+/// (por exemplo, pasta sem permissão de execução), não que a senha foi negada.
+const NOT_EXECUTABLE: &str =
+    "o AppImage não pôde ser executado com privilégios de administrador (código 127). Nada foi alterado.";
 
 /// Extrai IPs de um texto qualquer (nameserver, `resolvectl dns`, `nmcli`): tokens que são
 /// IP, sem sufixos `#sni` nem `%iface`. Duplicados saem uma vez.

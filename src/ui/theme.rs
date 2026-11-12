@@ -401,6 +401,8 @@ pub fn humanize_error(technical: &str) -> (String, String) {
         || low.contains("not authorized")
     {
         "A permissão de administrador não foi concedida. Nada foi alterado. Tente de novo e escolha Sim."
+    } else if low.contains("não pôde ser executado") {
+        "O programa não conseguiu iniciar com permissão de administrador. Nada foi alterado. Copie os detalhes se o problema continuar."
     } else if low.contains("não foi possível abrir") || low.contains("nenhum navegador") {
         "Não consegui abrir o navegador. Abra-o e tente de novo."
     } else {

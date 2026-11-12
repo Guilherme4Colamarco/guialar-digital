@@ -43,6 +43,55 @@ pub fn is_root() -> bool {
         == Some(0)
 }
 
+/// UID e GID efetivos deste processo (de `/proc/self/status`).
+#[cfg(unix)]
+pub fn current_ids() -> Option<(u32, u32)> {
+    let s = std::fs::read_to_string("/proc/self/status").ok()?;
+    let col = |key: &str| -> Option<u32> {
+        s.lines()
+            .find(|l| l.starts_with(key))?
+            .split_whitespace()
+            .nth(2)?
+            .parse()
+            .ok()
+    };
+    Some((col("Uid:")?, col("Gid:")?))
+}
+
+/// O AppImage em que este processo roda, ou `None` (ADR-028, rev. 2).
+///
+/// `APPIMAGE` é herdado por todo processo filho de outro AppImage (um terminal de editor, por
+/// exemplo), então só vale quando o executável está **dentro** do `APPDIR` que o runtime
+/// exporta junto. Puro: recebe o ambiente.
+pub fn running_appimage_from(
+    appimage: Option<&std::ffi::OsStr>,
+    appdir: Option<&std::ffi::OsStr>,
+    exe: &Path,
+) -> Option<PathBuf> {
+    let appimage = appimage.filter(|v| !v.is_empty())?;
+    let appdir = appdir.filter(|v| !v.is_empty())?;
+    let appdir = Path::new(appdir);
+    if !appdir.is_absolute() {
+        return None;
+    }
+    let inside = exe.starts_with(appdir)
+        || match (exe.canonicalize(), appdir.canonicalize()) {
+            (Ok(e), Ok(d)) => e.starts_with(d),
+            _ => false,
+        };
+    inside.then(|| PathBuf::from(appimage))
+}
+
+/// [`running_appimage_from`] com o ambiente e o executável deste processo.
+pub fn running_appimage() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    running_appimage_from(
+        std::env::var_os("APPIMAGE").as_deref(),
+        std::env::var_os("APPDIR").as_deref(),
+        &exe,
+    )
+}
+
 /// Prefixo de elevação: vazio se já é root; `pkexec` com sessão gráfica; senão `sudo`.
 pub fn privilege_prefix(
     root: bool,
@@ -215,13 +264,60 @@ fn lock_path() -> PathBuf {
     lock_path_raw()
 }
 
+/// Pasta da trava no Linux: só o root grava ali (`/run` é `root 0755`), o usuário só lê.
+/// Nunca `temp_dir()`: com `TMPDIR` diferente o processo elevado veria outra trava, e `/tmp`
+/// é compartilhado e previsível (ADR-028, rev. 2).
+#[cfg(target_os = "linux")]
+const LOCK_DIR: &str = "/run/guialar";
+
 /// Sem a guarda de teste: só calcula/compara o caminho (usado no `Drop`).
 fn lock_path_raw() -> PathBuf {
     #[cfg(test)]
     if let Some(d) = crate::testenv::lock_dir() {
         return d.join("guialar-op.lock");
     }
-    std::env::temp_dir().join("guialar-op.lock")
+    #[cfg(target_os = "linux")]
+    {
+        Path::new(LOCK_DIR).join("op.lock")
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        // Windows: continua em `%TEMP%` do processo (a trava é do administrador; ver ADR-030).
+        std::env::temp_dir().join("guialar-op.lock")
+    }
+}
+
+/// Garante `/run/guialar` (root, `0755`, pasta de verdade) antes de criar a trava. Só para o
+/// caminho de produção; nos testes a trava fica no `Sandbox`.
+#[cfg(target_os = "linux")]
+fn ensure_lock_dir(lock: &Path) -> Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+    let Some(dir) = lock.parent().filter(|d| *d == Path::new(LOCK_DIR)) else {
+        return Ok(());
+    };
+    match std::fs::symlink_metadata(dir) {
+        Ok(m) => {
+            if !m.file_type().is_dir() || m.uid() != 0 || m.mode() & 0o022 != 0 {
+                bail!(
+                    "{} não é uma pasta segura do root; recuso criar a trava",
+                    dir.display()
+                );
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::DirBuilder::new()
+                .mode(0o755)
+                .create(dir)
+                .with_context(|| format!("não foi possível criar {}", dir.display()))?;
+        }
+        Err(e) => return Err(e).context("não foi possível checar a pasta da trava"),
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn ensure_lock_dir(_lock: &Path) -> Result<()> {
+    Ok(())
 }
 
 #[cfg(test)]
@@ -265,12 +361,27 @@ fn process_alive(pid: u32) -> bool {
     }
 }
 
+/// Cria a trava sem seguir link (`O_CREAT|O_EXCL|O_NOFOLLOW`) e legível por todos (`0644`):
+/// quem não é root só a lê, para saber se há operação em andamento.
+fn create_lock_file(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut o = OpenOptions::new();
+    o.write(true).create_new(true);
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        o.mode(0o644).custom_flags(crate::safefs::O_NOFOLLOW);
+    }
+    o.open(path)
+}
+
 impl OpLock {
     pub fn acquire() -> Result<Self> {
         if HELD.load(std::sync::atomic::Ordering::SeqCst) {
             return Ok(Self(None)); // já seguro por este processo
         }
-        let l = Self::acquire_in(&lock_path())?;
+        let path = lock_path();
+        ensure_lock_dir(&path)?;
+        let l = Self::acquire_in(&path)?;
         HELD.store(true, std::sync::atomic::Ordering::SeqCst);
         Ok(l)
     }
@@ -287,7 +398,7 @@ impl OpLock {
 
     pub fn acquire_in(path: &Path) -> Result<Self> {
         for _ in 0..2 {
-            match OpenOptions::new().write(true).create_new(true).open(path) {
+            match create_lock_file(path) {
                 Ok(mut f) => {
                     use std::io::Write;
                     let _ = write!(f, "{}", std::process::id());
@@ -295,6 +406,14 @@ impl OpLock {
                     return Ok(Self(Some(path.to_path_buf())));
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    // um link no lugar da trava (só o root grava em `/run/guialar`): não o
+                    // seguimos nem o apagamos
+                    if std::fs::symlink_metadata(path)
+                        .map(|m| m.file_type().is_symlink())
+                        .unwrap_or(false)
+                    {
+                        bail!("a trava de operação é um link; recuso seguir");
+                    }
                     if lock_is_stale(path) {
                         let _ = std::fs::remove_file(path);
                         continue;
@@ -417,6 +536,77 @@ mod tests {
         assert!(OpLock::acquire_in(&f).is_err());
         drop(a);
         assert!(OpLock::acquire_in(&f).is_ok());
+    }
+
+    #[test]
+    fn appimage_so_vale_com_o_executavel_dentro_do_appdir() {
+        use std::ffi::OsStr;
+        let ai = Some(OsStr::new("/home/u/GuiaLar.AppImage"));
+        let appdir = Some(OsStr::new("/tmp/.mount_GuiaLaXYZ"));
+        let dentro = Path::new("/tmp/.mount_GuiaLaXYZ/usr/bin/guialar");
+        assert_eq!(
+            running_appimage_from(ai, appdir, dentro),
+            Some(PathBuf::from("/home/u/GuiaLar.AppImage"))
+        );
+        // APPIMAGE herdado de OUTRO AppImage: o executável não está no APPDIR dele
+        let build = Path::new("/home/u/gl/target/release/guialar");
+        assert_eq!(running_appimage_from(ai, appdir, build), None);
+        // prefixo de texto não é pasta: `.mount_GuiaLaXYZ2` não está em `.mount_GuiaLaXYZ`
+        let vizinho = Path::new("/tmp/.mount_GuiaLaXYZ2/usr/bin/guialar");
+        assert_eq!(running_appimage_from(ai, appdir, vizinho), None);
+        // faltando uma das duas variáveis, vazias ou APPDIR relativo
+        assert_eq!(running_appimage_from(None, appdir, dentro), None);
+        assert_eq!(running_appimage_from(ai, None, dentro), None);
+        assert_eq!(
+            running_appimage_from(Some(OsStr::new("")), appdir, dentro),
+            None
+        );
+        assert_eq!(
+            running_appimage_from(ai, Some(OsStr::new("")), dentro),
+            None
+        );
+        assert_eq!(
+            running_appimage_from(ai, Some(OsStr::new("rel/dir")), Path::new("rel/dir/x")),
+            None
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn trava_de_producao_fica_em_run_e_nao_depende_do_tmpdir() {
+        // `lock_path_raw` fora do Sandbox: nunca `temp_dir()`, mesmo com TMPDIR trocado
+        assert_eq!(lock_path_raw(), PathBuf::from("/run/guialar/op.lock"));
+        let antes = std::env::var_os("TMPDIR");
+        std::env::set_var("TMPDIR", "/tmp/outro-tmpdir");
+        let depois = lock_path_raw();
+        match antes {
+            Some(v) => std::env::set_var("TMPDIR", v),
+            None => std::env::remove_var("TMPDIR"),
+        }
+        assert_eq!(depois, PathBuf::from("/run/guialar/op.lock"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn trava_nao_segue_link_e_e_legivel_por_todos() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = std::env::temp_dir().join(format!("gl-lock-nf-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let alvo = d.join("alvo-do-link");
+        std::fs::write(&alvo, "intacto").unwrap();
+        let trava = d.join("op.lock");
+        std::os::unix::fs::symlink(&alvo, &trava).unwrap();
+        // um link no lugar da trava não é seguido nem sobrescrito
+        assert!(OpLock::acquire_in(&trava).is_err());
+        assert_eq!(std::fs::read_to_string(&alvo).unwrap(), "intacto");
+        std::fs::remove_file(&trava).unwrap();
+        // criada pelo processo, com 0644 (o usuário só lê)
+        let l = OpLock::acquire_in(&trava).unwrap();
+        let mode = std::fs::metadata(&trava).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o644);
+        drop(l);
+        std::fs::remove_dir_all(&d).ok();
     }
 
     #[test]

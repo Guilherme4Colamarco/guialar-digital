@@ -559,98 +559,158 @@ fn elevacao_tenta_sudo_sem_senha_e_so_depois_pkexec() {
     assert!(r.argvs().is_empty());
 }
 
+/// Ambiente de um AppImage de mentira: `APPDIR` é a pasta do executável de teste, então o
+/// teste «está dentro do AppImage». `XDG_RUNTIME_DIR` aponta para uma pasta `0700` do Sandbox.
+#[cfg(unix)]
+fn appimage_de_mentira(s: &Sandbox) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let xdg = s.dir().join("xdg-runtime");
+    std::fs::create_dir_all(&xdg).unwrap();
+    std::fs::set_permissions(&xdg, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::env::set_var("XDG_RUNTIME_DIR", &xdg);
+    let appdir = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    std::env::set_var("APPDIR", &appdir);
+    std::env::set_var("APPIMAGE", "/home/u/GuiaLar.AppImage");
+    xdg
+}
+
+#[cfg(unix)]
 #[test]
-fn elevacao_em_appimage_usa_pasta_privada_com_pkexec_e_sudo() {
-    let _s = Sandbox::new("elev-appimage");
-    std::env::set_var("APPIMAGE", "/home/u/Gui aLar; rm -rf $HOME.AppImage");
-    let ai = "/home/u/Gui aLar; rm -rf $HOME.AppImage";
+fn elevacao_em_appimage_eleva_uma_copia_do_binario_sem_shell_pkexec_e_sudo() {
+    use std::os::unix::fs::PermissionsExt;
+    let s = Sandbox::new("elev-appimage");
+    let xdg = appimage_de_mentira(&s);
+    let visto = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
+    let v2 = visto.clone();
+    let xdg2 = xdg.clone();
+    // no instante em que o pkexec/sudo roda, a cópia existe, é 0700 e igual ao binário
+    let sonda = move |argv: &[String]| {
+        let Some(exe) = argv
+            .iter()
+            .find(|a| a.contains("/guialar-") && a.ends_with("/guialar"))
+        else {
+            return;
+        };
+        let p = std::path::Path::new(exe);
+        let dir = p.parent().unwrap();
+        assert!(
+            dir.starts_with(&xdg2),
+            "cópia fora do XDG_RUNTIME_DIR: {exe}"
+        );
+        let md = std::fs::metadata(p).unwrap();
+        let dm = std::fs::metadata(dir).unwrap();
+        v2.borrow_mut().push(format!(
+            "{:o}/{:o}/{}",
+            dm.permissions().mode() & 0o777,
+            md.permissions().mode() & 0o777,
+            md.len() == std::fs::metadata("/proc/self/exe").unwrap().len()
+        ));
+    };
     // pkexec
-    let r = FakeRunner::new().not_root(&[]).with_command("pkexec");
+    let r = FakeRunner::new()
+        .not_root(&[])
+        .with_command("pkexec")
+        .with_on_run(sonda.clone());
     elevate_self(&r, "internal-revert").unwrap();
+    let argv = r.argvs();
+    assert_eq!(argv.len(), 1);
+    assert_eq!(argv[0][0], "pkexec");
     assert_eq!(
-        r.argvs(),
-        vec![v(&[
-            "pkexec",
-            "/bin/sh",
-            "-c",
-            ELEVATED_APPIMAGE_SCRIPT,
-            ai,
-            "internal-revert"
-        ])]
+        argv[0].len(),
+        3,
+        "pkexec <cópia> internal-revert, sem shell: {:?}",
+        argv[0]
     );
-    // sudo: sonda e depois o mesmo comando, com `-n`
+    assert!(argv[0][1].starts_with(xdg.join("guialar-").to_str().unwrap()));
+    assert!(argv[0][1].ends_with("/guialar"));
+    assert_eq!(argv[0][2], "internal-revert");
+    assert!(!argv[0]
+        .iter()
+        .any(|a| a == "/bin/sh" || a == "-c" || a == "env"));
+    // sudo: sonda `sudo -n true` e depois a cópia com `-n`
     let r = FakeRunner::new()
         .not_root(&[])
         .with_command("sudo")
-        .with_command("pkexec");
+        .with_command("pkexec")
+        .with_on_run(sonda);
     elevate_self(&r, "internal-apply --mode ads").unwrap();
-    assert_eq!(
-        r.argvs(),
-        vec![
-            v(&["sudo", "-n", "true"]),
-            v(&[
-                "sudo",
-                "-n",
-                "/bin/sh",
-                "-c",
-                ELEVATED_APPIMAGE_SCRIPT,
-                ai,
-                "internal-apply",
-                "--mode",
-                "ads"
-            ])
-        ]
-    );
-    // nada vindo do usuário entra na string do script
-    assert!(!ELEVATED_APPIMAGE_SCRIPT.contains("AppImage"));
-    assert!(ELEVATED_APPIMAGE_SCRIPT.contains("mktemp -d"));
-    assert!(ELEVATED_APPIMAGE_SCRIPT.contains("TMPDIR=\"$d\""));
-    assert!(ELEVATED_APPIMAGE_SCRIPT.contains("APPIMAGE_EXTRACT_AND_RUN=1"));
-    assert!(ELEVATED_APPIMAGE_SCRIPT.contains("rm -rf -- \"$d\""));
-    std::env::remove_var("APPIMAGE");
+    let argv = r.argvs();
+    assert_eq!(argv[0], v(&["sudo", "-n", "true"]));
+    assert_eq!(&argv[1][..2], ["sudo", "-n"]);
+    assert!(argv[1][2].ends_with("/guialar"));
+    assert_eq!(&argv[1][3..], ["internal-apply", "--mode", "ads"]);
+    // a cópia existia (0700/0700, igual ao binário) em cada elevação
+    assert_eq!(*visto.borrow(), ["700/700/true", "700/700/true"]);
+    // e some ao final, sem sobra no XDG_RUNTIME_DIR
+    let sobra: Vec<_> = std::fs::read_dir(&xdg).unwrap().collect();
+    assert!(sobra.is_empty(), "a cópia deve ser apagada: {sobra:?}");
 }
 
-/// Executa o script de verdade com um «AppImage» falso: pasta privada 0700, `TMPDIR` apontando
-/// para ela, código de saída preservado e pasta apagada (sucesso ou erro).
 #[cfg(unix)]
 #[test]
-fn script_elevado_cria_pasta_privada_preserva_o_codigo_e_apaga() {
-    use std::os::unix::fs::PermissionsExt;
-    let s = Sandbox::new("elev-script");
-    let fake = s.dir().join("fake appimage.sh");
-    // imprime o ambiente que o runtime veria e sai com o código pedido no 1º argumento
-    std::fs::write(
-        &fake,
-        "#!/bin/sh\necho \"TMPDIR=$TMPDIR\"\necho \"EXTRACT=$APPIMAGE_EXTRACT_AND_RUN\"\n\
-         echo \"MODE=$(stat -c %a \"$TMPDIR\")\"\necho \"ARGS=$*\"\ntouch \"$TMPDIR/extraido\"\nexit \"$1\"\n",
-    )
-    .unwrap();
-    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
-    for code in [0, 7] {
-        let out = std::process::Command::new("/bin/sh")
-            .arg("-c")
-            .arg(ELEVATED_APPIMAGE_SCRIPT)
-            .arg(&fake)
-            .arg(code.to_string())
-            .arg("internal-apply")
-            .output()
-            .unwrap();
-        let so = String::from_utf8_lossy(&out.stdout);
-        assert_eq!(out.status.code(), Some(code), "código preservado: {so}");
-        let tmpdir = so
-            .lines()
-            .find_map(|l| l.strip_prefix("TMPDIR="))
-            .unwrap()
-            .to_string();
-        assert!(tmpdir.starts_with("/tmp/guialar-elev."), "{tmpdir}");
-        assert!(so.contains("EXTRACT=1"), "{so}");
-        assert!(so.contains("MODE=700"), "{so}");
-        assert!(so.contains(&format!("ARGS={code} internal-apply")), "{so}");
-        assert!(
-            !std::path::Path::new(&tmpdir).exists(),
-            "a pasta privada some ao final (código {code})"
-        );
+fn elevacao_em_appimage_apaga_a_copia_mesmo_com_erro() {
+    let s = Sandbox::new("elev-appimage-erro");
+    let xdg = appimage_de_mentira(&s);
+    let r = FakeRunner::new()
+        .not_root(&[])
+        .with_command("pkexec")
+        .deny("pkexec", 126);
+    let e = elevate_self(&r, "internal-revert").unwrap_err();
+    assert!(format!("{e:#}").contains("negada"), "{e:#}");
+    assert!(
+        std::fs::read_dir(&xdg).unwrap().next().is_none(),
+        "sem sobra"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn elevacao_em_appimage_127_diz_que_nao_pode_ser_executado_e_nao_permissao_negada() {
+    let s = Sandbox::new("elev-appimage-127");
+    appimage_de_mentira(&s);
+    for tool in ["pkexec", "sudo"] {
+        let r = FakeRunner::new()
+            .not_root(&[])
+            .with_command(tool)
+            .with_command("pkexec");
+        // sudo: a sonda `sudo -n true` passa e o comando da cópia sai com 127
+        let r = if tool == "sudo" {
+            r.with_exit_code("sudo", 127, &["sudo", "-n", "true"])
+        } else {
+            r.deny("pkexec", 127)
+        };
+        let e = elevate_self(&r, "internal-revert").unwrap_err();
+        let msg = format!("{e:#}");
+        assert!(msg.contains("não pôde ser executado"), "{tool}: {msg}");
+        assert!(!msg.contains("negada"), "{tool}: {msg}");
+        let (curto, _) = crate::ui::theme::humanize_error(&msg);
+        assert!(curto.contains("Nada foi alterado"), "{curto}");
     }
+}
+
+#[test]
+fn elevacao_fora_do_appimage_usa_o_executavel_e_127_continua_negada() {
+    let _s = Sandbox::new("elev-fora");
+    // APPIMAGE herdado de OUTRO AppImage: o executável não está no APPDIR dele
+    std::env::set_var("APPIMAGE", "/home/u/Outro.AppImage");
+    std::env::set_var("APPDIR", "/tmp/.mount_OutroXYZ");
+    let exe = std::env::current_exe()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let r = FakeRunner::new()
+        .not_root(&[])
+        .with_command("pkexec")
+        .deny("pkexec", 127);
+    let e = elevate_self(&r, "internal-revert").unwrap_err();
+    assert!(format!("{e:#}").contains("negada"), "{e:#}");
+    assert_eq!(r.argvs(), vec![v(&["pkexec", &exe, "internal-revert"])]);
+    std::env::remove_var("APPIMAGE");
+    std::env::remove_var("APPDIR");
 }
 
 #[test]

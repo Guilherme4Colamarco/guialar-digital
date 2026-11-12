@@ -85,8 +85,11 @@ pub fn ensure_desktop_integration() {
     let Ok(exe) = std::env::current_exe() else {
         return;
     };
-    let appimage = std::env::var("APPIMAGE").ok();
-    let Some(exec_path) = target_exec(appimage.as_deref(), &exe) else {
+    // `APPIMAGE` só vale se este executável está dentro do `APPDIR` (ADR-028, rev. 2): um
+    // processo filho de OUTRO AppImage herda a variável e não pode trocar o atalho.
+    let appimage = crate::sysutil::running_appimage();
+    let appimage_str = appimage.as_ref().map(|p| p.to_string_lossy().into_owned());
+    let Some(exec_path) = target_exec(appimage_str.as_deref(), &exe) else {
         return;
     };
     let data_home = std::env::var_os("XDG_DATA_HOME")
@@ -94,8 +97,7 @@ pub fn ensure_desktop_integration() {
         .filter(|p| p.is_absolute())
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")));
     let Some(data_home) = data_home else { return };
-    let from_appimage = appimage.as_deref().is_some_and(|a| !a.is_empty());
-    if let Ok(Some(desktop)) = install_into(&data_home, &exec_path, from_appimage) {
+    if let Ok(Some(desktop)) = install_into(&data_home, &exec_path, appimage.is_some()) {
         let quiet = |mut c: std::process::Command| {
             let _ = c
                 .stdin(std::process::Stdio::null())
@@ -209,5 +211,26 @@ mod tests {
         assert!(install_into(&d, "/tmp/guialar", false).unwrap().is_none());
         assert_eq!(exec_do_atalho(&d), "Exec=\"/usr/local/bin/guialar\" gui");
         std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// `APPIMAGE` herdado de OUTRO AppImage (terminal de um editor, por exemplo) não pode
+    /// trocar o atalho do usuário: o executável não está no `APPDIR` dele (ADR-028, rev. 2).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn appimage_herdado_de_outro_nao_reescreve_o_atalho() {
+        let s = crate::testenv::Sandbox::new("integ-herdado");
+        let data = s.dir().join(".local/share");
+        std::env::set_var("XDG_DATA_HOME", &data);
+        install_into(&data, "/home/u/GuiaLar.AppImage", true).unwrap();
+        std::env::set_var("APPIMAGE", "/home/u/Outro.AppImage");
+        std::env::set_var("APPDIR", "/tmp/.mount_OutroXYZ");
+        ensure_desktop_integration();
+        std::env::remove_var("APPIMAGE");
+        std::env::remove_var("APPDIR");
+        std::env::remove_var("XDG_DATA_HOME");
+        let exec =
+            std::fs::read_to_string(data.join("applications/guialar-digital.desktop")).unwrap();
+        assert!(exec.contains("GuiaLar.AppImage"), "{exec}");
+        assert!(!exec.contains("Outro.AppImage"), "{exec}");
     }
 }

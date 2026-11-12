@@ -9,6 +9,7 @@ mod config;
 mod integration;
 mod platform;
 mod policy;
+mod safefs;
 mod sysutil;
 #[cfg(test)]
 mod testenv;

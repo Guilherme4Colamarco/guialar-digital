@@ -17,6 +17,7 @@ pub struct Call {
 }
 
 type Props = BTreeMap<String, String>;
+type Hook = std::rc::Rc<dyn Fn(&[String])>;
 
 /// Estado observável do DNS (o que `apply ∘ revert` deve devolver igual).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,6 +39,8 @@ struct State {
     nm_type: BTreeMap<String, String>,
     deny: Vec<(String, i32)>,
     fail_argv: Vec<Vec<String>>,
+    exit_except: Vec<(String, i32, Vec<String>)>,
+    on_run: Option<Hook>,
     prefix: Vec<&'static str>,
     root: bool,
 }
@@ -154,6 +157,24 @@ impl FakeRunner {
             .borrow_mut()
             .fail_argv
             .push(prefix.iter().map(|p| p.to_string()).collect());
+    }
+
+    /// Todo comando de `program` sai com `code`, exceto os que começam com `except` (ex.: a
+    /// sonda `sudo -n true` passa e o comando elevado sai com 127).
+    pub fn with_exit_code(self, program: &str, code: i32, except: &[&str]) -> Self {
+        self.st.borrow_mut().exit_except.push((
+            program.into(),
+            code,
+            except.iter().map(|e| e.to_string()).collect(),
+        ));
+        self
+    }
+
+    /// Chama `f(argv)` a cada comando, antes de executá-lo (para olhar o disco no instante em
+    /// que a elevação roda, por exemplo).
+    pub fn with_on_run(self, f: impl Fn(&[String]) + 'static) -> Self {
+        self.st.borrow_mut().on_run = Some(std::rc::Rc::new(f));
+        self
     }
 
     pub fn clear_deny(&self) {
@@ -295,6 +316,10 @@ impl CommandRunner for FakeRunner {
             _ => None,
         };
         let argv = cmd.argv();
+        let hook = self.st.borrow().on_run.clone();
+        if let Some(h) = hook {
+            h(&argv);
+        }
         self.st.borrow_mut().calls.push(Call {
             argv: argv.clone(),
             stdin: stdin.clone(),
@@ -328,6 +353,19 @@ impl CommandRunner for FakeRunner {
             .any(|p| real.starts_with(p))
         {
             return Err(io::Error::other("falha simulada pelo FakeRunner"));
+        }
+        let exited = self
+            .st
+            .borrow()
+            .exit_except
+            .iter()
+            .find(|(p, _, except)| *p == real[0] && !real.starts_with(except))
+            .map(|(_, c, _)| *c);
+        if let Some(code) = exited {
+            return Ok(Outcome {
+                code: Some(code),
+                ..Outcome::default()
+            });
         }
         if let Some(code) = denied {
             return Ok(Outcome {
