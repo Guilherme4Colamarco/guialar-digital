@@ -46,6 +46,8 @@ struct PsFake {
     dhcp: BTreeMap<u32, Vec<String>>,
     calls: RefCell<Vec<String>>,
     fail_on: RefCell<Option<String>>,
+    /// interfaces cujo `InterfaceGuid` volta num formato inválido
+    bad_guid: RefCell<Vec<u32>>,
 }
 
 fn guid_of(index: u32) -> String {
@@ -93,6 +95,7 @@ impl PsFake {
             dhcp: BTreeMap::new(),
             calls: RefCell::new(Vec::new()),
             fail_on: RefCell::new(None),
+            bad_guid: RefCell::new(Vec::new()),
         }
     }
 
@@ -170,6 +173,9 @@ impl PsFake {
         }
         if let Some(rest) = st.strip_prefix("(Get-NetAdapter -InterfaceIndex ") {
             let idx: u32 = rest.split(')').next().unwrap().parse().unwrap();
+            if self.bad_guid.borrow().contains(&idx) {
+                return "sem-guid".into();
+            }
             return guid_of(idx);
         }
         if st.starts_with("(Get-ItemProperty -LiteralPath 'HKLM:") {
@@ -290,7 +296,7 @@ fn apply_usa_os_scripts_de_producao_na_ordem() {
     let set = |i: u32| {
         format!("Set-DnsClientServerAddress -InterfaceIndex {i} -ServerAddresses @({FAMILY})")
     };
-    // por interface: GUID, NameServer v4 e v6 do registro, e só então o DNS do filtro
+    // primeiro LÊ todas as interfaces (GUID, NameServer v4 e v6); só depois troca o DNS
     let reg = |i: u32, fam: &str| {
         format!(
             "(Get-ItemProperty -LiteralPath 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\{fam}\\Parameters\\Interfaces\\{}' -Name NameServer -ErrorAction SilentlyContinue).NameServer",
@@ -308,10 +314,10 @@ fn apply_usa_os_scripts_de_producao_na_ordem() {
             guid(5),
             reg(5, "Tcpip"),
             reg(5, "Tcpip6"),
-            set(5),
             guid(7),
             reg(7, "Tcpip"),
             reg(7, "Tcpip6"),
+            set(5),
             set(7),
             "ipconfig /flushdns".to_string()
         ]
@@ -559,4 +565,70 @@ fn name_server_aceita_virgula_espaco_e_ponto_e_virgula() {
     let v6: Vec<std::net::Ipv6Addr> = parse_name_server("2001:db8::1, 2001:db8::2");
     assert_eq!(v6.len(), 2);
     assert!(parse_name_server::<Ipv4Addr>(" , ").is_empty());
+}
+
+// ------------------------------- inspecionar tudo antes de alterar qualquer interface
+
+fn sets(r: &PsFake) -> Vec<String> {
+    r.calls()
+        .into_iter()
+        .filter(|c| c.starts_with("Set-DnsClientServerAddress"))
+        .collect()
+}
+
+#[test]
+fn interface_sem_guid_e_pulada_com_aviso_e_as_outras_seguem() {
+    let _s = Sandbox::new("win-sem-guid");
+    // a SEGUNDA interface não tem GUID: antes, a primeira já estava alterada quando o apply falhava
+    let r = two_ifaces();
+    r.bad_guid.borrow_mut().push(7);
+    let wifi_antes = r.dns_of(7);
+    apply_core_with(&r).unwrap();
+    let m = DnsStateManifest::load().unwrap().unwrap();
+    assert_eq!(m.connections.len(), 1, "só a interface inspecionada");
+    assert_eq!(m.connections[0].id, "Ethernet");
+    assert_eq!(
+        sets(&r).len(),
+        1,
+        "só a Ethernet foi alterada: {:?}",
+        sets(&r)
+    );
+    assert_eq!(
+        r.dns_of(7),
+        wifi_antes,
+        "a interface sem GUID ficou como era"
+    );
+}
+
+#[test]
+fn falha_ao_ler_uma_interface_nao_altera_nenhuma() {
+    let _s = Sandbox::new("win-leitura-falha");
+    let r = two_ifaces();
+    let antes = r.all_dns();
+    // a leitura do registro da SEGUNDA interface falha
+    *r.fail_on.borrow_mut() = Some(guid_of(7));
+    let e = apply_core_with(&r).unwrap_err();
+    assert!(
+        format!("{e:#}").contains("Falha ao consultar DNS atual"),
+        "{e:#}"
+    );
+    assert!(
+        sets(&r).is_empty(),
+        "nenhum DNS foi trocado antes de o estado de todas ser lido: {:?}",
+        sets(&r)
+    );
+    assert_eq!(r.all_dns(), antes);
+    assert!(DnsStateManifest::load().unwrap().is_none(), "sem manifesto");
+}
+
+#[test]
+fn todas_sem_guid_falha_sem_alterar_nada() {
+    let _s = Sandbox::new("win-todas-sem-guid");
+    let r = two_ifaces();
+    r.bad_guid.borrow_mut().extend([5, 7]);
+    let antes = r.all_dns();
+    let e = apply_core_with(&r).unwrap_err();
+    assert!(format!("{e:#}").contains("pôde ser inspecionada"), "{e:#}");
+    assert!(sets(&r).is_empty());
+    assert_eq!(r.all_dns(), antes);
 }

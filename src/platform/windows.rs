@@ -168,14 +168,29 @@ fn apply_core_with(r: &dyn CommandRunner) -> Result<()> {
         current_mode().ipv6()[0],
         current_mode().ipv6()[1]
     );
+    // Primeiro INSPECIONA todas as interfaces; só depois altera alguma. Assim um erro de leitura
+    // não deixa o DNS de umas trocado e as outras não, sem manifesto para desfazer.
     let mut manifest = DnsStateManifest::new(BackendKind::WindowsPowerShell);
+    let mut alvos: Vec<u32> = Vec::new();
     for (alias, index) in &interfaces {
         if !is_safe_ps_alias(alias) {
             bail!("Alias de interface inválido retornado pelo Windows: {alias:?}");
         }
-        manifest
-            .connections
-            .push(inspect_interface_state(r, *index, alias)?);
+        match inspect_interface_state(r, *index, alias)? {
+            Some(backup) => {
+                manifest.connections.push(backup);
+                alvos.push(*index);
+            }
+            // sem GUID não há como guardar o estado: não mexe nessa interface
+            None => eprintln!(
+                "⚠️ A interface {alias:?} foi ignorada: o Windows não informou um GUID válido, então o DNS dela não pode ser guardado nem restaurado."
+            ),
+        }
+    }
+    if alvos.is_empty() {
+        bail!("Nenhuma interface de rede ativa pôde ser inspecionada no Windows");
+    }
+    for index in alvos {
         run_powershell(
             r,
             &format!(
@@ -317,7 +332,7 @@ fn inspect_interface_state(
     r: &dyn CommandRunner,
     index: u32,
     alias: &str,
-) -> Result<ConnectionBackup> {
+) -> Result<Option<ConnectionBackup>> {
     let guid = powershell_output(
         r,
         &format!("(Get-NetAdapter -InterfaceIndex {index}).InterfaceGuid"),
@@ -325,7 +340,7 @@ fn inspect_interface_state(
     .context("Falha ao consultar o adaptador no Windows")?;
     let guid = guid.trim();
     if !is_adapter_guid(guid) {
-        bail!("GUID de adaptador inválido retornado pelo Windows: {guid:?}");
+        return Ok(None);
     }
     let ns4 =
         read_name_server(r, guid, "Tcpip").context("Falha ao consultar DNS atual no Windows")?;
@@ -339,13 +354,13 @@ fn inspect_interface_state(
     // `NameServer` vazio = DHCP: o DNS do roteador NÃO é guardado como se fosse fixo
     let (ips4, dhcp4) = crate::config::sanitize_original_dns(ips4.clone(), ips4.is_empty());
     let (ips6, dhcp6) = crate::config::sanitize_original_dns6(ips6.clone(), ips6.is_empty());
-    Ok(ConnectionBackup {
+    Ok(Some(ConnectionBackup {
         id: alias.to_string(),
         was_dhcp_ipv4: dhcp4,
         original_ipv4_dns: ips4,
         original_ipv6_dns: ips6,
         was_dhcp_ipv6: dhcp6,
-    })
+    }))
 }
 
 /// DNS configurados nas interfaces ativas (IPv4 e IPv6).
