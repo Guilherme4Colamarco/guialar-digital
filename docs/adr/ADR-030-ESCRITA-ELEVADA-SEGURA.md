@@ -1,6 +1,6 @@
 # ADR-030 — O processo elevado não confia em caminhos controlados pelo usuário
 
-Status: Aceita (2026-11-12) · Autor: gl-arquiteto · Origem: review de segurança
+Status: Aceita (2026-11-12), substituída pela ADR-031 para o estado e a trava; vale para as demais escritas elevadas na área do usuário · Autor: gl-arquiteto · Origem: review de segurança
 
 ## Contexto
 Para guardar o manifesto que permite desfazer, o processo elevado (root no Linux, administrador no Windows) grava na pasta de configuração de quem chamou e devolve a posse dos arquivos a essa pessoa. A pasta e os nomes ficam sob controle do usuário comum, inclusive de outro programa sem privilégio rodando na mesma conta. Seguir um link simbólico ou ponto de junção nesse caminho permite que o processo elevado grave ou mude o dono de arquivos do sistema.
