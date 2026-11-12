@@ -3,10 +3,8 @@
 //! Guarda os IPs oficiais da Cloudflare for Families (IPv4 e IPv6)
 //! e gerencia o manifesto atômico de reversão em formato JSON (~/.config/guialar/state.json).
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
-use std::fs::{self, OpenOptions};
-use std::io::Write;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::path::PathBuf;
 
@@ -221,43 +219,25 @@ impl DnsStateManifest {
         }
     }
 
-    /// Retorna o caminho canônico do arquivo de estado conforme o sistema operacional.
+    /// Caminho do arquivo de estado, numa pasta do sistema (ADR-031): `/var/lib/guialar` no
+    /// Linux, `%ProgramData%\GuiaLar` no Windows. Só o processo elevado grava; o resto só lê.
     pub fn file_path() -> Result<PathBuf> {
-        let path = Self::file_path_raw()?;
         #[cfg(test)]
-        {
-            crate::testenv::assert_sandboxed("state.json");
-            crate::testenv::assert_inside(&path, "state.json");
-        }
+        crate::testenv::assert_sandboxed("state.json");
+        let path = crate::statedir::state_file()?;
+        #[cfg(test)]
+        crate::testenv::assert_inside(&path, "state.json");
         Ok(path)
     }
 
-    fn file_path_raw() -> Result<PathBuf> {
-        #[cfg(target_os = "windows")]
-        {
-            let base = std::env::var("LOCALAPPDATA")
-                .map(PathBuf::from)
-                .unwrap_or_else(|_| PathBuf::from(r"C:\ProgramData"));
-            Ok(base.join("GuiaLar").join("state.json"))
-        }
-
-        #[cfg(not(target_os = "windows"))]
-        {
-            let home = crate::sysutil::effective_home()
-                .context("Variável de ambiente $HOME não encontrada")?;
-            Ok(home.join(".config").join("guialar").join("state.json"))
-        }
-    }
-
-    /// Carrega o manifesto persistido. Retorna Ok(None) se não existir proteção ativa.
+    /// Carrega o manifesto persistido. Retorna Ok(None) se não existir proteção ativa (ou se o
+    /// arquivo não é de dono confiável: ver `statedir`).
     pub fn load() -> Result<Option<Self>> {
         let path = Self::file_path()?;
-        if !path.exists() {
+        let Some(bytes) = crate::statedir::read_state()? else {
             return Ok(None);
-        }
-        let content = fs::read_to_string(&path)
-            .with_context(|| format!("Falha ao ler manifesto em {:?}", path))?;
-        let manifest: Self = serde_json::from_str(&content)
+        };
+        let manifest: Self = serde_json::from_slice(&bytes)
             .with_context(|| {
                 format!(
                     "Formato de manifesto corrompido ou inválido em {:?} (apague esse arquivo e rode 'guialar apply' de novo)",
@@ -267,74 +247,153 @@ impl DnsStateManifest {
         Ok(Some(manifest))
     }
 
-    /// Salva o manifesto de forma atômica (grava em temp e faz rename) com permissão 0600.
+    /// Confere, antes de mexer no DNS, que o estado pode ser guardado com segurança. Se não
+    /// puder, o `apply` para ali e nada é alterado. Só o processo elevado a chama.
+    pub fn preflight() -> Result<()> {
+        #[cfg(test)]
+        crate::testenv::assert_sandboxed("state.json");
+        crate::statedir::ensure_dir().map(|_| ())
+    }
+
+    /// Salva o manifesto de forma atômica na pasta do sistema (só o processo elevado).
     pub fn save_atomic(&self) -> Result<()> {
-        let target_path = Self::file_path()?;
-        let parent = target_path
-            .parent()
-            .context("Caminho de manifesto inválido sem diretório pai")?;
-        fs::create_dir_all(parent)
-            .with_context(|| format!("Falha ao criar diretório {:?}", parent))?;
-
-        let temp_path = parent.join(format!(".state.{}.tmp", std::process::id()));
-        let json_data = serde_json::to_string_pretty(self)?;
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            let mut file = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .open(&temp_path)
-                .with_context(|| format!("Falha ao criar arquivo temporário {:?}", temp_path))?;
-            file.write_all(json_data.as_bytes())?;
-            file.flush()?;
-        }
-
-        #[cfg(not(unix))]
-        {
-            let mut file = OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .open(&temp_path)
-                .with_context(|| format!("Falha ao criar arquivo temporário {:?}", temp_path))?;
-            file.write_all(json_data.as_bytes())?;
-            file.flush()?;
-        }
-
-        fs::rename(&temp_path, &target_path)
-            .with_context(|| format!("Falha ao renomear {:?} para {:?}", temp_path, target_path))?;
-        // Via sudo/pkexec o arquivo nasceria root:root 0600 e o usuário comum não o leria.
-        #[cfg(unix)]
-        {
-            crate::sysutil::give_to_caller(parent);
-            if let Some(config_dir) = parent.parent() {
-                let root_owned = {
-                    use std::os::unix::fs::MetadataExt;
-                    fs::metadata(config_dir)
-                        .map(|m| m.uid() == 0)
-                        .unwrap_or(false)
-                };
-                if root_owned {
-                    crate::sysutil::give_to_caller(config_dir);
-                }
-            }
-            crate::sysutil::give_to_caller(&target_path);
-        }
-        Ok(())
+        #[cfg(test)]
+        crate::testenv::assert_sandboxed("state.json");
+        let json = serde_json::to_string_pretty(self)?;
+        crate::statedir::write_state(json.as_bytes())
     }
 
     /// Remove o manifesto após reversão bem-sucedida.
     pub fn remove_manifest() -> Result<()> {
-        let path = Self::file_path()?;
-        if path.exists() {
-            fs::remove_file(&path)
-                .with_context(|| format!("Falha ao remover manifesto {:?}", path))?;
+        #[cfg(test)]
+        crate::testenv::assert_sandboxed("state.json");
+        crate::statedir::remove_state()
+    }
+
+    // ------------------------------------------------------------ migração da beta (ADR-031)
+
+    /// Onde a beta guardava o manifesto: na área do usuário. Só o `revert` o lê, uma vez.
+    fn legacy_location() -> Option<(PathBuf, Vec<&'static str>)> {
+        #[cfg(windows)]
+        {
+            let base = std::env::var_os("LOCALAPPDATA").map(PathBuf::from)?;
+            Some((base, vec!["GuiaLar"]))
+        }
+        #[cfg(not(windows))]
+        {
+            let home = crate::sysutil::effective_home()?;
+            Some((home, vec![".config", "guialar"]))
+        }
+    }
+
+    /// Lê o manifesto antigo sem seguir links; recusa link e dono diferente (`Err`).
+    pub fn load_legacy() -> Result<Option<Self>> {
+        #[cfg(test)]
+        crate::testenv::assert_sandboxed("state.json (antigo)");
+        let Some((base, comps)) = Self::legacy_location() else {
+            return Ok(None);
+        };
+        let Some(bytes) =
+            crate::safefs::read_file(&base, &comps, "state.json", &crate::safefs::caller_owner())?
+        else {
+            return Ok(None);
+        };
+        if bytes.len() > 256 * 1024 {
+            bail!("o registro antigo é grande demais para ser um manifesto");
+        }
+        serde_json::from_slice(&bytes)
+            .map(Some)
+            .context("o registro antigo está ilegível")
+    }
+
+    /// Apaga o manifesto antigo (só o nome; um link é removido sem tocar no alvo).
+    pub fn remove_legacy() {
+        #[cfg(test)]
+        crate::testenv::assert_sandboxed("state.json (antigo)");
+        if let Some((base, comps)) = Self::legacy_location() {
+            let _ = crate::safefs::remove_file(
+                &base,
+                &comps,
+                "state.json",
+                &crate::safefs::caller_owner(),
+            );
+        }
+    }
+
+    /// O manifesto antigo é do usuário e pode ter sido forjado: antes de o processo elevado
+    /// agir sobre ele, confere que cada conexão existe agora (`known_ids`), que os DNS são
+    /// IPs razoáveis e que `previous_resolv_conf` só tem linhas permitidas e cabe em 4 KB.
+    pub fn validate_legacy(&self, known_ids: &[String]) -> std::result::Result<(), String> {
+        let compat = if cfg!(windows) {
+            self.backend == BackendKind::WindowsPowerShell
+        } else {
+            self.backend != BackendKind::WindowsPowerShell
+        };
+        if !compat {
+            return Err("o backend do registro não é o deste sistema".into());
+        }
+        if self.connections.len() > 32 {
+            return Err("conexões demais".into());
+        }
+        for c in &self.connections {
+            if !known_ids.contains(&c.id) {
+                return Err(format!("a conexão {:?} não existe mais", short(&c.id)));
+            }
+            #[cfg(windows)]
+            if !crate::sysutil::is_safe_ps_alias(&c.id) {
+                return Err(format!("alias inválido: {:?}", short(&c.id)));
+            }
+            if c.original_ipv4_dns.len() > 8 || c.original_ipv6_dns.len() > 8 {
+                return Err("DNS demais numa conexão".into());
+            }
+        }
+        if let Some(t) = &self.previous_resolv_conf {
+            validate_resolv_conf(t)?;
         }
         Ok(())
     }
+}
+
+fn short(s: &str) -> String {
+    s.chars().take(40).collect()
+}
+
+/// `resolv.conf` antigo: só `nameserver <ip>`, `search`, `domain` e `options` (e comentários),
+/// até 4 KB, sem bytes de controle.
+pub fn validate_resolv_conf(text: &str) -> std::result::Result<(), String> {
+    if text.len() > 4096 {
+        return Err("o resolv.conf guardado passa de 4 KB".into());
+    }
+    for line in text.lines() {
+        let l = line.trim();
+        if l.is_empty() || l.starts_with('#') || l.starts_with(';') {
+            continue;
+        }
+        if l.chars().any(|c| c.is_control() && c != '\t') {
+            return Err("o resolv.conf guardado tem caracteres de controle".into());
+        }
+        let mut it = l.split_whitespace();
+        match it.next() {
+            Some("nameserver") => {
+                let ok = it
+                    .next()
+                    .and_then(|ip| ip.split('%').next())
+                    .is_some_and(|ip| ip.parse::<std::net::IpAddr>().is_ok())
+                    && it.next().is_none();
+                if !ok {
+                    return Err(format!("linha nameserver inválida: {:?}", short(l)));
+                }
+            }
+            Some("search") | Some("domain") | Some("options") => {}
+            _ => {
+                return Err(format!(
+                    "linha não permitida no resolv.conf: {:?}",
+                    short(l)
+                ))
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -595,5 +654,81 @@ mod backup_tests {
             sanitize_original_dns6(vec![CLOUDFLARE_IPV6[0], fixo], false),
             (vec![fixo], false)
         );
+    }
+}
+
+#[cfg(test)]
+mod legacy_tests {
+    use super::*;
+
+    fn ids(l: &[&str]) -> Vec<String> {
+        l.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn base() -> DnsStateManifest {
+        let mut m = DnsStateManifest::new(BackendKind::NetworkManager);
+        m.connections.push(ConnectionBackup {
+            id: "uuid-1".into(),
+            original_ipv4_dns: vec![Ipv4Addr::new(192, 168, 0, 1)],
+            original_ipv6_dns: vec![],
+            was_dhcp_ipv4: false,
+            was_dhcp_ipv6: true,
+        });
+        m
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn manifesto_antigo_valido_passa() {
+        let mut m = base();
+        m.previous_resolv_conf =
+            Some("# Generated by NetworkManager\nsearch lan\nnameserver 192.168.0.1\nnameserver fe80::1%eth0\noptions edns0\n".into());
+        assert_eq!(m.validate_legacy(&ids(&["uuid-1"])), Ok(()));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn manifesto_antigo_com_conexao_que_nao_existe_e_recusado() {
+        let m = base();
+        let e = m.validate_legacy(&ids(&["outra"])).unwrap_err();
+        assert!(e.contains("não existe mais"), "{e}");
+        assert!(m.validate_legacy(&[]).is_err());
+    }
+
+    #[test]
+    fn resolv_conf_so_aceita_linhas_permitidas_ate_4kb() {
+        assert!(validate_resolv_conf(
+            "nameserver 1.1.1.1\n\n# c\n; c\nsearch a.b c.d\ndomain x\noptions rotate\n"
+        )
+        .is_ok());
+        for ruim in [
+            "nameserver 1.1.1.1 extra",
+            "nameserver abc",
+            "nameserver",
+            "curl x | sh",
+            "nameserver 1.1.1.1\n$(rm -rf /)",
+            "nameserver 1.1.1.1\u{0}",
+        ] {
+            assert!(validate_resolv_conf(ruim).is_err(), "{ruim:?}");
+        }
+        assert!(validate_resolv_conf(&"#".repeat(4097)).is_err());
+        assert!(validate_resolv_conf(&"#".repeat(4096)).is_ok());
+    }
+
+    #[test]
+    fn manifesto_antigo_de_outro_sistema_ou_com_dns_demais_e_recusado() {
+        let mut m = base();
+        m.backend = if cfg!(windows) {
+            BackendKind::NetworkManager
+        } else {
+            BackendKind::WindowsPowerShell
+        };
+        assert!(m.validate_legacy(&ids(&["uuid-1"])).is_err());
+        #[cfg(not(windows))]
+        {
+            let mut m = base();
+            m.connections[0].original_ipv4_dns = vec![Ipv4Addr::new(9, 9, 9, 9); 9];
+            assert!(m.validate_legacy(&ids(&["uuid-1"])).is_err());
+        }
     }
 }

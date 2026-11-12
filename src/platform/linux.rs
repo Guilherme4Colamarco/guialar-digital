@@ -313,6 +313,39 @@ fn cloudflare_dns_active_with(r: &dyn CommandRunner) -> bool {
     false
 }
 
+/// UUIDs de todas as conexões do NetworkManager agora (para validar o manifesto antigo).
+fn known_connection_ids_with(r: &dyn CommandRunner) -> Vec<String> {
+    if !r.command_exists("nmcli") {
+        return Vec::new();
+    }
+    r.run(&Cmd::output(
+        "nmcli",
+        &["-t", "-f", "UUID", "connection", "show"],
+    ))
+    .ok()
+    .map(|o| {
+        String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
+/// Migração do manifesto antigo da beta (ADR-031); ver `platform::migrate_legacy`.
+pub fn migrate_legacy() -> Result<Option<String>> {
+    migrate_legacy_with(&RealRunner)
+}
+
+pub(super) fn migrate_legacy_with(r: &dyn CommandRunner) -> Result<Option<String>> {
+    super::migrate_legacy_generic(
+        &known_connection_ids_with(r),
+        |m| revert_dns_with(r, m),
+        || revert_dns_fallback_with(r),
+    )
+}
+
 /// Reversão de emergência: sem manifesto (corrompido/apagado) volta o DNS ao automático.
 pub fn revert_dns_fallback() -> Result<()> {
     revert_dns_fallback_with(&RealRunner)
@@ -374,6 +407,7 @@ pub(super) fn switch_mode_with(
         );
     }
     let _lock = crate::sysutil::OpLock::acquire()?;
+    DnsStateManifest::preflight()?;
     match manifest.backend {
         BackendKind::NetworkManager => {
             let mode = current_mode();
@@ -436,6 +470,8 @@ pub(super) fn apply_dns_with(r: &dyn CommandRunner) -> Result<()> {
         );
     }
     let _lock = crate::sysutil::OpLock::acquire()?;
+    // se o estado não puder ser guardado com segurança, nada do DNS é alterado (ADR-031)
+    DnsStateManifest::preflight()?;
     let backend = detect_active_backend_with(r);
     let mut manifest = DnsStateManifest::new(backend.clone());
 

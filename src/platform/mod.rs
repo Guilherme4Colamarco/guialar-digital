@@ -88,6 +88,55 @@ pub fn apply_dns() -> Result<()> {
     }
 }
 
+/// Migra o manifesto antigo da beta, que ficava na área do usuário (ADR-031): só o `revert`
+/// elevado o lê, uma vez, e só depois de validar (a conexão existe agora, DNS são IPs,
+/// `previous_resolv_conf` só tem linhas permitidas). Válido: desfaz e apaga o antigo. Inválido:
+/// não usa nada dele, avisa e volta o DNS ao automático. Link ou dono diferente: ignora.
+/// `Ok(None)` = não há registro antigo (ou ele foi ignorado).
+pub fn migrate_legacy() -> Result<Option<String>> {
+    #[cfg(target_os = "linux")]
+    return linux::migrate_legacy();
+    #[cfg(target_os = "windows")]
+    return windows::migrate_legacy();
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    Ok(None)
+}
+
+pub(crate) fn migrate_legacy_generic(
+    known: &[String],
+    revert: impl FnOnce(&DnsStateManifest) -> Result<()>,
+    fallback: impl FnOnce() -> Result<()>,
+) -> Result<Option<String>> {
+    let legacy = match DnsStateManifest::load_legacy() {
+        Ok(None) => return Ok(None),
+        Ok(Some(m)) => m,
+        Err(e) => {
+            eprintln!("⚠️ Ignorando o registro antigo da proteção: {e:#}");
+            return Ok(None);
+        }
+    };
+    match legacy.validate_legacy(known) {
+        Ok(()) => {
+            println!("🔄 Restaurando a partir do registro antigo (beta)...");
+            revert(&legacy)?;
+            DnsStateManifest::remove_legacy();
+            Ok(Some(
+                "Configurações de DNS restauradas com sucesso (registro antigo migrado).".into(),
+            ))
+        }
+        Err(motivo) => {
+            eprintln!(
+                "⚠️ O registro antigo da proteção não passou na validação ({motivo}); não vou usá-lo. Voltando o DNS ao padrão da rede."
+            );
+            DnsStateManifest::remove_legacy();
+            fallback()?;
+            Ok(Some(
+                "DNS restaurado para o padrão da rede (o registro antigo era inválido).".into(),
+            ))
+        }
+    }
+}
+
 pub fn revert_dns(manifest: &DnsStateManifest) -> Result<()> {
     let _guard = crate::sysutil::guard_operation()?;
     #[cfg(target_os = "linux")]

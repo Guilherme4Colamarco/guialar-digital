@@ -396,15 +396,14 @@ mod qa_tests {
 
     #[cfg(unix)]
     #[test]
-    fn manifesto_so_o_dono_le() {
+    fn manifesto_do_sistema_e_legivel_por_todos_e_a_pasta_nao_e_gravavel() {
         use std::os::unix::fs::PermissionsExt;
         let s = Sandbox::new("perm");
         manifesto_completo().save_atomic().unwrap();
-        let mode = std::fs::metadata(s.manifest_path())
-            .unwrap()
-            .permissions()
-            .mode();
-        assert_eq!(mode & 0o777, 0o600);
+        let modo = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        // ADR-031: o usuário comum só LÊ o estado (0644 numa pasta 0755 do sistema)
+        assert_eq!(modo(&s.manifest_path()), 0o644);
+        assert_eq!(modo(s.manifest_path().parent().unwrap()), 0o755);
     }
 
     #[test]

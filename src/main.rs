@@ -10,6 +10,7 @@ mod integration;
 mod platform;
 mod policy;
 mod safefs;
+mod statedir;
 mod sysutil;
 #[cfg(test)]
 mod testenv;
@@ -309,6 +310,13 @@ fn revert_flow() -> anyhow::Result<String> {
             Ok("Configurações de DNS restauradas com sucesso para o estado anterior.".into())
         }
         Ok(None) => {
+            // Beta: o manifesto ficava na área do usuário. O processo elevado o valida e o
+            // migra uma vez; nunca mais é gravado ali (ADR-031).
+            if sysutil::is_privileged() {
+                if let Some(msg) = platform::migrate_legacy()? {
+                    return Ok(msg);
+                }
+            }
             if platform::cloudflare_dns_active() {
                 println!("🔄 O DNS ainda usa o filtro, mas não há registro: voltando ao padrão da rede...");
                 platform::revert_dns_fallback()?;

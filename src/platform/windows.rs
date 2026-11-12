@@ -155,6 +155,8 @@ fn apply_core() -> Result<()> {
 
 fn apply_core_with(r: &dyn CommandRunner) -> Result<()> {
     let _lock = crate::sysutil::OpLock::acquire()?;
+    // se o estado não puder ser guardado com segurança, nada do DNS é alterado (ADR-031)
+    DnsStateManifest::preflight()?;
     let interfaces = list_active_interfaces(r)?;
     if interfaces.is_empty() {
         bail!("Nenhuma interface de rede ativa encontrada no Windows");
@@ -239,6 +241,18 @@ fn restore_connections(r: &dyn CommandRunner, manifest: &DnsStateManifest) -> Re
         );
     }
     Ok(())
+}
+
+/// Aliases das interfaces de rede de agora (para validar o manifesto antigo).
+pub fn known_connection_ids() -> Vec<String> {
+    list_active_interfaces(&RealRunner)
+        .map(|v| v.into_iter().map(|(alias, _)| alias).collect())
+        .unwrap_or_default()
+}
+
+/// Migração do manifesto antigo da beta (ADR-031); ver `platform::migrate_legacy`.
+pub fn migrate_legacy() -> Result<Option<String>> {
+    super::migrate_legacy_generic(&known_connection_ids(), revert_dns, revert_dns_fallback)
 }
 
 fn list_active_interfaces(r: &dyn CommandRunner) -> Result<Vec<(String, u32)>> {

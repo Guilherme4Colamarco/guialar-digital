@@ -11,6 +11,24 @@ static ENV_LOCK: Mutex<()> = Mutex::new(());
 thread_local! {
     static ACTIVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static LOCK_DIR: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+    static STATE_DIR: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+    static TRUSTED_UID: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) };
+}
+
+/// UID que o teste manda tratar como «dono do sistema» (padrão: o usuário que roda o teste),
+/// para provar a recusa de pasta/arquivo de outro dono sem precisar ser root.
+pub fn trusted_uid() -> Option<u32> {
+    TRUSTED_UID.with(|u| u.get())
+}
+
+pub fn set_trusted_uid(uid: Option<u32>) {
+    TRUSTED_UID.with(|u| u.set(uid));
+}
+
+/// Pasta de estado do «sistema» neste teste (`/var/lib/guialar` ou `%ProgramData%\GuiaLar`):
+/// uma pasta dentro do `Sandbox`, que ainda NÃO existe (o código de produção a cria).
+pub fn state_dir() -> Option<PathBuf> {
+    STATE_DIR.with(|d| d.borrow().clone())
 }
 
 /// Pasta da trava de operação neste teste (só dentro de um `Sandbox`). Evita mexer em
@@ -96,6 +114,8 @@ impl Sandbox {
         std::env::set_var("HOME", &dir);
         std::env::set_var("LOCALAPPDATA", &dir);
         LOCK_DIR.with(|d| *d.borrow_mut() = Some(dir.join("tmp")));
+        STATE_DIR.with(|d| *d.borrow_mut() = Some(dir.join("sistema").join("GuiaLar")));
+        std::fs::create_dir_all(dir.join("sistema")).unwrap();
         // Rodando como root via sudo/pkexec, o home sairia do /etc/passwd e não do HOME.
         for v in [
             "APPIMAGE",
@@ -132,6 +152,8 @@ impl Drop for Sandbox {
     fn drop(&mut self) {
         ACTIVE.with(|a| a.set(false));
         LOCK_DIR.with(|d| *d.borrow_mut() = None);
+        STATE_DIR.with(|d| *d.borrow_mut() = None);
+        TRUSTED_UID.with(|u| u.set(None));
         for (v, val) in &self.old {
             match val {
                 Some(x) => std::env::set_var(v, x),

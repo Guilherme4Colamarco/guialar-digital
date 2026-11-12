@@ -449,6 +449,77 @@ pub fn open_url(url: &str) {
     }
 }
 
+// --- Pasta de estado do sistema (ADR-031): ProgramData, DACL protegida, dono Administradores.
+
+#[repr(C)]
+pub struct GUID {
+    pub data1: u32,
+    pub data2: u16,
+    pub data3: u16,
+    pub data4: [u8; 8],
+}
+
+/// `FOLDERID_ProgramData` {62AB5D82-FDC1-4DC3-A9DD-070D1D495D97}.
+pub const FOLDERID_PROGRAMDATA: GUID = GUID {
+    data1: 0x62AB_5D82,
+    data2: 0xFDC1,
+    data3: 0x4DC3,
+    data4: [0xA9, 0xDD, 0x07, 0x0D, 0x1D, 0x49, 0x5D, 0x97],
+};
+
+#[repr(C)]
+pub struct SECURITY_ATTRIBUTES {
+    pub nLength: u32,
+    pub lpSecurityDescriptor: *mut c_void,
+    pub bInheritHandle: i32,
+}
+
+pub const SDDL_REVISION_1: u32 = 1;
+pub const SE_FILE_OBJECT: u32 = 1;
+pub const OWNER_SECURITY_INFORMATION: u32 = 1;
+
+#[link(name = "shell32")]
+extern "system" {
+    pub fn SHGetKnownFolderPath(
+        rfid: *const GUID,
+        flags: u32,
+        token: HANDLE,
+        path: *mut *mut u16,
+    ) -> i32;
+}
+
+#[link(name = "ole32")]
+extern "system" {
+    pub fn CoTaskMemFree(p: *mut c_void);
+}
+
+#[link(name = "kernel32")]
+extern "system" {
+    pub fn CreateDirectoryW(path: *const u16, sa: *const SECURITY_ATTRIBUTES) -> i32;
+    pub fn LocalFree(h: *mut c_void) -> *mut c_void;
+}
+
+#[link(name = "advapi32")]
+extern "system" {
+    pub fn ConvertStringSecurityDescriptorToSecurityDescriptorW(
+        sddl: *const u16,
+        revision: u32,
+        sd: *mut *mut c_void,
+        size: *mut u32,
+    ) -> i32;
+    pub fn GetNamedSecurityInfoW(
+        name: *const u16,
+        object_type: u32,
+        info: u32,
+        owner: *mut *mut c_void,
+        group: *mut *mut c_void,
+        dacl: *mut *mut c_void,
+        sacl: *mut *mut c_void,
+        sd: *mut *mut c_void,
+    ) -> u32;
+    pub fn ConvertSidToStringSidW(sid: *mut c_void, s: *mut *mut u16) -> i32;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

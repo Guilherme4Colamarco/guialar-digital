@@ -282,8 +282,11 @@ fn lock_path_raw() -> PathBuf {
     }
     #[cfg(not(target_os = "linux"))]
     {
-        // Windows: continua em `%TEMP%` do processo (a trava é do administrador; ver ADR-030).
-        std::env::temp_dir().join("guialar-op.lock")
+        // Windows: na pasta de estado do sistema (`%ProgramData%\GuiaLar`, ADR-031), a mesma
+        // para a conta padrão e para o administrador que digita a senha.
+        crate::statedir::state_dir()
+            .map(|d| d.join("op.lock"))
+            .unwrap_or_else(|_| std::env::temp_dir().join("guialar-op.lock"))
     }
 }
 
@@ -316,8 +319,12 @@ fn ensure_lock_dir(lock: &Path) -> Result<()> {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn ensure_lock_dir(_lock: &Path) -> Result<()> {
-    Ok(())
+fn ensure_lock_dir(lock: &Path) -> Result<()> {
+    // Windows: cria (ou refaz) a pasta de estado com a ACL protegida antes da trava.
+    match (lock.parent(), crate::statedir::state_dir()) {
+        (Some(p), Ok(dir)) if p == dir => crate::statedir::ensure_dir().map(|_| ()),
+        _ => Ok(()),
+    }
 }
 
 #[cfg(test)]
@@ -391,6 +398,15 @@ impl OpLock {
         let path = lock_path();
         if HELD.load(std::sync::atomic::Ordering::SeqCst) || !path.exists() || lock_is_stale(&path)
         {
+            return Ok(());
+        }
+        // Só respeita a trava se ela é do sistema (dono confiável): uma trava plantada por
+        // uma conta comum não pode bloquear o apply e o revert para sempre (ADR-031).
+        if !crate::statedir::is_trusted(&path) {
+            eprintln!(
+                "⚠️ Ignorando a trava {}: o dono não é o do sistema.",
+                path.display()
+            );
             return Ok(());
         }
         bail!(LOCK_BUSY)

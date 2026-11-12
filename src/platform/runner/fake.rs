@@ -230,6 +230,13 @@ impl FakeRunner {
                 }
                 Ok(ok(out))
             }
+            ["nmcli", "-t", "-f", "UUID", "connection", "show"] => {
+                let mut out = String::new();
+                for u in s.nm.keys() {
+                    out += &format!("{u}\n");
+                }
+                Ok(ok(out))
+            }
             ["nmcli", "-t", "-f", "ipv4.dns,ipv4.ignore-auto-dns", "connection", "show", u] => {
                 let p = s.nm.get(*u).ok_or_else(|| io::Error::other("conexão?"))?;
                 Ok(ok(format!(

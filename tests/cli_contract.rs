@@ -87,7 +87,8 @@ fn apply_twice_keeps_original_manifest_untouched() {
         return;
     }
     let home = std::env::temp_dir().join(format!("guialar-dup-{}", std::process::id()));
-    let dir = home.join(".config").join("guialar");
+    // O estado mora numa pasta do sistema (ADR-031); o build de depuração aceita uma de mentira.
+    let dir = home.join("sistema").join("GuiaLar");
     std::fs::create_dir_all(&dir).unwrap();
     let manifest = r#"{"backend":"DirectResolvConf","applied_at_utc":"1","connections":[],"previous_resolv_conf":"nameserver 9.9.9.9\n"}"#;
     std::fs::write(dir.join("state.json"), manifest).unwrap();
@@ -97,6 +98,7 @@ fn apply_twice_keeps_original_manifest_untouched() {
     let out = bin()
         .arg("apply")
         .env("HOME", &home)
+        .env("GUIALAR_TEST_STATE_DIR", &dir)
         .env("PATH", &empty_bin)
         // DNS "configurado" fixo (só em build de depuração): o do modo família, sem ler a
         // rede do host. Com DNS de fora o apply reaplicaria em vez de dizer "já está ativa".
