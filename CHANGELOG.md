@@ -15,6 +15,7 @@ Primeira versão pública em Rust. Substitui o Java na `main`. O Java permanece 
 - Windows: o `policies.json` do Firefox não atravessa junção nem link, e o Firefox só é configurado em `Program Files` (ADR-030). A pasta de estado em `%ProgramData%\GuiaLar` é sempre refeita com a ACL protegida (mesmo se já existia com ACL herdada), uma pasta de outro dono é assumida (não travada por um handle aberto) e uma trava de dono alheio é ignorada.
 - Windows: «DHCP ou fixo» passa a vir do `NameServer` do registro (IPv4 e IPv6), não do DNS efetivo. Antes, numa interface DHCP, desativar a proteção gravava o DNS do roteador como se fosse fixo e o notebook perdia a navegação em outra rede.
 - Bloqueador de anúncios nos navegadores (Windows): uBlock Origin Lite no Chrome, Edge e Brave, com o ID de cada loja (o Edge usa o da loja do Edge); uBlock Origin no Firefox. Um valor `9101` de outra política não é sobrescrito, e a falha em um navegador não impede os outros. No Linux, a página da extensão abre na loja certa. Chromium no Windows não é detectado.
+- «Sem permissão para ler o registro» agora aponta a pasta de estado de verdade (`/var/lib/guialar` no Linux, `%ProgramData%\GuiaLar` no Windows) em vez da pasta pessoal da beta, e não manda mais dar a posse ao usuário (o programa deixaria de confiar no registro).
 - Trava de operação (`OpLock`) com PID; trava órfã não prende o programa.
 - Instância única da janela. Subcomandos internos exigem administrador.
 

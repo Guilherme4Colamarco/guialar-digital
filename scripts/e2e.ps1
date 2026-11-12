@@ -12,7 +12,7 @@ $ErrorActionPreference = 'Continue'
 $Probe = 'nudity.testcategory.com'
 $FamilyA = '1.1.1.3'
 $FamilyB = '1.0.0.3'
-$State = Join-Path $env:LOCALAPPDATA 'GuiaLar\state.json'
+$State = Join-Path $env:ProgramData 'GuiaLar\state.json'  # ADR-031: pasta do sistema (a beta usava %LOCALAPPDATA%)
 $LogDir = Join-Path $env:TEMP ('guialar-e2e-' + (Get-Date -Format 'yyyyMMdd-HHmmss'))
 New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
 $script:Failed = $false

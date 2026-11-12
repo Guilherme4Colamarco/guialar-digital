@@ -15,6 +15,15 @@ pub enum ProtectionStatus {
     Unprotected,
 }
 
+/// O que fazer quando o usuário não consegue LER o registro (ADR-031: o estado fica numa pasta do
+/// sistema, do root/Administradores; o usuário só lê). Dar a posse ao usuário (`chown`) NÃO é o
+/// conserto: o programa deixaria de confiar no registro por não ser mais do sistema.
+#[cfg(windows)]
+const PERMISSION_HINT: &str =
+    "Peça a um administrador para conferir se o seu usuário pode ler a pasta %ProgramData%\\GuiaLar.";
+#[cfg(not(windows))]
+const PERMISSION_HINT: &str = "Rode: sudo chmod 755 /var/lib/guialar && sudo chmod 644 /var/lib/guialar/state.json (a pasta e o arquivo têm de continuar sendo do root).";
+
 /// Falta de permissão NÃO é arquivo corrompido (o arquivo pode ser de root).
 pub fn describe_load_error(e: &anyhow::Error) -> String {
     // falha de E/S (arquivo aberto por outro programa): não é registro corrompido
@@ -26,7 +35,7 @@ pub fn describe_load_error(e: &anyhow::Error) -> String {
             .is_some_and(|io| io.kind() == std::io::ErrorKind::PermissionDenied)
     });
     if denied {
-        format!("Sem permissão para ler o registro da proteção ({e:#}). Rode: sudo chown -R $USER ~/.config/guialar")
+        format!("Sem permissão para ler o registro da proteção ({e:#}). {PERMISSION_HINT}")
     } else {
         format!("Manifesto corrompido: {e}")
     }
@@ -269,7 +278,17 @@ mod qa_tests {
     fn permissao_negada_nao_e_corrompido() {
         let io = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
         let e = anyhow::Error::new(io).context("Falha ao ler manifesto");
-        assert!(!describe_load_error(&e).starts_with("Manifesto corrompido"));
+        let d = describe_load_error(&e);
+        assert!(!d.starts_with("Manifesto corrompido"));
+        // a dica aponta o lugar ATUAL do estado (ADR-031), nunca a pasta pessoal da beta,
+        // e não manda dar a posse ao usuário (o programa deixaria de confiar no registro)
+        assert!(!d.contains(".config") && !d.contains("chown"), "{d}");
+        if cfg!(windows) {
+            assert!(d.contains("%ProgramData%\\GuiaLar"), "{d}");
+        } else {
+            assert!(d.contains("/var/lib/guialar"), "{d}");
+            assert!(d.contains("chmod 755") && d.contains("chmod 644"), "{d}");
+        }
         let e = anyhow::anyhow!("json ruim");
         assert!(describe_load_error(&e).starts_with("Manifesto corrompido"));
     }

@@ -1,7 +1,8 @@
 //! Módulo de configuração global e persistência de estado.
 //!
 //! Guarda os IPs oficiais da Cloudflare for Families (IPv4 e IPv6)
-//! e gerencia o manifesto atômico de reversão em formato JSON (~/.config/guialar/state.json).
+//! e gerencia o manifesto atômico de reversão em formato JSON (`/var/lib/guialar/state.json` no
+//! Linux, `%ProgramData%\GuiaLar\state.json` no Windows; ADR-031).
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
