@@ -67,6 +67,6 @@ Licença dupla: [MIT](LICENSE-MIT) ou [Apache-2.0](LICENSE-APACHE), à sua escol
 
 ## Autor
 
-Guilherme Amaral Colamarco Resende de Melo — <guicolamarco150@gmail.com>
+Guilherme Amaral Colamarco Resende de Melo — <88679520+Guilherme4Colamarco@users.noreply.github.com>
 
 Projeto acadêmico: **Projetos Integrados I** (GuiaLar Digital).
