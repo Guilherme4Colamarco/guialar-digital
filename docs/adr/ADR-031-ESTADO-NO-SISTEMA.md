@@ -44,3 +44,7 @@ Os itens 1 a 3 da ADR-030 deixam de ser necessários para o estado: o problema s
   - `previous_resolv_conf` só pode ter linhas `nameserver`, `search`, `domain` e `options`, até 4 KB.
   - Se qualquer item falhar, não aplica nada do manifesto: cai no fallback de DNS automático e avisa.
   - A migração sai do código na v0.4.0.
+
+## Emenda 2 (2026-11-12, medida na win11 no 98e2190)
+- `SetNamedSecurityInfoW` pelo nome não seguiu junção nem link de pasta na medida. O handle aberto com `OPEN_REPARSE_POINT` fica como defesa em profundidade.
+- Limite aceito: um `op.lock` ou `state.json` mantido aberto sem `FILE_SHARE_DELETE` por um processo de outra conta não pode ser apagado. Nesse caso o programa para com erro claro antes de tocar no DNS e se recupera quando o handle fecha. É negação de serviço local, enquanto o processo do intruso viver. A integridade do registro depende do N1 (REVIEW-4cea602): DACL explícita no temp e no op.lock e `is_trusted` conferindo a DACL; o resíduo aceito é apagar o registro, não forjá-lo. Não usar `MOVEFILE_DELAY_UNTIL_REBOOT`. Nomes ou pastas dinâmicos ficam fora da beta.
