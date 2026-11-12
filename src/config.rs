@@ -147,23 +147,31 @@ pub enum BackendKind {
 }
 
 /// DNS "original" nunca pode ser o filtro do próprio GuiaLar (apply sem manifesto sobre
-/// rede já filtrada): nesse caso a interface é tratada como DHCP, sem IPs fixos.
+/// rede já filtrada).
+///
+/// - Os IPs de filtro saem da lista; os do usuário ficam (e voltam no revert).
+/// - Lista que tinha IPs e só tinha filtro: a interface é tratada como DHCP, sem IPs fixos.
+/// - Lista vazia desde o início: mantém `was_dhcp` como foi lido (no NetworkManager,
+///   `ignore-auto-dns=yes` sem IP fixo é uma configuração do usuário e tem de voltar igual).
 pub fn sanitize_original_dns(ips: Vec<Ipv4Addr>, was_dhcp: bool) -> (Vec<Ipv4Addr>, bool) {
-    // Sem IPs fixos não há o que restaurar além do automático.
-    if ips.is_empty() || ips.iter().all(is_filter_ipv4) {
+    let tinha = !ips.is_empty();
+    let fixos: Vec<Ipv4Addr> = ips.into_iter().filter(|ip| !is_filter_ipv4(ip)).collect();
+    if tinha && fixos.is_empty() {
         (Vec::new(), true)
     } else {
-        (ips, was_dhcp)
+        (fixos, was_dhcp)
     }
 }
 
 /// Igual a [`sanitize_original_dns`], para IPv6.
 #[cfg_attr(windows, allow(dead_code))]
 pub fn sanitize_original_dns6(ips: Vec<Ipv6Addr>, was_dhcp: bool) -> (Vec<Ipv6Addr>, bool) {
-    if ips.is_empty() || ips.iter().all(is_filter_ipv6) {
+    let tinha = !ips.is_empty();
+    let fixos: Vec<Ipv6Addr> = ips.into_iter().filter(|ip| !is_filter_ipv6(ip)).collect();
+    if tinha && fixos.is_empty() {
         (Vec::new(), true)
     } else {
-        (ips, was_dhcp)
+        (fixos, was_dhcp)
     }
 }
 
@@ -432,10 +440,18 @@ mod qa_tests {
             sanitize_original_dns(casa.clone(), false),
             (casa.clone(), false)
         );
+        // lista mista: o IP de filtro sai e só o do usuário volta no revert (N2)
         let misto = vec![CLOUDFLARE_IPV4[0], Ipv4Addr::new(9, 9, 9, 9)];
-        assert_eq!(sanitize_original_dns(misto.clone(), false), (misto, false));
+        assert_eq!(
+            sanitize_original_dns(misto, false),
+            (vec![Ipv4Addr::new(9, 9, 9, 9)], false)
+        );
         assert_eq!(sanitize_original_dns(Vec::new(), true), (Vec::new(), true));
-        assert_eq!(sanitize_original_dns(Vec::new(), false), (Vec::new(), true));
+        // `ignore-auto-dns=yes` sem IP fixo é do usuário e não vira DHCP (N1)
+        assert_eq!(
+            sanitize_original_dns(Vec::new(), false),
+            (Vec::new(), false)
+        );
     }
 
     #[test]
@@ -488,7 +504,10 @@ mod qa_tests {
         let misto = vec![CLOUDFLARE_IPV4[0], ADGUARD_IPV4[0]];
         assert_eq!(sanitize_original_dns(misto, false), (Vec::new(), true));
         let casa = vec![Ipv4Addr::new(192, 168, 0, 1), ADGUARD_IPV4[0]];
-        assert_eq!(sanitize_original_dns(casa.clone(), false), (casa, false));
+        assert_eq!(
+            sanitize_original_dns(casa, false),
+            (vec![Ipv4Addr::new(192, 168, 0, 1)], false)
+        );
     }
 
     #[test]
@@ -559,14 +578,21 @@ mod backup_tests {
     fn sanitize_v6_filtro_vira_automatico_e_fixo_externo_fica() {
         let filtro: Vec<Ipv6Addr> = CLOUDFLARE_IPV6.to_vec();
         assert_eq!(sanitize_original_dns6(filtro, false), (Vec::new(), true));
+        // `ignore-auto-dns=yes` sem IP fixo é do usuário e não vira DHCP (N1)
         assert_eq!(
             sanitize_original_dns6(Vec::new(), false),
-            (Vec::new(), true)
+            (Vec::new(), false)
         );
+        assert_eq!(sanitize_original_dns6(Vec::new(), true), (Vec::new(), true));
         let fixo: Ipv6Addr = "2001:db8::99".parse().unwrap();
         assert_eq!(sanitize_original_dns6(vec![fixo], true), (vec![fixo], true));
         assert_eq!(
             sanitize_original_dns6(vec![fixo], false),
+            (vec![fixo], false)
+        );
+        // lista mista: o filtro sai, o do usuário fica (N2)
+        assert_eq!(
+            sanitize_original_dns6(vec![CLOUDFLARE_IPV6[0], fixo], false),
             (vec![fixo], false)
         );
     }

@@ -952,3 +952,81 @@ fn nm_falha_ao_ler_o_v6_nao_impede_o_apply() {
     let m = manifest();
     assert!(m.connections[0].was_dhcp_ipv6 && m.connections[0].original_ipv6_dns.is_empty());
 }
+
+// ------------------------------- review do dc810d9: ignore-auto-dns=yes sem fixo (N1), filtro
+// misturado com IP do usuário (N2), leitura do v6 que falha (N3)
+
+#[test]
+fn nm_revert_ignore_auto_dns_yes_sem_ip_fixo_volta_como_yes_v4() {
+    let r = FakeRunner::new().with_nm_conn("u", "802-3-ethernet", "", true);
+    ida_e_volta(&r, "nm-n1-v4");
+    assert_eq!(r.nm_prop("u", "ipv4.dns"), "");
+    assert_eq!(r.nm_prop("u", "ipv4.ignore-auto-dns"), "yes");
+}
+
+#[test]
+fn nm_revert_ignore_auto_dns_yes_sem_ip_fixo_volta_como_yes_v6() {
+    let r = FakeRunner::new()
+        .with_nm_conn("u", "802-3-ethernet", "", false)
+        .with_nm_v6("u", "", true);
+    ida_e_volta(&r, "nm-n1-v6");
+    assert_eq!(r.nm_prop("u", "ipv6.dns"), "");
+    assert_eq!(r.nm_prop("u", "ipv6.ignore-auto-dns"), "yes");
+}
+
+#[test]
+fn nm_revert_yes_sem_fixo_grava_o_argv_esperado() {
+    let _s = Sandbox::new("nm-n1-argv");
+    let r = FakeRunner::new()
+        .with_nm_conn("u", "802-3-ethernet", "", true)
+        .with_nm_v6("u", "", true);
+    apply_dns_with(&r).unwrap();
+    r.clear_calls();
+    revert(&r).unwrap();
+    let m = |fam: &str, ign: &str| {
+        v(&[
+            "nmcli",
+            "connection",
+            "modify",
+            "u",
+            &format!("{fam}.dns"),
+            "",
+            &format!("{fam}.ignore-auto-dns"),
+            ign,
+        ])
+    };
+    assert_eq!(r.argvs()[..2], [m("ipv4", "yes"), m("ipv6", "yes")]);
+}
+
+#[test]
+fn nm_lista_mista_de_filtro_e_ip_do_usuario_devolve_so_o_do_usuario() {
+    let r = FakeRunner::new()
+        .with_nm_conn("u", "802-3-ethernet", "1.1.1.3 9.9.9.9", false)
+        .with_nm_v6("u", "2606:4700:4700::1113 2001:db8::99", false);
+    let _s = Sandbox::new("nm-n2");
+    apply_dns_with(&r).unwrap();
+    let m = manifest();
+    assert_eq!(m.connections[0].original_ipv4_dns.len(), 1);
+    assert_eq!(m.connections[0].original_ipv6_dns.len(), 1);
+    revert(&r).unwrap();
+    assert_eq!(
+        r.nm_prop("u", "ipv4.dns"),
+        "9.9.9.9",
+        "sem o filtro do GuiaLar"
+    );
+    assert_eq!(r.nm_prop("u", "ipv6.dns"), "2001:db8::99");
+    assert_eq!(r.nm_prop("u", "ipv4.ignore-auto-dns"), "no");
+}
+
+#[test]
+fn nm_aviso_de_leitura_do_ipv6_cita_a_conexao_e_o_efeito() {
+    let a = aviso_leitura_ipv6("uuid-eth");
+    assert!(a.contains("uuid-eth") && a.contains("IPv6") && a.contains("automático"));
+    // nmcli que sai com erro na leitura do v6 também cai no caso do aviso
+    // (o apply segue com «DHCP, sem fixos»)
+    let _s = Sandbox::new("nm-n3");
+    let r = FakeRunner::new().with_nm_conn("u", "802-3-ethernet", "", false);
+    r.add_fail_argv(&["nmcli", "-t", "-f", "ipv6.dns,ipv6.ignore-auto-dns"]);
+    assert!(inspect_nm_ipv6(&r, "u").is_err());
+    apply_dns_with(&r).unwrap();
+}

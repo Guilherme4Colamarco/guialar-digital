@@ -487,7 +487,22 @@ fn revert_network_manager(r: &dyn CommandRunner, manifest: &DnsStateManifest) ->
                     "no",
                 ],
             )?;
-        } else if !conn.original_ipv4_dns.is_empty() {
+        } else if conn.original_ipv4_dns.is_empty() {
+            // `ignore-auto-dns=yes` sem IP fixo era do usuário: tira o filtro e mantém o `yes`
+            run_privileged_command(
+                r,
+                "nmcli",
+                &[
+                    "connection",
+                    "modify",
+                    uuid,
+                    "ipv4.dns",
+                    "",
+                    "ipv4.ignore-auto-dns",
+                    "yes",
+                ],
+            )?;
+        } else {
             run_privileged_command(
                 r,
                 "nmcli",
@@ -516,7 +531,21 @@ fn revert_network_manager(r: &dyn CommandRunner, manifest: &DnsStateManifest) ->
                     "no",
                 ],
             );
-        } else if !conn.original_ipv6_dns.is_empty() {
+        } else if conn.original_ipv6_dns.is_empty() {
+            let _ = run_privileged_command(
+                r,
+                "nmcli",
+                &[
+                    "connection",
+                    "modify",
+                    uuid,
+                    "ipv6.dns",
+                    "",
+                    "ipv6.ignore-auto-dns",
+                    "yes",
+                ],
+            );
+        } else {
             let _ = run_privileged_command(
                 r,
                 "nmcli",
@@ -580,7 +609,10 @@ fn inspect_nm_connection(r: &dyn CommandRunner, uuid: &str) -> Result<Connection
     let (ips, dhcp) = crate::config::sanitize_original_dns(b.original_ipv4_dns, b.was_dhcp_ipv4);
     // IPv6 numa chamada à parte (o argv do IPv4 acima não muda). Se falhar, cai no padrão
     // antigo («DHCP, sem fixos») em vez de impedir o apply.
-    let (ips6, dhcp6) = inspect_nm_ipv6(r, uuid).unwrap_or((Vec::new(), true));
+    let (ips6, dhcp6) = inspect_nm_ipv6(r, uuid).unwrap_or_else(|_| {
+        eprintln!("{}", aviso_leitura_ipv6(uuid));
+        (Vec::new(), true)
+    });
     let (ips6, dhcp6) = crate::config::sanitize_original_dns6(ips6, dhcp6);
     Ok(ConnectionBackup {
         original_ipv4_dns: ips,
@@ -589,6 +621,12 @@ fn inspect_nm_connection(r: &dyn CommandRunner, uuid: &str) -> Result<Connection
         was_dhcp_ipv6: dhcp6,
         ..b
     })
+}
+
+/// Aviso quando o IPv6 da conexão não pôde ser lido: o apply segue e o revert o devolve ao
+/// automático (só o id da conexão, nenhum dado de rede).
+fn aviso_leitura_ipv6(uuid: &str) -> String {
+    format!("⚠️ Não consegui ler o DNS IPv6 de {uuid}; ao desativar, ele volta ao automático.")
 }
 
 /// `ipv6.dns` e `ipv6.ignore-auto-dns` da conexão: (IPs fixos, aceita o DNS da rede).
@@ -606,6 +644,9 @@ fn inspect_nm_ipv6(r: &dyn CommandRunner, uuid: &str) -> Result<(Vec<Ipv6Addr>, 
             ],
         ))
         .context("Falha ao inspecionar o IPv6 da conexão do NetworkManager")?;
+    if !output.success() {
+        bail!("nmcli saiu com erro ao ler o IPv6 da conexão");
+    }
     Ok(parse_nm_ipv6(&String::from_utf8_lossy(&output.stdout)))
 }
 
