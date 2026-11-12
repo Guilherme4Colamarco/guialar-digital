@@ -18,17 +18,41 @@ use std::path::Path;
 
 use anyhow::Result;
 
-/// `O_NOFOLLOW` (varia por arquitetura): abrir um link no último componente falha.
+/// `O_NOFOLLOW` (varia por arquitetura): abrir um link no último componente falha. O valor à
+/// mão só existe para as arquiteturas conferidas; fora delas o build falha em vez de usar um
+/// valor errado em silêncio.
 #[cfg(target_os = "linux")]
 pub const O_NOFOLLOW: i32 = {
-    // arm/aarch64 usam outro valor que o x86 e o resto (asm-generic).
-    #[cfg(any(target_arch = "aarch64", target_arch = "arm"))]
+    #[cfg(any(
+        target_arch = "aarch64",
+        target_arch = "arm",
+        target_arch = "powerpc",
+        target_arch = "powerpc64"
+    ))]
     {
         0o100000
     }
-    #[cfg(not(any(target_arch = "aarch64", target_arch = "arm")))]
+    #[cfg(any(
+        target_arch = "x86_64",
+        target_arch = "x86",
+        target_arch = "riscv64",
+        target_arch = "riscv32"
+    ))]
     {
         0o400000
+    }
+    #[cfg(not(any(
+        target_arch = "aarch64",
+        target_arch = "arm",
+        target_arch = "powerpc",
+        target_arch = "powerpc64",
+        target_arch = "x86_64",
+        target_arch = "x86",
+        target_arch = "riscv64",
+        target_arch = "riscv32"
+    )))]
+    {
+        compile_error!("O_NOFOLLOW não conferido para esta arquitetura: confira em <asm/fcntl.h>")
     }
 };
 
@@ -97,9 +121,19 @@ mod sys {
     pub const O_RDONLY: c_int = 0;
     pub const O_NONBLOCK: c_int = 0o4000;
     pub const O_CLOEXEC: c_int = 0o2000000;
-    #[cfg(any(target_arch = "aarch64", target_arch = "arm"))]
+    #[cfg(any(
+        target_arch = "aarch64",
+        target_arch = "arm",
+        target_arch = "powerpc",
+        target_arch = "powerpc64"
+    ))]
     pub const O_DIRECTORY: c_int = 0o40000;
-    #[cfg(not(any(target_arch = "aarch64", target_arch = "arm")))]
+    #[cfg(not(any(
+        target_arch = "aarch64",
+        target_arch = "arm",
+        target_arch = "powerpc",
+        target_arch = "powerpc64"
+    )))]
     pub const O_DIRECTORY: c_int = 0o200000;
     pub const O_NOFOLLOW: c_int = super::O_NOFOLLOW;
     pub const AT_FDCWD: c_int = -100;

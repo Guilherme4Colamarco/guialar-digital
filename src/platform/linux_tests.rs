@@ -669,24 +669,42 @@ fn elevacao_em_appimage_apaga_a_copia_mesmo_com_erro() {
 
 #[cfg(unix)]
 #[test]
-fn elevacao_em_appimage_127_diz_que_nao_pode_ser_executado_e_nao_permissao_negada() {
+fn elevacao_em_appimage_pkexec_127_e_senha_negada_e_sudo_127_e_nao_executou() {
     let s = Sandbox::new("elev-appimage-127");
     appimage_de_mentira(&s);
-    for tool in ["pkexec", "sudo"] {
+    // pkexec: 127 = «Not authorized» (senha errada/política) mesmo dentro do AppImage
+    let r = FakeRunner::new()
+        .not_root(&[])
+        .with_command("pkexec")
+        .deny("pkexec", 127);
+    let msg = format!("{:#}", elevate_self(&r, "internal-revert").unwrap_err());
+    assert!(msg.contains("negada") && msg.contains("127"), "{msg}");
+    assert!(!msg.contains("não pôde ser executado"), "{msg}");
+    let (curto, _) = crate::ui::theme::humanize_error(&msg);
+    assert!(
+        curto.contains("permissão de administrador não foi concedida"),
+        "{curto}"
+    );
+    // pkexec 126 (janela fechada): negada, com o código real
+    let r = FakeRunner::new()
+        .not_root(&[])
+        .with_command("pkexec")
+        .deny("pkexec", 126);
+    let msg = format!("{:#}", elevate_self(&r, "internal-revert").unwrap_err());
+    assert!(msg.contains("negada") && msg.contains("126"), "{msg}");
+    // sudo: a sonda passa e a cópia não executa (126/127) → «não pôde ser executado»
+    for code in [126, 127] {
         let r = FakeRunner::new()
             .not_root(&[])
-            .with_command(tool)
-            .with_command("pkexec");
-        // sudo: a sonda `sudo -n true` passa e o comando da cópia sai com 127
-        let r = if tool == "sudo" {
-            r.with_exit_code("sudo", 127, &["sudo", "-n", "true"])
-        } else {
-            r.deny("pkexec", 127)
-        };
-        let e = elevate_self(&r, "internal-revert").unwrap_err();
-        let msg = format!("{e:#}");
-        assert!(msg.contains("não pôde ser executado"), "{tool}: {msg}");
-        assert!(!msg.contains("negada"), "{tool}: {msg}");
+            .with_command("sudo")
+            .with_command("pkexec")
+            .with_exit_code("sudo", code, &["sudo", "-n", "true"]);
+        let msg = format!("{:#}", elevate_self(&r, "internal-revert").unwrap_err());
+        assert!(
+            msg.contains("não pôde ser executado") && msg.contains(&code.to_string()),
+            "{msg}"
+        );
+        assert!(!msg.contains("negada"), "{msg}");
         let (curto, _) = crate::ui::theme::humanize_error(&msg);
         assert!(curto.contains("Nada foi alterado"), "{curto}");
     }
@@ -1270,4 +1288,69 @@ fn migracao_com_manifesto_antigo_como_link_ou_de_outro_dono_e_ignorada() {
     });
     assert!(migrar(&r).unwrap().is_none(), "pasta como link: ignorada");
     assert!(fora.join("state.json").exists(), "nada foi apagado do alvo");
+}
+
+// ------------------------------------------- review do 55251f3: noexec, sobras, umask
+
+#[test]
+fn noexec_e_lido_do_mountinfo_pela_montagem_de_prefixo_mais_longo() {
+    let mi = "\
+22 1 8:1 / / rw,relatime - ext4 /dev/sda1 rw
+30 22 0:25 / /run rw,nosuid,nodev,noexec,mode=755 - tmpfs tmpfs rw
+31 30 0:44 / /run/user/1000 rw,nosuid,nodev,relatime - tmpfs tmpfs rw,size=1k
+32 22 0:50 / /home/u\\040dados rw,noexec - ext4 /dev/sdb1 rw
+";
+    let p = |s: &str| std::path::PathBuf::from(s);
+    // a Void: /run é noexec, mas /run/user/1000 é outra montagem, sem noexec
+    assert!(!noexec_in_mountinfo(mi, &p("/run/user/1000")));
+    assert!(noexec_in_mountinfo(mi, &p("/run/guialar")));
+    assert!(!noexec_in_mountinfo(mi, &p("/home/u/.cache/guialar")));
+    assert!(noexec_in_mountinfo(mi, &p("/home/u dados/x")));
+}
+
+#[test]
+fn base_noexec_e_trocada_e_se_todas_forem_noexec_falha_antes_de_pedir_senha() {
+    let p = |s: &str| std::path::PathBuf::from(s);
+    let noexec = |c: &std::path::Path| c == std::path::Path::new("/run/user/1000");
+    // XDG noexec: cai no ~/.cache
+    let b = pick_base(
+        vec![p("/run/user/1000"), p("/home/u/.cache/guialar")],
+        noexec,
+    )
+    .unwrap();
+    assert_eq!(b, p("/home/u/.cache/guialar"));
+    // todas noexec: erro claro, sem chegar ao pkexec
+    let e = pick_base(vec![p("/run/user/1000")], noexec).unwrap_err();
+    assert!(format!("{e:#}").contains("noexec") && format!("{e:#}").contains("Nada foi alterado"));
+}
+
+#[cfg(unix)]
+#[test]
+fn sobras_antigas_da_copia_sao_limpas_e_o_resto_fica() {
+    let s = Sandbox::new("limpa-sobras");
+    let base = s.dir().join("base");
+    std::fs::create_dir_all(&base).unwrap();
+    let velha = base.join("guialar-0123456789ab");
+    let nova = base.join("guialar-ba9876543210");
+    let outra = base.join("guialar-outro-nome");
+    let arquivo = base.join("guialar-aaaaaaaaaaaa");
+    for d in [&velha, &nova, &outra] {
+        std::fs::create_dir_all(d).unwrap();
+        std::fs::write(d.join("guialar"), "x").unwrap();
+    }
+    std::fs::write(&arquivo, "x").unwrap();
+    let antes = std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 3600);
+    std::fs::File::open(&velha)
+        .unwrap()
+        .set_modified(antes)
+        .unwrap();
+    std::fs::File::open(&outra)
+        .unwrap()
+        .set_modified(antes)
+        .unwrap();
+    clean_stale_copies(&base);
+    assert!(!velha.exists(), "a cópia de mais de 1 h some");
+    assert!(nova.exists(), "a recente fica");
+    assert!(outra.exists(), "nome fora do padrão não é tocado");
+    assert!(arquivo.exists(), "arquivo (não pasta) não é tocado");
 }

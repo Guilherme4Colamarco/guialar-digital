@@ -59,41 +59,118 @@ impl Drop for StagedBinary {
     }
 }
 
-/// Pasta que só o usuário acessa, em memória, onde a cópia vive: `$XDG_RUNTIME_DIR` se for
-/// uma pasta `0700` do próprio usuário; senão `~/.cache/guialar` (também do usuário,
-/// `0700`). Nunca `/tmp`.
-fn staging_base() -> Result<std::path::PathBuf> {
+/// A pasta está num sistema de arquivos montado com `noexec`? Lê `/proc/self/mountinfo` e
+/// pega a montagem de prefixo mais longo. Sem poder ler, assume que não (não bloqueia).
+fn is_noexec(path: &std::path::Path) -> bool {
+    let Ok(text) = std::fs::read_to_string("/proc/self/mountinfo") else {
+        return false;
+    };
+    let real = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    noexec_in_mountinfo(&text, &real)
+}
+
+fn noexec_in_mountinfo(mountinfo: &str, path: &std::path::Path) -> bool {
+    let unescape = |s: &str| s.replace("\\040", " ");
+    mountinfo
+        .lines()
+        .filter_map(|l| {
+            let f: Vec<&str> = l.split_whitespace().collect();
+            let mount = std::path::PathBuf::from(unescape(f.get(4)?));
+            let opts = *f.get(5)?;
+            path.starts_with(&mount)
+                .then_some((mount, opts.split(',').any(|o| o == "noexec")))
+        })
+        .max_by_key(|(m, _)| m.components().count())
+        .is_some_and(|(_, noexec)| noexec)
+}
+
+/// Primeira base executável entre as candidatas; erro claro se todas forem `noexec`.
+fn pick_base(
+    candidates: Vec<std::path::PathBuf>,
+    noexec: impl Fn(&std::path::Path) -> bool,
+) -> Result<std::path::PathBuf> {
+    let mut recusadas = Vec::new();
+    for c in candidates {
+        if noexec(&c) {
+            recusadas.push(c.display().to_string());
+        } else {
+            return Ok(c);
+        }
+    }
+    bail!(
+        "não há pasta privada onde o programa possa ser executado com permissão de administrador (montada com noexec: {}). Nada foi alterado.",
+        recusadas.join(", ")
+    )
+}
+
+/// Pastas privadas do usuário onde a cópia pode viver, em ordem: `$XDG_RUNTIME_DIR` (se for
+/// `0700` do próprio usuário) e `~/.cache/guialar` (também `0700`). Nunca `/tmp`.
+fn staging_candidates() -> Result<Vec<std::path::PathBuf>> {
     use std::os::unix::fs::{DirBuilderExt, MetadataExt};
     let uid = crate::sysutil::current_ids().map(|i| i.0);
     let private = |p: &std::path::Path| {
         std::fs::symlink_metadata(p)
             .is_ok_and(|m| m.file_type().is_dir() && Some(m.uid()) == uid && m.mode() & 0o077 == 0)
     };
+    let mut out = Vec::new();
     if let Some(x) = std::env::var_os("XDG_RUNTIME_DIR").map(std::path::PathBuf::from) {
         if x.is_absolute() && private(&x) {
-            return Ok(x);
+            out.push(x);
         }
     }
     let cache = std::env::var_os("XDG_CACHE_HOME")
         .map(std::path::PathBuf::from)
         .filter(|p| p.is_absolute())
-        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".cache")))
-        .context("sem $XDG_RUNTIME_DIR nem $HOME para guardar a cópia do programa")?;
-    let base = cache.join("guialar");
-    std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(&base)
-        .with_context(|| format!("não foi possível criar {}", base.display()))?;
-    if !private(&base) {
-        bail!("{} não é uma pasta privada do usuário", base.display());
+        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".cache")));
+    if let Some(cache) = cache {
+        let base = cache.join("guialar");
+        if std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&base)
+            .is_ok()
+            && private(&base)
+        {
+            out.push(base);
+        }
     }
-    Ok(base)
+    if out.is_empty() {
+        bail!("sem $XDG_RUNTIME_DIR nem $HOME para guardar a cópia do programa");
+    }
+    Ok(out)
+}
+
+/// Apaga as cópias `guialar-<12 hex>` com mais de 1 h que um `SIGKILL` ou uma queda deixou.
+fn clean_stale_copies(base: &std::path::Path) {
+    let Ok(rd) = std::fs::read_dir(base) else {
+        return;
+    };
+    for e in rd.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        let Some(tag) = name.strip_prefix("guialar-") else {
+            continue;
+        };
+        if tag.len() != 12 || !tag.bytes().all(|b| b.is_ascii_hexdigit()) {
+            continue;
+        }
+        let Ok(m) = std::fs::symlink_metadata(e.path()) else {
+            continue;
+        };
+        let velha = m
+            .modified()
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|d| d.as_secs() > 3600);
+        if m.file_type().is_dir() && velha {
+            let _ = std::fs::remove_dir_all(e.path());
+        }
+    }
 }
 
 fn stage_binary() -> Result<StagedBinary> {
     use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
-    let base = staging_base()?;
+    let base = pick_base(staging_candidates()?, is_noexec)?;
+    clean_stale_copies(&base);
     let mut last = None;
     for _ in 0..8 {
         let mut tag = [0u8; 6];
@@ -172,7 +249,9 @@ fn elevate_self(r: &dyn CommandRunner, subcommand: &str) -> Result<()> {
         let st = run("sudo").context("Falha ao executar sudo")?;
         return match st.code {
             Some(0) => Ok(()),
-            Some(126) | Some(127) if in_appimage => bail!(NOT_EXECUTABLE),
+            Some(code @ (126 | 127)) if in_appimage => bail!(
+                "o AppImage não pôde ser executado com privilégios de administrador (código {code}). Nada foi alterado."
+            ),
             code => bail!("a operação com privilégios falhou (código {code:?})"),
         };
     }
@@ -182,22 +261,14 @@ fn elevate_self(r: &dyn CommandRunner, subcommand: &str) -> Result<()> {
     let status = run("pkexec").context("Falha ao pedir permissão de administrador")?;
     match status.code {
         Some(0) => Ok(()),
-        // 126 = janela fechada ou senha negada; 127 = não autorizado ou não executou
-        Some(127) if in_appimage => bail!(NOT_EXECUTABLE),
-        Some(126) | Some(127) => {
-            bail!(
-                "a permissão de administrador foi negada (código {:?})",
-                status.code
-            )
-        }
+        // O pkexec sai com 126 se a janela é fechada e com 127 em «Not authorized» (senha
+        // errada, política): nunca quer dizer «não executou». O código real vai na mensagem.
+        Some(code @ (126 | 127)) => bail!(
+            "a permissão de administrador foi negada ou a senha não foi aceita (código {code})"
+        ),
         code => bail!("a operação com privilégios falhou (código {code:?})"),
     }
 }
-
-/// Dentro de um AppImage, 126/127 na elevação quer dizer que a cópia do programa não rodou
-/// (por exemplo, pasta sem permissão de execução), não que a senha foi negada.
-const NOT_EXECUTABLE: &str =
-    "o AppImage não pôde ser executado com privilégios de administrador (código 127). Nada foi alterado.";
 
 /// Extrai IPs de um texto qualquer (nameserver, `resolvectl dns`, `nmcli`): tokens que são
 /// IP, sem sufixos `#sni` nem `%iface`. Duplicados saem uma vez.

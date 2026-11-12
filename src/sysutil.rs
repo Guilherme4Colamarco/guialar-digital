@@ -294,7 +294,7 @@ fn lock_path_raw() -> PathBuf {
 /// caminho de produção; nos testes a trava fica no `Sandbox`.
 #[cfg(target_os = "linux")]
 fn ensure_lock_dir(lock: &Path) -> Result<()> {
-    use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
     let Some(dir) = lock.parent().filter(|d| *d == Path::new(LOCK_DIR)) else {
         return Ok(());
     };
@@ -312,6 +312,9 @@ fn ensure_lock_dir(lock: &Path) -> Result<()> {
                 .mode(0o755)
                 .create(dir)
                 .with_context(|| format!("não foi possível criar {}", dir.display()))?;
+            // com `umask 077` a pasta nasceria 0700 e o usuário não leria o PID da trava
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755))
+                .with_context(|| format!("permissões de {}", dir.display()))?;
         }
         Err(e) => return Err(e).context("não foi possível checar a pasta da trava"),
     }
@@ -378,7 +381,14 @@ fn create_lock_file(path: &Path) -> std::io::Result<std::fs::File> {
         use std::os::unix::fs::OpenOptionsExt;
         o.mode(0o644).custom_flags(crate::safefs::O_NOFOLLOW);
     }
-    o.open(path)
+    let f = o.open(path)?;
+    #[cfg(target_os = "linux")]
+    {
+        // a `umask` do root (077) esconderia o PID do usuário: fixa 0644 de verdade
+        use std::os::unix::fs::PermissionsExt;
+        f.set_permissions(std::fs::Permissions::from_mode(0o644))?;
+    }
+    Ok(f)
 }
 
 impl OpLock {
@@ -612,16 +622,57 @@ mod tests {
         std::fs::create_dir_all(&d).unwrap();
         let alvo = d.join("alvo-do-link");
         std::fs::write(&alvo, "intacto").unwrap();
+        // alvo «velho» (mais de 120 s): a versão que seguia o link o trataria como trava
+        // abandonada, apagaria o link e passaria; a nova recusa, sem depender do relógio
+        let velho = std::time::SystemTime::now() - std::time::Duration::from_secs(600);
+        std::fs::File::options()
+            .write(true)
+            .open(&alvo)
+            .unwrap()
+            .set_modified(velho)
+            .unwrap();
         let trava = d.join("op.lock");
         std::os::unix::fs::symlink(&alvo, &trava).unwrap();
-        // um link no lugar da trava não é seguido nem sobrescrito
-        assert!(OpLock::acquire_in(&trava).is_err());
+        let e = OpLock::acquire_in(&trava).err().expect("recusa o link");
+        assert!(format!("{e:#}").contains("link"), "{e:#}");
+        assert!(
+            std::fs::symlink_metadata(&trava)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "o link não foi apagado"
+        );
         assert_eq!(std::fs::read_to_string(&alvo).unwrap(), "intacto");
         std::fs::remove_file(&trava).unwrap();
         // criada pelo processo, com 0644 (o usuário só lê)
         let l = OpLock::acquire_in(&trava).unwrap();
         let mode = std::fs::metadata(&trava).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o644);
+        drop(l);
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn umask_fechada_do_root_nao_esconde_a_trava_do_usuario() {
+        use std::os::unix::fs::PermissionsExt;
+        extern "C" {
+            fn umask(mask: u32) -> u32;
+        }
+        let d = std::env::temp_dir().join(format!("gl-lock-umask-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let trava = d.join("op.lock");
+        // SAFETY: só troca e restaura a máscara do processo (teste de um só fio do Sandbox).
+        let antiga = unsafe { umask(0o077) };
+        let l = OpLock::acquire_in(&trava);
+        // SAFETY: restaura a máscara.
+        unsafe { umask(antiga) };
+        let l = l.unwrap();
+        assert_eq!(
+            std::fs::metadata(&trava).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
         drop(l);
         std::fs::remove_dir_all(&d).ok();
     }
