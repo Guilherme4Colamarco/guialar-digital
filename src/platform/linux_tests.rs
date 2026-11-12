@@ -1354,3 +1354,20 @@ fn sobras_antigas_da_copia_sao_limpas_e_o_resto_fica() {
     assert!(outra.exists(), "nome fora do padrão não é tocado");
     assert!(arquivo.exists(), "arquivo (não pasta) não é tocado");
 }
+
+#[test]
+fn nm_leitura_do_v6_que_sai_com_erro_e_tratada_como_falha_e_nao_bloqueia_o_apply() {
+    // R1 do re-review: o nmcli RODA mas sai com código 1 e saída vazia. Sem a checagem de
+    // `!output.success()` isso virava «DHCP, sem fixos» em silêncio, sem o aviso.
+    let _s = Sandbox::new("nm-r1");
+    let r = FakeRunner::new()
+        .with_nm_conn("u", "802-3-ethernet", "", false)
+        .with_nm_v6("u", "2001:db8::99", false);
+    r.add_exit_argv(&["nmcli", "-t", "-f", "ipv6.dns,ipv6.ignore-auto-dns"], 1);
+    let e = inspect_nm_ipv6(&r, "u").unwrap_err();
+    assert!(format!("{e:#}").contains("saiu com erro"), "{e:#}");
+    // o apply segue: o backup cai no padrão antigo (DHCP, sem fixos) com o aviso
+    apply_dns_with(&r).unwrap();
+    let m = manifest();
+    assert!(m.connections[0].was_dhcp_ipv6 && m.connections[0].original_ipv6_dns.is_empty());
+}

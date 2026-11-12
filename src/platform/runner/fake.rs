@@ -40,6 +40,7 @@ struct State {
     deny: Vec<(String, i32)>,
     fail_argv: Vec<Vec<String>>,
     exit_except: Vec<(String, i32, Vec<String>)>,
+    exit_argv: Vec<(Vec<String>, i32)>,
     on_run: Option<Hook>,
     prefix: Vec<&'static str>,
     root: bool,
@@ -157,6 +158,15 @@ impl FakeRunner {
             .borrow_mut()
             .fail_argv
             .push(prefix.iter().map(|p| p.to_string()).collect());
+    }
+
+    /// O comando cujo argv começa com `prefix` sai com `code` e saída vazia (um `nmcli` que
+    /// roda, mas falha), em vez de um erro de E/S como em `add_fail_argv`.
+    pub fn add_exit_argv(&self, prefix: &[&str], code: i32) {
+        self.st
+            .borrow_mut()
+            .exit_argv
+            .push((prefix.iter().map(|p| p.to_string()).collect(), code));
     }
 
     /// Todo comando de `program` sai com `code`, exceto os que começam com `except` (ex.: a
@@ -360,6 +370,19 @@ impl CommandRunner for FakeRunner {
             .any(|p| real.starts_with(p))
         {
             return Err(io::Error::other("falha simulada pelo FakeRunner"));
+        }
+        let exit_argv = self
+            .st
+            .borrow()
+            .exit_argv
+            .iter()
+            .find(|(p, _)| real.starts_with(p))
+            .map(|(_, c)| *c);
+        if let Some(code) = exit_argv {
+            return Ok(Outcome {
+                code: Some(code),
+                ..Outcome::default()
+            });
         }
         let exited = self
             .st
