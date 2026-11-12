@@ -105,34 +105,70 @@ pub fn write_state(data: &[u8]) -> Result<()> {
     imp::write_atomic(&dir, STATE_FILE, data)
 }
 
+/// Resultado de ler um arquivo do estado por um único handle.
+#[derive(Debug)]
+pub enum ReadOutcome {
+    Missing,
+    /// Link/reparse, não é arquivo comum, ou dono/DACL que não são os do sistema.
+    Untrusted,
+    Data(Vec<u8>),
+}
+
+/// Teto do manifesto lido (o legítimo tem poucos KB).
+const MAX_STATE_BYTES: u64 = 1 << 20;
+
 /// Lê o manifesto; `None` se não existe ou se pasta/arquivo não são de dono confiável (nesse
-/// caso avisa e ignora).
+/// caso avisa e ignora). O arquivo é aberto UMA vez, conferido pelo próprio handle e lido
+/// dele: conferir por nome e abrir por nome depois deixaria uma conta comum, que tenha
+/// reaberto a pasta (resíduo do N1), trocar o arquivo entre a checagem e a leitura (N2).
 pub fn read_state() -> Result<Option<Vec<u8>>> {
     let dir = state_dir()?;
     if std::fs::symlink_metadata(&dir).is_err() {
         return Ok(None);
     }
     let file = dir.join(STATE_FILE);
-    if std::fs::symlink_metadata(&file).is_err() {
-        return Ok(None);
-    }
-    if !is_trusted(&dir) || !is_trusted(&file) {
+    let ignorar = || {
         eprintln!(
             "⚠️ Ignorando {}: o dono não é o do sistema (o registro da proteção não foi usado).",
             file.display()
         );
-        return Ok(None);
+        Ok(None)
+    };
+    if !is_trusted(&dir) {
+        return ignorar();
     }
-    std::fs::read(&file)
-        .map(Some)
-        .with_context(|| format!("Falha ao ler manifesto em {file:?}"))
+    match imp::read_trusted_file(&file)
+        .with_context(|| format!("Falha ao ler manifesto em {file:?}"))?
+    {
+        ReadOutcome::Missing => Ok(None),
+        ReadOutcome::Untrusted => ignorar(),
+        ReadOutcome::Data(b) => Ok(Some(b)),
+    }
+}
+
+/// Tenta de novo por até ~1 s quando o arquivo está momentaneamente aberto por um leitor
+/// (no Windows o leitor do estado não compartilha `DELETE`, então um `rename` ou apagar que
+/// caia no meio de uma leitura recebe acesso negado/violação de compartilhamento).
+fn retry_busy<T>(mut f: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
+    let mut tentativa = 0;
+    loop {
+        match f() {
+            Err(e)
+                if cfg!(windows) && matches!(e.raw_os_error(), Some(5 | 32)) && tentativa < 50 =>
+            {
+                tentativa += 1;
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            r => return r,
+        }
+    }
 }
 
 /// Apaga o manifesto do sistema (só o nome do arquivo).
 pub fn remove_state() -> Result<()> {
     let file = state_file()?;
     match std::fs::symlink_metadata(&file) {
-        Ok(_) => std::fs::remove_file(&file)
+        Ok(_) => retry_busy(|| std::fs::remove_file(&file))
             .with_context(|| format!("Falha ao remover manifesto {file:?}")),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e).with_context(|| format!("Falha ao checar manifesto {file:?}")),
@@ -153,6 +189,33 @@ mod imp {
 
     pub fn unlink_now(path: &Path) -> std::io::Result<()> {
         std::fs::remove_file(path)
+    }
+
+    /// Abre sem seguir link e confere dono/modo pelo próprio descritor; lê dele. (No Linux só o
+    /// root grava na pasta, mas o mesmo desenho vale: nada é aberto duas vezes por nome.)
+    pub fn read_trusted_file(path: &Path) -> std::io::Result<ReadOutcome> {
+        use std::io::Read;
+        let f = match std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(crate::safefs::O_NOFOLLOW)
+            .open(path)
+        {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(ReadOutcome::Missing),
+            // ELOOP: o nome é um link
+            Err(e) if e.raw_os_error() == Some(40) => return Ok(ReadOutcome::Untrusted),
+            Err(e) => return Err(e),
+        };
+        let m = f.metadata()?;
+        if !m.is_file() || m.uid() != trusted_uid() || m.mode() & 0o022 != 0 {
+            return Ok(ReadOutcome::Untrusted);
+        }
+        let mut buf = Vec::new();
+        f.take(MAX_STATE_BYTES + 1).read_to_end(&mut buf)?;
+        if buf.len() as u64 > MAX_STATE_BYTES {
+            return Ok(ReadOutcome::Untrusted);
+        }
+        Ok(ReadOutcome::Data(buf))
     }
 
     /// UID que deve ser dono do estado: root. Nos testes, o usuário que roda o teste (ou o
@@ -375,11 +438,22 @@ mod imp {
         if r != 0 || sd.is_null() {
             return None;
         }
+        let out = decode_dacl(sd, dacl);
+        // SAFETY: `sd` veio do GetNamedSecurityInfoW.
+        unsafe { win32::LocalFree(sd) };
+        out
+    }
+
+    /// Lê a DACL de `sd`/`dacl` (ponteiros vivos do chamador): (protegida?, ACEs).
+    fn decode_dacl(
+        sd: *mut std::ffi::c_void,
+        dacl: *mut std::ffi::c_void,
+    ) -> Option<(bool, Option<Vec<AceInfo>>)> {
         let mut control: u16 = 0;
         let mut rev: u32 = 0;
         // SAFETY: `sd` válido até o LocalFree; saídas válidas.
         let ok = unsafe { win32::GetSecurityDescriptorControl(sd, &mut control, &mut rev) } != 0;
-        let out = ok.then(|| {
+        ok.then(|| {
             let protected = control & win32::SE_DACL_PROTECTED != 0;
             if dacl.is_null() {
                 return (protected, None);
@@ -443,10 +517,102 @@ mod imp {
                 });
             }
             (protected, Some(aces))
-        });
-        // SAFETY: `sd` veio do GetNamedSecurityInfoW.
+        })
+    }
+
+    /// Dono (SID em texto) e DACL de um HANDLE (`GetSecurityInfo`), não de um nome.
+    fn security_of_handle(
+        h: win32::HANDLE,
+    ) -> Option<(Option<String>, bool, Option<Vec<AceInfo>>)> {
+        let mut owner: *mut std::ffi::c_void = std::ptr::null_mut();
+        let mut dacl: *mut std::ffi::c_void = std::ptr::null_mut();
+        let mut sd: *mut std::ffi::c_void = std::ptr::null_mut();
+        // SAFETY: handle válido e ponteiros de saída válidos; `sd` é liberado abaixo.
+        let r = unsafe {
+            win32::GetSecurityInfo(
+                h,
+                win32::SE_FILE_OBJECT,
+                win32::OWNER_SECURITY_INFORMATION | win32::DACL_SECURITY_INFORMATION,
+                &mut owner,
+                std::ptr::null_mut(),
+                &mut dacl,
+                std::ptr::null_mut(),
+                &mut sd,
+            )
+        };
+        if r != 0 || sd.is_null() {
+            return None;
+        }
+        let mut s: *mut u16 = std::ptr::null_mut();
+        // SAFETY: `owner` aponta para dentro de `sd` (vivo até o LocalFree abaixo).
+        let ok = !owner.is_null() && unsafe { win32::ConvertSidToStringSidW(owner, &mut s) } != 0;
+        let owner_text = (ok && !s.is_null()).then(|| from_wide_ptr(s));
+        if !s.is_null() {
+            // SAFETY: veio de ConvertSidToStringSidW.
+            unsafe { win32::LocalFree(s.cast()) };
+        }
+        let out = decode_dacl(sd, dacl).map(|(prot, aces)| (owner_text, prot, aces));
+        // SAFETY: `sd` veio do GetSecurityInfo.
         unsafe { win32::LocalFree(sd) };
         out
+    }
+
+    /// Abre `path` UMA vez (leitura, sem `FILE_SHARE_DELETE` nem de escrita, sem seguir ponto
+    /// de reparse), confere pelo handle que é um arquivo comum de dono Administradores/SYSTEM
+    /// com DACL segura e lê desse mesmo handle. Sem `FILE_SHARE_DELETE`, ninguém renomeia nem
+    /// apaga o arquivo enquanto ele está aberto, então o que foi conferido é o que é lido.
+    pub fn read_trusted_file(path: &Path) -> std::io::Result<ReadOutcome> {
+        use std::io::Read;
+        use std::os::windows::io::{AsRawHandle, FromRawHandle};
+        let w = wide(path.as_os_str());
+        // SAFETY: caminho terminado em NUL; sem atributos de segurança nem modelo.
+        let h = unsafe {
+            win32::CreateFileW(
+                w.as_ptr(),
+                win32::GENERIC_READ | win32::READ_CONTROL,
+                win32::FILE_SHARE_READ,
+                std::ptr::null_mut(),
+                win32::OPEN_EXISTING,
+                win32::FILE_ATTRIBUTE_NORMAL | win32::FILE_FLAG_OPEN_REPARSE_POINT,
+                std::ptr::null_mut(),
+            )
+        };
+        if h == win32::INVALID_HANDLE_VALUE {
+            let e = std::io::Error::last_os_error();
+            return match e.raw_os_error() {
+                Some(2 | 3) => Ok(ReadOutcome::Missing),
+                // pasta no lugar do arquivo (sem BACKUP_SEMANTICS não abre): não é nosso
+                Some(5) if path.is_dir() => Ok(ReadOutcome::Untrusted),
+                _ => Err(e),
+            };
+        }
+        // SAFETY: handle de arquivo válido, de posse única; o `File` o fecha.
+        let f = unsafe { std::fs::File::from_raw_handle(h) };
+        let attrs = raw_handle_attributes(f.as_raw_handle())?;
+        if attrs & win32::FILE_ATTRIBUTE_REPARSE_POINT != 0
+            || attrs & win32::FILE_ATTRIBUTE_DIRECTORY != 0
+        {
+            return Ok(ReadOutcome::Untrusted);
+        }
+        #[cfg(test)]
+        let sandboxed = crate::testenv::sandboxed();
+        #[cfg(not(test))]
+        let sandboxed = false;
+        if !sandboxed {
+            let seguro = security_of_handle(f.as_raw_handle()).is_some_and(|(dono, prot, aces)| {
+                dono.is_some_and(|d| TRUSTED_SIDS.contains(&d.as_str()))
+                    && file_dacl_is_safe(prot, aces.as_deref())
+            });
+            if !seguro {
+                return Ok(ReadOutcome::Untrusted);
+            }
+        }
+        let mut buf = Vec::new();
+        f.take(MAX_STATE_BYTES + 1).read_to_end(&mut buf)?;
+        if buf.len() as u64 > MAX_STATE_BYTES {
+            return Ok(ReadOutcome::Untrusted);
+        }
+        Ok(ReadOutcome::Data(buf))
     }
 
     /// `CREATE_NEW` com dono Administradores e DACL protegida explícita (ver o nível acima).
@@ -679,9 +845,13 @@ mod imp {
 
     /// Atributos lidos DO HANDLE (não do nome), para saber o que de fato foi aberto.
     fn handle_attributes(h: &Handle) -> std::io::Result<u32> {
+        raw_handle_attributes(h.0)
+    }
+
+    fn raw_handle_attributes(h: win32::HANDLE) -> std::io::Result<u32> {
         // SAFETY: `h` é válido; a estrutura é só de saída.
         let mut info: win32::BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
-        if unsafe { win32::GetFileInformationByHandle(h.0, &mut info) } == 0 {
+        if unsafe { win32::GetFileInformationByHandle(h, &mut info) } == 0 {
             return Err(std::io::Error::last_os_error());
         }
         Ok(info.dwFileAttributes)
@@ -928,7 +1098,7 @@ mod imp {
             f.write_all(data)?;
             f.flush()?;
             drop(f);
-            std::fs::rename(&tmp, &target)
+            retry_busy(|| std::fs::rename(&tmp, &target))
                 .with_context(|| format!("Falha ao renomear {tmp:?} para {target:?}"))
         })();
         if result.is_err() {
@@ -946,6 +1116,9 @@ mod imp {
     }
     pub fn unlink_now(path: &Path) -> std::io::Result<()> {
         std::fs::remove_file(path)
+    }
+    pub fn read_trusted_file(_: &Path) -> std::io::Result<ReadOutcome> {
+        Err(std::io::Error::other("plataforma sem suporte"))
     }
     pub fn is_trusted(_: &Path) -> bool {
         false
@@ -1031,6 +1204,42 @@ mod tests {
         // negar não concede nada
         let com_negar = [ace(true, FA, ba), ace(false, FA, bu), ace(true, FR, bu)];
         assert!(file_dacl_is_safe(true, Some(&com_negar)));
+    }
+
+    #[test]
+    fn leitura_por_um_descritor_ausente_link_e_arquivo_grande() {
+        let s = Sandbox::new("statedir-leitura");
+        write_state(b"{}").unwrap();
+        let dir = state_dir().unwrap();
+        let f = dir.join(STATE_FILE);
+        assert!(matches!(
+            imp::read_trusted_file(&f).unwrap(),
+            ReadOutcome::Data(b) if b == b"{}"
+        ));
+        // ausente
+        remove_state().unwrap();
+        assert!(matches!(
+            imp::read_trusted_file(&f).unwrap(),
+            ReadOutcome::Missing
+        ));
+        // link no lugar do arquivo: não é seguido
+        let alvo = s.dir().join("alvo.json");
+        std::fs::write(&alvo, "{\"forjado\":true}").unwrap();
+        symlink(&alvo, &f).unwrap();
+        assert!(matches!(
+            imp::read_trusted_file(&f).unwrap(),
+            ReadOutcome::Untrusted
+        ));
+        assert!(read_state().unwrap().is_none());
+        std::fs::remove_file(&f).unwrap();
+        // grande demais: o legítimo tem poucos KB
+        let grande = vec![b'x'; (MAX_STATE_BYTES + 1) as usize];
+        std::fs::write(&f, &grande).unwrap();
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(matches!(
+            imp::read_trusted_file(&f).unwrap(),
+            ReadOutcome::Untrusted
+        ));
     }
 
     fn modo(p: &Path) -> u32 {
@@ -1146,6 +1355,59 @@ mod tests {
 mod tests_win {
     use super::*;
     use crate::testenv::Sandbox;
+
+    #[test]
+    fn leitura_por_um_handle_ausente_dado_diretorio_e_tamanho() {
+        let _s = Sandbox::new("statedir-win-leitura");
+        write_state(b"{\"a\":1}").unwrap();
+        let f = state_dir().unwrap().join(STATE_FILE);
+        assert!(matches!(
+            imp::read_trusted_file(&f).unwrap(),
+            ReadOutcome::Data(b) if b == b"{\"a\":1}"
+        ));
+        remove_state().unwrap();
+        assert!(matches!(
+            imp::read_trusted_file(&f).unwrap(),
+            ReadOutcome::Missing
+        ));
+        // uma pasta chamada state.json não é um arquivo nosso
+        std::fs::create_dir(&f).unwrap();
+        assert!(matches!(
+            imp::read_trusted_file(&f).unwrap(),
+            ReadOutcome::Untrusted
+        ));
+        std::fs::remove_dir(&f).unwrap();
+        std::fs::write(&f, vec![b'x'; (MAX_STATE_BYTES + 1) as usize]).unwrap();
+        assert!(matches!(
+            imp::read_trusted_file(&f).unwrap(),
+            ReadOutcome::Untrusted
+        ));
+    }
+
+    /// Enquanto o leitor segura o arquivo (sem `FILE_SHARE_DELETE`), ninguém o renomeia nem
+    /// apaga; o escritor espera e passa depois (não pode falhar por causa de uma leitura).
+    #[test]
+    fn escritor_nao_falha_por_causa_de_leitor_em_curso() {
+        let _s = Sandbox::new("statedir-win-leitor");
+        write_state(b"{\"n\":0}").unwrap();
+        let parar = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let p2 = parar.clone();
+        let leitor = std::thread::spawn(move || {
+            let mut n = 0u32;
+            while !p2.load(std::sync::atomic::Ordering::Relaxed) {
+                // se cair numa troca, devolve o erro de abrir (acesso negado); sem erro é ok
+                let _ = read_state();
+                n += 1;
+            }
+            n
+        });
+        for i in 1..=60 {
+            write_state(format!("{{\"n\":{i}}}").as_bytes()).unwrap();
+        }
+        parar.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(leitor.join().unwrap() > 0);
+        assert_eq!(read_state().unwrap().as_deref(), Some(&b"{\"n\":60}"[..]));
+    }
 
     #[test]
     fn estado_so_na_pasta_do_sistema_e_le_de_volta() {
@@ -1678,6 +1940,117 @@ mod tests_win {
         std::fs::write(&lk, std::process::id().to_string()).unwrap(); // herda da pasta
         assert!(!is_trusted(&lk), "trava com ACL herdada: {}", icacls(&lk));
         std::fs::remove_file(&lk).unwrap();
+        limpar_real(&dir);
+    }
+
+    /// Sonda do N2 (medição manual com `atacante-n2.ps1` numa conta sem admin): grava o
+    /// manifesto legítimo e lê com `read_state` em laço enquanto o atacante alterna, por
+    /// renomeação, o `state.json` do admin e um forjado dele. Conta quantas leituras aceitaram
+    /// o forjado.
+    #[test]
+    #[ignore = "medição manual do N2 na win11 (precisa do atacante-n2.ps1 rodando)"]
+    fn n2_sonda_read_state_nao_aceita_o_forjado_trocado_no_meio() {
+        let dir = state_dir().unwrap();
+        for _ in 0..100 {
+            if dir.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        assert!(dir.exists(), "o atacante não criou a pasta");
+        std::thread::sleep(std::time::Duration::from_millis(1500)); // o handle já está aberto
+        ensure_dir().unwrap();
+        write_state(b"{\"legit\":true}").unwrap();
+        let (mut legit, mut forjado, mut nenhum, mut erros) = (0u32, 0u32, 0u32, 0u32);
+        let t0 = std::time::Instant::now();
+        while t0.elapsed() < std::time::Duration::from_secs(15) {
+            match read_state() {
+                Ok(Some(b)) if b.windows(7).any(|w| w == b"forjado") => forjado += 1,
+                Ok(Some(_)) => legit += 1,
+                Ok(None) => nenhum += 1,
+                Err(_) => erros += 1,
+            }
+        }
+        println!(
+            "MEDIDA N2: {} leituras; legítimo={legit} FORJADO_ACEITO={forjado} ignorado={nenhum} erro={erros}",
+            legit + forjado + nenhum + erros
+        );
+        assert_eq!(forjado, 0, "o forjado foi aceito");
+        assert!(legit > 0, "nenhuma leitura legítima");
+    }
+
+    /// N2 (determinístico): o arquivo lido tem de ser o conferido. Forjado de dono Usuários,
+    /// atalho de arquivo (reparse) e DACL gravável são ignorados; o legítimo é lido.
+    #[test]
+    #[ignore = "cria %ProgramData%\\GuiaLar de verdade (administrador, VM)"]
+    fn acl_real_n2_leitura_por_handle_ignora_forjado_link_e_dacl_gravavel() {
+        let dir = state_dir().unwrap();
+        limpar_real(&dir);
+        let d = ensure_dir().unwrap();
+        write_state(b"{\"legit\":true}").unwrap();
+        let st = d.join(STATE_FILE);
+        assert_eq!(
+            read_state().unwrap().as_deref(),
+            Some(&b"{\"legit\":true}"[..])
+        );
+        // 1) forjado de outro dono no lugar do arquivo
+        std::fs::remove_file(&st).unwrap();
+        std::fs::write(&st, b"{\"forjado\":true}").unwrap();
+        imp::test_set_owner(&st, "O:BU").unwrap();
+        assert!(read_state().unwrap().is_none(), "dono Usuários");
+        // 2) dono Administradores, mas DACL com escrita para Usuários
+        std::fs::remove_file(&st).unwrap();
+        std::fs::write(&st, b"{\"forjado\":true}").unwrap();
+        let o = std::process::Command::new("icacls")
+            .arg(&st)
+            .args([
+                "/inheritance:r",
+                "/grant",
+                "Users:(M)",
+                "Administrators:(F)",
+                "SYSTEM:(F)",
+            ])
+            .output()
+            .unwrap();
+        assert!(o.status.success(), "{o:?}");
+        assert!(read_state().unwrap().is_none(), "DACL gravável");
+        // 3) atalho (link simbólico de arquivo) para um arquivo legítimo: o link não é seguido
+        let alvo = d.join("alvo.json");
+        write_state(b"{\"legit\":true}").unwrap();
+        std::fs::rename(&st, &alvo).unwrap();
+        let o = std::process::Command::new("cmd")
+            .args(["/C", "mklink"])
+            .arg(&st)
+            .arg(&alvo)
+            .output()
+            .unwrap();
+        assert!(o.status.success(), "mklink: {o:?}");
+        assert!(read_state().unwrap().is_none(), "link de arquivo");
+        std::fs::remove_file(&st).unwrap();
+        limpar_real(&dir);
+    }
+
+    /// N2: com o `state.json` aberto pelo leitor, a conta comum não consegue renomeá-lo nem
+    /// apagá-lo (sem `FILE_SHARE_DELETE`). Segura uma abertura igual à do leitor e tenta.
+    #[test]
+    #[ignore = "cria %ProgramData%\\GuiaLar de verdade (administrador, VM)"]
+    fn acl_real_n2_arquivo_aberto_pelo_leitor_nao_pode_ser_renomeado_nem_apagado() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let dir = state_dir().unwrap();
+        limpar_real(&dir);
+        let d = ensure_dir().unwrap();
+        write_state(b"{}").unwrap();
+        let st = d.join(STATE_FILE);
+        // mesmos direitos de compartilhamento do `read_trusted_file`: só FILE_SHARE_READ
+        let aberto = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(1)
+            .open(&st)
+            .unwrap();
+        assert!(std::fs::rename(&st, d.join("outro.json")).is_err());
+        assert!(std::fs::remove_file(&st).is_err());
+        drop(aberto);
+        std::fs::rename(&st, d.join("outro.json")).expect("depois de fechar, renomeia");
         limpar_real(&dir);
     }
 }

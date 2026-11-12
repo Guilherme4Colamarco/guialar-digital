@@ -638,6 +638,8 @@ extern "system" {
 
 // N1: arquivos do estado criados com DACL protegida explícita e conferência da DACL.
 pub const GENERIC_WRITE: u32 = 0x4000_0000;
+pub const GENERIC_READ: u32 = 0x8000_0000;
+pub const FILE_SHARE_READ: u32 = 1;
 pub const CREATE_NEW: u32 = 1;
 pub const FILE_ATTRIBUTE_NORMAL: u32 = 0x80;
 pub const SE_DACL_PROTECTED: u16 = 0x1000;
@@ -654,6 +656,16 @@ pub struct ACL_SIZE_INFORMATION {
 extern "system" {
     pub fn GetSecurityDescriptorControl(sd: *mut c_void, control: *mut u16, rev: *mut u32) -> i32;
     pub fn GetAclInformation(acl: *mut c_void, info: *mut c_void, len: u32, class: u32) -> i32;
+    pub fn GetSecurityInfo(
+        h: HANDLE,
+        object_type: u32,
+        info: u32,
+        owner: *mut *mut c_void,
+        group: *mut *mut c_void,
+        dacl: *mut *mut c_void,
+        sacl: *mut *mut c_void,
+        sd: *mut *mut c_void,
+    ) -> u32;
     pub fn GetAce(acl: *mut c_void, index: u32, ace: *mut *mut c_void) -> i32;
 }
 
