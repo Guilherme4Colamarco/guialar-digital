@@ -54,8 +54,24 @@ fn next_apply_step(configured: impl FnOnce() -> Vec<std::net::IpAddr>) -> Result
     let Some(m) = DnsStateManifest::load()? else {
         return Ok(ApplyStep::Fresh);
     };
-    if plan_apply(Some(&m), crate::config::current_mode(), &configured())
-        == ApplyPlan::AlreadyActive
+    let configured = configured();
+    // Registro velho de uma proteção que já não está ligada (por exemplo, o desfazer terminou
+    // mas não conseguiu apagar o registro): nenhum DNS em uso é do filtro. Trocar de modo
+    // sobre ele não reinspeciona a rede (adaptador novo ficaria sem filtro, DNS trocado depois
+    // se perderia) e religaria a proteção sem o usuário pedir. Aplica do zero, que reinspeciona
+    // e grava um registro novo. Sem nenhum DNS legível (ou só o stub local) não dá para saber:
+    // mantém o registro.
+    let reais: Vec<_> = configured
+        .iter()
+        .filter(|ip| !crate::config::is_local_stub(ip))
+        .collect();
+    if !reais.is_empty() && !reais.iter().any(|ip| crate::config::is_filter_ip(ip)) {
+        eprintln!(
+            "ℹ️  O registro anterior não corresponde ao DNS em uso (a proteção estava desligada): aplicando do zero."
+        );
+        return Ok(ApplyStep::Fresh);
+    }
+    if plan_apply(Some(&m), crate::config::current_mode(), &configured) == ApplyPlan::AlreadyActive
     {
         println!("ℹ️  A proteção já está ativa. Use 'guialar revert' antes de aplicar de novo.");
         return Ok(ApplyStep::AlreadyActive);
@@ -346,5 +362,84 @@ mod plan_tests {
         // troca de modo, mesmo com o DNS do modo antigo em uso: reaplica
         assert_eq!(plan_apply(Some(&m(f)), a, &fam), ApplyPlan::Reapply);
         assert_eq!(plan_apply(Some(&m(a)), f, &ads), ApplyPlan::Reapply);
+    }
+}
+
+#[cfg(test)]
+mod apply_step_tests {
+    use super::*;
+    use crate::config::{BackendKind, FilterMode};
+    use crate::testenv::Sandbox;
+    use std::net::IpAddr;
+
+    fn ip(s: &str) -> IpAddr {
+        s.parse().unwrap()
+    }
+
+    fn passo(configurado: &[&str]) -> ApplyStep {
+        let ips: Vec<IpAddr> = configurado.iter().map(|s| ip(s)).collect();
+        next_apply_step(|| ips).unwrap()
+    }
+
+    fn com_registro(nome: &str) -> Sandbox {
+        let s = Sandbox::new(nome);
+        DnsStateManifest::new(BackendKind::DirectResolvConf)
+            .save_atomic()
+            .unwrap();
+        s
+    }
+
+    #[test]
+    fn sem_registro_aplica_do_zero() {
+        let _s = Sandbox::new("passo-sem-registro");
+        assert!(matches!(passo(&["192.168.0.1"]), ApplyStep::Fresh));
+    }
+
+    /// N3: sobrou um registro (o desfazer não conseguiu apagá-lo) mas o DNS em uso já é o da
+    /// rede: aplica do zero, para reinspecionar, e não religa um modo antigo.
+    #[test]
+    fn registro_velho_com_dns_da_rede_aplica_do_zero() {
+        let _s = com_registro("passo-registro-velho");
+        assert!(matches!(passo(&["192.168.0.1"]), ApplyStep::Fresh));
+        assert!(matches!(
+            passo(&["192.168.0.1", "2001:db8::1"]),
+            ApplyStep::Fresh
+        ));
+        // o stub local do sistema não conta como DNS «de fora» nem como o nosso
+        assert!(matches!(
+            passo(&["127.0.0.53", "8.8.8.8"]),
+            ApplyStep::Fresh
+        ));
+    }
+
+    #[test]
+    fn registro_com_dns_do_filtro_continua_sendo_troca_ou_ja_ativo() {
+        let _s = com_registro("passo-registro-ativo");
+        let modo = crate::config::current_mode();
+        let v4 = modo.ipv4()[0].to_string();
+        // o modo pedido e o do registro, e o DNS é o do filtro: já ativo
+        let m = DnsStateManifest::load().unwrap().unwrap();
+        assert_eq!(m.mode, modo);
+        assert!(matches!(passo(&[&v4]), ApplyStep::AlreadyActive));
+        // DNS de outro modo do filtro ainda é «proteção ligada»: troca de modo
+        let outro = match modo {
+            FilterMode::Family => FilterMode::AdsOnly,
+            FilterMode::AdsOnly => FilterMode::Family,
+        };
+        let v4_outro = outro.ipv4()[0].to_string();
+        assert!(matches!(passo(&[&v4_outro]), ApplyStep::Switch(_)));
+        // filtro misturado com um DNS de fora também não é «desligada»
+        assert!(matches!(
+            passo(&[&v4_outro, "8.8.8.8"]),
+            ApplyStep::Switch(_)
+        ));
+    }
+
+    #[test]
+    fn registro_sem_dns_legivel_nao_e_tratado_como_desligado() {
+        let _s = com_registro("passo-registro-sem-dns");
+        // nada lido, ou só o stub local: não dá para saber, mantém o registro (troca de modo)
+        assert!(matches!(passo(&[]), ApplyStep::Switch(_)));
+        assert!(matches!(passo(&["127.0.0.53"]), ApplyStep::Switch(_)));
     }
 }

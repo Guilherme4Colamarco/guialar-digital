@@ -93,6 +93,14 @@ pub fn is_filter_ipv6(ip: &Ipv6Addr) -> bool {
     CLOUDFLARE_IPV6.contains(ip) || ADGUARD_IPV6.contains(ip)
 }
 
+/// `true` se o IP (v4 ou v6) pertence a QUALQUER filtro do GuiaLar.
+pub fn is_filter_ip(ip: &std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(a) => is_filter_ipv4(a),
+        std::net::IpAddr::V6(a) => is_filter_ipv6(a),
+    }
+}
+
 /// DNS local do próprio sistema (stub do systemd-resolved, dnsmasq do NetworkManager,
 /// loopback do Windows): não é "DNS de fora" nem é o nosso; o que conta é o upstream.
 pub fn is_local_stub(ip: &std::net::IpAddr) -> bool {
