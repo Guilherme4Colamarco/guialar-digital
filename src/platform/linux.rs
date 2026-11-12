@@ -7,7 +7,7 @@
 //! 4. Arquivo direto `/etc/resolv.conf` (com backup e substituição atômica)
 
 use anyhow::{bail, Context, Result};
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 
 use super::runner::{Cmd, CommandRunner, In, Out, RealRunner};
 use crate::config::{current_mode, BackendKind, ConnectionBackup, DnsStateManifest};
@@ -450,7 +450,10 @@ fn apply_network_manager(r: &dyn CommandRunner, manifest: &mut DnsStateManifest)
 fn revert_network_manager(r: &dyn CommandRunner, manifest: &DnsStateManifest) -> Result<()> {
     for conn in &manifest.connections {
         let uuid = &conn.id;
+        // `was_dhcp_*` = a conexão aceitava o DNS da rede (`ignore-auto-dns=no`). Ela pode ter
+        // IPs fixos somados ao do DHCP: restaura os fixos (lista vazia => `""`, como sempre).
         if conn.was_dhcp_ipv4 {
+            let prev = join_ips(&conn.original_ipv4_dns);
             run_privileged_command(
                 r,
                 "nmcli",
@@ -459,25 +462,27 @@ fn revert_network_manager(r: &dyn CommandRunner, manifest: &DnsStateManifest) ->
                     "modify",
                     uuid,
                     "ipv4.dns",
-                    "",
+                    &prev,
                     "ipv4.ignore-auto-dns",
                     "no",
                 ],
             )?;
         } else if !conn.original_ipv4_dns.is_empty() {
-            let prev: Vec<String> = conn
-                .original_ipv4_dns
-                .iter()
-                .map(|ip| ip.to_string())
-                .collect();
             run_privileged_command(
                 r,
                 "nmcli",
-                &["connection", "modify", uuid, "ipv4.dns", &prev.join(" ")],
+                &[
+                    "connection",
+                    "modify",
+                    uuid,
+                    "ipv4.dns",
+                    &join_ips(&conn.original_ipv4_dns),
+                ],
             )?;
         }
 
         if conn.was_dhcp_ipv6 {
+            let prev = join_ips(&conn.original_ipv6_dns);
             let _ = run_privileged_command(
                 r,
                 "nmcli",
@@ -486,9 +491,21 @@ fn revert_network_manager(r: &dyn CommandRunner, manifest: &DnsStateManifest) ->
                     "modify",
                     uuid,
                     "ipv6.dns",
-                    "",
+                    &prev,
                     "ipv6.ignore-auto-dns",
                     "no",
+                ],
+            );
+        } else if !conn.original_ipv6_dns.is_empty() {
+            let _ = run_privileged_command(
+                r,
+                "nmcli",
+                &[
+                    "connection",
+                    "modify",
+                    uuid,
+                    "ipv6.dns",
+                    &join_ips(&conn.original_ipv6_dns),
                 ],
             );
         }
@@ -496,6 +513,14 @@ fn revert_network_manager(r: &dyn CommandRunner, manifest: &DnsStateManifest) ->
         let _ = run_privileged_command(r, "nmcli", &["connection", "up", "uuid", uuid]);
     }
     Ok(())
+}
+
+/// IPs separados por espaço, como o `nmcli connection modify` aceita.
+fn join_ips<T: std::fmt::Display>(ips: &[T]) -> String {
+    ips.iter()
+        .map(|ip| ip.to_string())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn get_active_nm_connections(r: &dyn CommandRunner) -> Result<Vec<String>> {
@@ -533,11 +558,56 @@ fn inspect_nm_connection_raw(r: &dyn CommandRunner, uuid: &str) -> Result<(Vec<I
 fn inspect_nm_connection(r: &dyn CommandRunner, uuid: &str) -> Result<ConnectionBackup> {
     let b = inspect_nm_connection_unsanitized(r, uuid)?;
     let (ips, dhcp) = crate::config::sanitize_original_dns(b.original_ipv4_dns, b.was_dhcp_ipv4);
+    // IPv6 numa chamada à parte (o argv do IPv4 acima não muda). Se falhar, cai no padrão
+    // antigo («DHCP, sem fixos») em vez de impedir o apply.
+    let (ips6, dhcp6) = inspect_nm_ipv6(r, uuid).unwrap_or((Vec::new(), true));
+    let (ips6, dhcp6) = crate::config::sanitize_original_dns6(ips6, dhcp6);
     Ok(ConnectionBackup {
         original_ipv4_dns: ips,
         was_dhcp_ipv4: dhcp,
+        original_ipv6_dns: ips6,
+        was_dhcp_ipv6: dhcp6,
         ..b
     })
+}
+
+/// `ipv6.dns` e `ipv6.ignore-auto-dns` da conexão: (IPs fixos, aceita o DNS da rede).
+fn inspect_nm_ipv6(r: &dyn CommandRunner, uuid: &str) -> Result<(Vec<Ipv6Addr>, bool)> {
+    let output = r
+        .run(&Cmd::output(
+            "nmcli",
+            &[
+                "-t",
+                "-f",
+                "ipv6.dns,ipv6.ignore-auto-dns",
+                "connection",
+                "show",
+                uuid,
+            ],
+        ))
+        .context("Falha ao inspecionar o IPv6 da conexão do NetworkManager")?;
+    Ok(parse_nm_ipv6(&String::from_utf8_lossy(&output.stdout)))
+}
+
+fn parse_nm_ipv6(stdout: &str) -> (Vec<Ipv6Addr>, bool) {
+    let mut was_dhcp = true;
+    let mut ips = Vec::new();
+    for line in stdout.lines() {
+        if let Some(v) = line.strip_prefix("ipv6.ignore-auto-dns:") {
+            if v.contains("yes") {
+                was_dhcp = false;
+            }
+        } else if let Some(v) = line.strip_prefix("ipv6.dns:") {
+            // `-t` escapa `:` e `\` quando há vários campos; desfaz por garantia.
+            let v = v.replace("\\:", ":");
+            for tok in v.split(|c: char| c.is_whitespace() || c == ',') {
+                if let Ok(ip) = tok.parse::<Ipv6Addr>() {
+                    ips.push(ip);
+                }
+            }
+        }
+    }
+    (ips, was_dhcp)
 }
 
 fn inspect_nm_connection_unsanitized(

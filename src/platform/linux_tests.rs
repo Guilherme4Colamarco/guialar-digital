@@ -134,6 +134,16 @@ fn nm_apply_usa_o_argv_de_producao_na_ordem() {
             "show",
             u,
         ]));
+        // IPv6: chamada própria, logo depois da do IPv4 (o argv do IPv4 não mudou)
+        esperado.push(v(&[
+            "nmcli",
+            "-t",
+            "-f",
+            "ipv6.dns,ipv6.ignore-auto-dns",
+            "connection",
+            "show",
+            u,
+        ]));
         esperado.push(v(&[
             "nmcli",
             "connection",
@@ -717,4 +727,152 @@ fn deny_do_programa_vale_mesmo_com_prefixo_de_elevacao() {
     let e = write_privileged_file(&r, "/etc/x", "a").unwrap_err();
     assert!(format!("{e:#}").contains("Falha ao gravar"));
     assert!(r.state().files.is_empty());
+}
+
+// ------------------------------------- ticket #24: o revert devolve o DNS fixo (v4 e v6)
+
+/// Roda apply e revert e exige o estado original de volta, em tudo (v4 e v6).
+fn ida_e_volta(r: &FakeRunner, nome: &str) {
+    let _s = Sandbox::new(nome);
+    let original = r.state();
+    apply_dns_with(r).unwrap();
+    assert_ne!(r.state(), original, "o apply muda algo");
+    revert(r).unwrap();
+    assert_eq!(r.state(), original, "{nome}: o revert devolve o original");
+}
+
+#[test]
+fn nm_revert_v4_fixo_com_ignore_auto_dns_no_devolve_o_fixo() {
+    // DNS extra fixo SOMADO ao do DHCP (era o defeito: virava vazio)
+    let r = FakeRunner::new().with_nm_conn("u", "802-3-ethernet", "10.0.2.99", false);
+    ida_e_volta(&r, "nm24-v4-fixo-no");
+    assert_eq!(r.nm_prop("u", "ipv4.dns"), "10.0.2.99");
+    assert_eq!(r.nm_prop("u", "ipv4.ignore-auto-dns"), "no");
+}
+
+#[test]
+fn nm_revert_v4_fixo_com_ignore_auto_dns_yes_devolve_o_fixo() {
+    let r = FakeRunner::new().with_nm_conn("u", "802-3-ethernet", "10.0.2.98 10.0.2.99", true);
+    ida_e_volta(&r, "nm24-v4-fixo-yes");
+    assert_eq!(r.nm_prop("u", "ipv4.dns"), "10.0.2.98 10.0.2.99");
+    assert_eq!(r.nm_prop("u", "ipv4.ignore-auto-dns"), "yes");
+}
+
+#[test]
+fn nm_revert_v4_sem_fixo_mantem_o_argv_de_antes() {
+    let _s = Sandbox::new("nm24-v4-dhcp");
+    let r = FakeRunner::new().with_nm_conn("u", "802-3-ethernet", "", false);
+    apply_dns_with(&r).unwrap();
+    r.clear_calls();
+    revert(&r).unwrap();
+    assert_eq!(
+        r.argvs()[0],
+        v(&[
+            "nmcli",
+            "connection",
+            "modify",
+            "u",
+            "ipv4.dns",
+            "",
+            "ipv4.ignore-auto-dns",
+            "no"
+        ])
+    );
+}
+
+#[test]
+fn nm_revert_v6_fixo_devolve_o_fixo_nos_dois_ignore_auto_dns() {
+    let r = FakeRunner::new()
+        .with_nm_conn("u", "802-3-ethernet", "", false)
+        .with_nm_v6("u", "2001:db8::99 2001:db8::98", false);
+    ida_e_volta(&r, "nm24-v6-fixo-no");
+    assert_eq!(r.nm_prop("u", "ipv6.dns"), "2001:db8::99 2001:db8::98");
+    assert_eq!(r.nm_prop("u", "ipv6.ignore-auto-dns"), "no");
+
+    let r = FakeRunner::new()
+        .with_nm_conn("u", "802-3-ethernet", "", false)
+        .with_nm_v6("u", "2001:db8::99", true);
+    ida_e_volta(&r, "nm24-v6-fixo-yes");
+    assert_eq!(r.nm_prop("u", "ipv6.dns"), "2001:db8::99");
+    assert_eq!(r.nm_prop("u", "ipv6.ignore-auto-dns"), "yes");
+}
+
+#[test]
+fn nm_revert_v4_e_v6_fixos_juntos_em_duas_conexoes() {
+    let r = FakeRunner::new()
+        .with_nm_conn("a", "802-3-ethernet", "10.0.2.99", false)
+        .with_nm_v6("a", "2001:db8::99", false)
+        .with_nm_conn("b", "802-11-wireless", "192.168.0.1", true)
+        .with_nm_v6("b", "2001:db8::1", true);
+    ida_e_volta(&r, "nm24-duas");
+}
+
+#[test]
+fn nm_dns_v6_so_de_filtro_vira_automatico_no_backup() {
+    // apply sobre rede já filtrada: o «original» nunca é o filtro do GuiaLar
+    let _s = Sandbox::new("nm24-v6-filtro");
+    let r = FakeRunner::new()
+        .with_nm_conn("u", "802-3-ethernet", "", false)
+        .with_nm_v6("u", V6, true);
+    apply_dns_with(&r).unwrap();
+    let m = manifest();
+    assert!(m.connections[0].original_ipv6_dns.is_empty());
+    assert!(m.connections[0].was_dhcp_ipv6);
+}
+
+#[test]
+fn nm_manifesto_antigo_sem_campos_v6_reverte_como_antes() {
+    let s = Sandbox::new("nm24-antigo");
+    let r = nm_machine();
+    let original = r.state();
+    apply_dns_with(&r).unwrap();
+    // state.json do formato antigo: sem os campos v6 (ou com `was_dhcp_ipv6=true` e lista vazia)
+    let antigo = r#"{"backend":"NetworkManager","applied_at_utc":"1","connections":[
+        {"id":"uuid-eth","original_ipv4_dns":[],"was_dhcp_ipv4":true},
+        {"id":"uuid-wifi","original_ipv4_dns":["192.168.0.1","8.8.8.8"],"original_ipv6_dns":[],
+         "was_dhcp_ipv4":false,"was_dhcp_ipv6":true}],"previous_resolv_conf":null,"mode":"family"}"#;
+    std::fs::write(s.manifest_path(), antigo).unwrap();
+    r.clear_calls();
+    revert(&r).unwrap();
+    assert_eq!(r.state(), original);
+    let reset6 = |u: &str| {
+        v(&[
+            "nmcli",
+            "connection",
+            "modify",
+            u,
+            "ipv6.dns",
+            "",
+            "ipv6.ignore-auto-dns",
+            "no",
+        ])
+    };
+    let argvs = r.argvs();
+    assert!(argvs.contains(&reset6("uuid-eth")), "v6 zerado como hoje");
+    assert!(argvs.contains(&reset6("uuid-wifi")), "v6 zerado como hoje");
+}
+
+#[test]
+fn parse_nm_ipv6_le_ips_e_ignore_auto_dns() {
+    let (ips, dhcp) = parse_nm_ipv6("ipv6.dns:\nipv6.ignore-auto-dns:no\n");
+    assert!(ips.is_empty() && dhcp);
+    let (ips, dhcp) =
+        parse_nm_ipv6("ipv6.dns:2001:db8::99,2001:4860:4860::8888\nipv6.ignore-auto-dns:yes\n");
+    let ips: Vec<String> = ips.iter().map(|i| i.to_string()).collect();
+    assert_eq!(ips, ["2001:db8::99", "2001:4860:4860::8888"]);
+    assert!(!dhcp);
+    // `-t` com vários campos escapa os dois-pontos
+    let (ips, _) = parse_nm_ipv6("ipv6.dns:2001\\:db8\\:\\:99\nipv6.ignore-auto-dns:no\n");
+    assert_eq!(ips.len(), 1);
+}
+
+#[test]
+fn nm_falha_ao_ler_o_v6_nao_impede_o_apply() {
+    let _s = Sandbox::new("nm24-v6-falha");
+    let r = FakeRunner::new().with_nm_conn("u", "802-3-ethernet", "", false);
+    // nmcli «quebra» só na leitura do v6: o backup cai no padrão antigo (DHCP, sem fixos)
+    r.add_fail_argv(&["nmcli", "-t", "-f", "ipv6.dns,ipv6.ignore-auto-dns"]);
+    apply_dns_with(&r).unwrap();
+    let m = manifest();
+    assert!(m.connections[0].was_dhcp_ipv6 && m.connections[0].original_ipv6_dns.is_empty());
 }

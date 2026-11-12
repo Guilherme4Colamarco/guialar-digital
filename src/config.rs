@@ -157,13 +157,33 @@ pub fn sanitize_original_dns(ips: Vec<Ipv4Addr>, was_dhcp: bool) -> (Vec<Ipv4Add
     }
 }
 
+/// Igual a [`sanitize_original_dns`], para IPv6.
+#[cfg_attr(windows, allow(dead_code))]
+pub fn sanitize_original_dns6(ips: Vec<Ipv6Addr>, was_dhcp: bool) -> (Vec<Ipv6Addr>, bool) {
+    if ips.is_empty() || ips.iter().all(is_filter_ipv6) {
+        (Vec::new(), true)
+    } else {
+        (ips, was_dhcp)
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
 /// Backup do estado de uma conexão específica (usado no NetworkManager ou Windows).
+///
+/// `was_dhcp_*` é `true` quando a conexão aceitava o DNS da rede (NetworkManager:
+/// `ignore-auto-dns=no`), mesmo que também tivesse IPs fixos em `original_*_dns`.
+/// Manifestos antigos sem os campos de IPv6 leem como «DHCP, sem IPs fixos».
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConnectionBackup {
     pub id: String,
     pub original_ipv4_dns: Vec<Ipv4Addr>,
+    #[serde(default)]
     pub original_ipv6_dns: Vec<Ipv6Addr>,
     pub was_dhcp_ipv4: bool,
+    #[serde(default = "default_true")]
     pub was_dhcp_ipv6: bool,
 }
 
@@ -518,5 +538,36 @@ mod qa_tests {
             r#"{"backend":"NetworkManager","applied_at_utc":"1","connections":[],"mode":"xyz"}"#;
         assert!(serde_json::from_str::<DnsStateManifest>(modo_ruim).is_err());
         assert!(serde_json::from_str::<DnsStateManifest>("{}").is_err());
+    }
+}
+
+#[cfg(test)]
+mod backup_tests {
+    use super::*;
+
+    #[test]
+    fn backup_sem_campos_v6_le_como_dhcp_sem_fixos() {
+        let b: ConnectionBackup = serde_json::from_str(
+            r#"{"id":"u","original_ipv4_dns":["8.8.8.8"],"was_dhcp_ipv4":false}"#,
+        )
+        .unwrap();
+        assert!(b.original_ipv6_dns.is_empty());
+        assert!(b.was_dhcp_ipv6);
+    }
+
+    #[test]
+    fn sanitize_v6_filtro_vira_automatico_e_fixo_externo_fica() {
+        let filtro: Vec<Ipv6Addr> = CLOUDFLARE_IPV6.to_vec();
+        assert_eq!(sanitize_original_dns6(filtro, false), (Vec::new(), true));
+        assert_eq!(
+            sanitize_original_dns6(Vec::new(), false),
+            (Vec::new(), true)
+        );
+        let fixo: Ipv6Addr = "2001:db8::99".parse().unwrap();
+        assert_eq!(sanitize_original_dns6(vec![fixo], true), (vec![fixo], true));
+        assert_eq!(
+            sanitize_original_dns6(vec![fixo], false),
+            (vec![fixo], false)
+        );
     }
 }

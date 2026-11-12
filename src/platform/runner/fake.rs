@@ -37,6 +37,7 @@ struct State {
     nm: BTreeMap<String, Props>,
     nm_type: BTreeMap<String, String>,
     deny: Vec<(String, i32)>,
+    fail_argv: Vec<Vec<String>>,
     prefix: Vec<&'static str>,
     root: bool,
 }
@@ -90,6 +91,19 @@ impl FakeRunner {
         self.with_path("/run/NetworkManager").with_command("nmcli")
     }
 
+    /// IPv6 inicial da conexão (`with_nm_conn` deixa `ipv6.dns` vazio e `ignore-auto-dns=no`).
+    pub fn with_nm_v6(self, uuid: &str, dns6: &str, ign6: bool) -> Self {
+        {
+            let mut s = self.st.borrow_mut();
+            let p =
+                s.nm.get_mut(uuid)
+                    .expect("with_nm_conn antes de with_nm_v6");
+            p.insert("ipv6.dns".into(), norm(dns6));
+            p.insert("ipv6.ignore-auto-dns".into(), yn(ign6).into());
+        }
+        self
+    }
+
     pub fn with_file(self, path: &str, content: &str) -> Self {
         self.st
             .borrow_mut()
@@ -131,6 +145,15 @@ impl FakeRunner {
     /// Como `deny`, mas por referência (para trocar o comportamento no meio do teste).
     pub fn add_deny(&self, program: &str, code: i32) {
         self.st.borrow_mut().deny.push((program.into(), code));
+    }
+
+    /// O comando cujo argv começa com `prefix` não chega a executar (erro de E/S, como um
+    /// `nmcli` que não sobe).
+    pub fn add_fail_argv(&self, prefix: &[&str]) {
+        self.st
+            .borrow_mut()
+            .fail_argv
+            .push(prefix.iter().map(|p| p.to_string()).collect());
     }
 
     pub fn clear_deny(&self) {
@@ -192,6 +215,14 @@ impl FakeRunner {
                     "ipv4.dns:{}\nipv4.ignore-auto-dns:{}\n",
                     p["ipv4.dns"].replace(' ', ","),
                     p["ipv4.ignore-auto-dns"]
+                )))
+            }
+            ["nmcli", "-t", "-f", "ipv6.dns,ipv6.ignore-auto-dns", "connection", "show", u] => {
+                let p = s.nm.get(*u).ok_or_else(|| io::Error::other("conexão?"))?;
+                Ok(ok(format!(
+                    "ipv6.dns:{}\nipv6.ignore-auto-dns:{}\n",
+                    p["ipv6.dns"].replace(' ', ","),
+                    p["ipv6.ignore-auto-dns"]
                 )))
             }
             ["nmcli", "connection", "modify", u, rest @ ..] => {
@@ -289,6 +320,15 @@ impl CommandRunner for FakeRunner {
             .iter()
             .find(|(p, _)| *p == real[0] || *p == argv[0])
             .map(|(_, c)| *c);
+        if self
+            .st
+            .borrow()
+            .fail_argv
+            .iter()
+            .any(|p| real.starts_with(p))
+        {
+            return Err(io::Error::other("falha simulada pelo FakeRunner"));
+        }
         if let Some(code) = denied {
             return Ok(Outcome {
                 code: Some(code),
