@@ -665,3 +665,87 @@ fn falha_no_set_e_no_desfazer_deixa_o_manifesto_para_o_desativar() {
         .expect("manifesto gravado antes do laço");
     assert_eq!(m.connections.len(), 2);
 }
+
+// ------------------------------- B1 do REVIEW-62eaa16: ordem do desfazer e registro preso
+
+#[test]
+fn desfazer_reverte_dns_e_extensoes_e_so_no_fim_apaga_o_registro() {
+    let s = Sandbox::new("win-revert-ordem");
+    let r = two_ifaces();
+    apply_core_with(&r).unwrap();
+    let m = DnsStateManifest::load().unwrap().unwrap();
+    let ordem = RefCell::new(Vec::new());
+    r.calls.borrow_mut().clear();
+    revert_dns_with(&r, &m, || {
+        // as extensões rodam com o registro ainda no disco
+        ordem
+            .borrow_mut()
+            .push(("extensoes", s.manifest_path().exists()));
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(ordem.into_inner(), [("extensoes", true)]);
+    assert!(!s.manifest_path().exists(), "apagado no fim");
+    assert_eq!(r.calls().last().unwrap(), "ipconfig /flushdns");
+}
+
+#[test]
+fn registro_preso_por_outro_programa_nao_impede_extensoes_e_o_desfazer_termina() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let s = Sandbox::new("win-revert-preso");
+    let r = two_ifaces();
+    let original = r.all_dns();
+    apply_core_with(&r).unwrap();
+    let m = DnsStateManifest::load().unwrap().unwrap();
+    // outra conta mantém o state.json aberto sem FILE_SHARE_DELETE
+    let preso = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(1)
+        .open(s.manifest_path())
+        .unwrap();
+    let extensoes = std::cell::Cell::new(false);
+    revert_dns_with(&r, &m, || {
+        extensoes.set(true);
+        Ok(())
+    })
+    .expect("o desfazer termina mesmo sem poder apagar o registro");
+    assert!(extensoes.get(), "as extensões foram revertidas");
+    assert_eq!(r.all_dns(), original, "o DNS voltou");
+    assert!(s.manifest_path().exists(), "o registro ficou (preso)");
+    drop(preso);
+}
+
+#[test]
+fn falha_nas_extensoes_nao_apaga_o_registro() {
+    let s = Sandbox::new("win-revert-ext-falha");
+    let r = two_ifaces();
+    apply_core_with(&r).unwrap();
+    let m = DnsStateManifest::load().unwrap().unwrap();
+    let e = revert_dns_with(&r, &m, || anyhow::bail!("reg.exe falhou")).unwrap_err();
+    assert!(format!("{e:#}").contains("reg.exe falhou"));
+    assert!(s.manifest_path().exists(), "dá para repetir o desfazer");
+}
+
+#[test]
+fn registro_preso_no_apply_para_com_mensagem_clara_e_sem_alterar_o_dns() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let s = Sandbox::new("win-apply-preso");
+    let r = two_ifaces();
+    let antes = r.all_dns();
+    // um registro antigo, preso por outro programa, que o rename não consegue substituir
+    DnsStateManifest::new(BackendKind::WindowsPowerShell)
+        .save_atomic()
+        .unwrap();
+    let preso = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(1)
+        .open(s.manifest_path())
+        .unwrap();
+    let e = format!("{:#}", apply_core_with(&r).unwrap_err());
+    assert!(e.contains("Nada foi alterado no DNS"), "{e}");
+    assert!(e.contains("aberto por outro programa"), "{e}");
+    assert!(!e.contains("os error 32"), "sem o erro cru no começo: {e}");
+    assert_eq!(r.all_dns(), antes);
+    assert!(sets(&r).is_empty());
+    drop(preso);
+}

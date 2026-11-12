@@ -105,6 +105,24 @@ pub fn write_state(data: &[u8]) -> Result<()> {
     imp::write_atomic(&dir, STATE_FILE, data)
 }
 
+/// Marca (como contexto do `anyhow`) uma falha de E/S ao LER o registro, por exemplo o arquivo
+/// aberto por outro programa: diferente de um registro inválido ou não confiável. Quem decide o
+/// que fazer com o erro (`revert`, status) usa `is_state_io_error` para não tratar a falha de
+/// leitura como «registro danificado» e apagá-lo.
+#[derive(Debug)]
+pub struct StateIo;
+
+impl std::fmt::Display for StateIo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("o registro da proteção não pôde ser lido (provavelmente está aberto por outro programa)")
+    }
+}
+
+/// O erro é uma falha de E/S ao ler o registro (e não conteúdo inválido)?
+pub fn is_state_io_error(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<StateIo>().is_some()
+}
+
 /// Resultado de ler um arquivo do estado por um único handle.
 #[derive(Debug)]
 pub enum ReadOutcome {
@@ -138,6 +156,7 @@ pub fn read_state() -> Result<Option<Vec<u8>>> {
         return ignorar();
     }
     match imp::read_trusted_file(&file)
+        .map_err(|e| anyhow::Error::new(e).context(StateIo))
         .with_context(|| format!("Falha ao ler manifesto em {file:?}"))?
     {
         ReadOutcome::Missing => Ok(None),
@@ -565,27 +584,38 @@ mod imp {
         use std::io::Read;
         use std::os::windows::io::{AsRawHandle, FromRawHandle};
         let w = wide(path.as_os_str());
-        // SAFETY: caminho terminado em NUL; sem atributos de segurança nem modelo.
-        let h = unsafe {
-            win32::CreateFileW(
-                w.as_ptr(),
-                win32::GENERIC_READ | win32::READ_CONTROL,
-                win32::FILE_SHARE_READ,
-                std::ptr::null_mut(),
-                win32::OPEN_EXISTING,
-                win32::FILE_ATTRIBUTE_NORMAL | win32::FILE_FLAG_OPEN_REPARSE_POINT,
-                std::ptr::null_mut(),
-            )
-        };
-        if h == win32::INVALID_HANDLE_VALUE {
-            let e = std::io::Error::last_os_error();
-            return match e.raw_os_error() {
-                Some(2 | 3) => Ok(ReadOutcome::Missing),
-                // pasta no lugar do arquivo (sem BACKUP_SEMANTICS não abre): não é nosso
-                Some(5) if path.is_dir() => Ok(ReadOutcome::Untrusted),
-                _ => Err(e),
+        // Outro leitor/escritor pode estar com o arquivo aberto por instantes (o nosso `rename`,
+        // por exemplo): repete a abertura por até ~1 s em acesso negado/violação de
+        // compartilhamento, como o escritor faz.
+        let mut tentativa = 0;
+        let h = loop {
+            // SAFETY: caminho terminado em NUL; sem atributos de segurança nem modelo.
+            let h = unsafe {
+                win32::CreateFileW(
+                    w.as_ptr(),
+                    win32::GENERIC_READ | win32::READ_CONTROL,
+                    win32::FILE_SHARE_READ,
+                    std::ptr::null_mut(),
+                    win32::OPEN_EXISTING,
+                    win32::FILE_ATTRIBUTE_NORMAL | win32::FILE_FLAG_OPEN_REPARSE_POINT,
+                    std::ptr::null_mut(),
+                )
             };
-        }
+            if h != win32::INVALID_HANDLE_VALUE {
+                break h;
+            }
+            let e = std::io::Error::last_os_error();
+            match e.raw_os_error() {
+                Some(2 | 3) => return Ok(ReadOutcome::Missing),
+                // pasta no lugar do arquivo (sem BACKUP_SEMANTICS não abre): não é nosso
+                Some(5) if path.is_dir() => return Ok(ReadOutcome::Untrusted),
+                Some(5 | 32) if tentativa < 50 => {
+                    tentativa += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                _ => return Err(e),
+            }
+        };
         // SAFETY: handle de arquivo válido, de posse única; o `File` o fecha.
         let f = unsafe { std::fs::File::from_raw_handle(h) };
         let attrs = raw_handle_attributes(f.as_raw_handle())?;
@@ -1098,8 +1128,17 @@ mod imp {
             f.write_all(data)?;
             f.flush()?;
             drop(f);
-            retry_busy(|| std::fs::rename(&tmp, &target))
-                .with_context(|| format!("Falha ao renomear {tmp:?} para {target:?}"))
+            retry_busy(|| std::fs::rename(&tmp, &target)).map_err(|e| {
+                if matches!(e.raw_os_error(), Some(5 | 32)) {
+                    // esgotadas as tentativas: alguém mantém o registro aberto
+                    anyhow::anyhow!(
+                        "O registro da proteção está aberto por outro programa e não pôde ser atualizado ({e}). Feche esse programa e tente de novo."
+                    )
+                } else {
+                    anyhow::Error::new(e)
+                        .context(format!("Falha ao renomear {tmp:?} para {target:?}"))
+                }
+            })
         })();
         if result.is_err() {
             let _ = std::fs::remove_file(&tmp);
@@ -1355,6 +1394,62 @@ mod tests {
 mod tests_win {
     use super::*;
     use crate::testenv::Sandbox;
+
+    /// B2: a abertura do leitor repete em violação de compartilhamento; só desiste (com erro de
+    /// E/S marcado, não «registro inválido») se o arquivo continua preso.
+    #[test]
+    fn leitura_repete_a_abertura_e_so_desiste_com_erro_de_es_marcado() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let _s = Sandbox::new("statedir-win-leitura-preso");
+        write_state(b"{\"a\":1}").unwrap();
+        let f = state_dir().unwrap().join(STATE_FILE);
+        // preso só por um instante: a leitura espera e passa
+        let preso = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&f)
+            .unwrap();
+        let t = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            drop(preso);
+        });
+        assert_eq!(read_state().unwrap().as_deref(), Some(&b"{\"a\":1}"[..]));
+        t.join().unwrap();
+        // preso por mais tempo que as tentativas: erro de E/S marcado
+        let preso = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&f)
+            .unwrap();
+        let e = read_state().unwrap_err();
+        assert!(is_state_io_error(&e), "{e:#}");
+        drop(preso);
+        assert!(read_state().unwrap().is_some());
+    }
+
+    /// B1: escritor com o registro preso por mais tempo que as tentativas: mensagem clara.
+    #[test]
+    fn escritor_com_registro_preso_diz_que_esta_aberto_por_outro_programa() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let _s = Sandbox::new("statedir-win-escritor-preso");
+        write_state(b"{}").unwrap();
+        let f = state_dir().unwrap().join(STATE_FILE);
+        let preso = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(1)
+            .open(&f)
+            .unwrap();
+        let e = format!("{:#}", write_state(b"{\"novo\":1}").unwrap_err());
+        assert!(e.contains("aberto por outro programa"), "{e}");
+        drop(preso);
+        // nenhum temp esquecido e o antigo intacto
+        let nomes: Vec<_> = std::fs::read_dir(state_dir().unwrap())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(nomes, [STATE_FILE]);
+        assert_eq!(read_state().unwrap().as_deref(), Some(&b"{}"[..]));
+    }
 
     #[test]
     fn leitura_por_um_handle_ausente_dado_diretorio_e_tamanho() {

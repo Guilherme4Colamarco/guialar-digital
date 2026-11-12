@@ -192,8 +192,8 @@ fn apply_core_with(r: &dyn CommandRunner) -> Result<()> {
     }
     // O manifesto descreve o estado de ANTES: grava-o antes de trocar qualquer DNS, para que uma
     // falha no meio do laço (adaptador que some, Wi-Fi que cai) nunca deixe DNS trocado sem
-    // registro para desfazer.
-    manifest.save_atomic()?;
+    // registro para desfazer. Se nem isso der (registro aberto por outro programa), para aqui.
+    manifest.save_atomic().context("Nada foi alterado no DNS")?;
     for index in alvos {
         if let Err(e) = run_powershell(
             r,
@@ -223,11 +223,31 @@ pub fn revert_dns(manifest: &DnsStateManifest) -> Result<()> {
         return Ok(());
     }
     let _lock = crate::sysutil::OpLock::acquire()?;
-    restore_connections(&RealRunner, manifest)?;
-    DnsStateManifest::remove_manifest()?;
-    crate::policy::revert_all()?;
-    flush_dns(&RealRunner);
+    revert_dns_with(&RealRunner, manifest, crate::policy::revert_all)
+}
+
+/// O desfazer completo, com as extensões injetáveis para teste. Ordem: DNS, extensões, cache e
+/// só no fim apaga o registro. Se o registro não puder ser apagado (outra conta o mantém
+/// aberto sem `FILE_SHARE_DELETE`), o DNS e as extensões já foram revertidos: só avisa.
+fn revert_dns_with(
+    r: &dyn CommandRunner,
+    manifest: &DnsStateManifest,
+    revert_extensions: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    restore_connections(r, manifest)?;
+    revert_extensions()?;
+    flush_dns(r);
+    remove_manifest_or_warn();
     Ok(())
+}
+
+/// Apaga o registro; se não der, avisa com clareza em vez de falhar um desfazer já concluído.
+fn remove_manifest_or_warn() {
+    if let Err(e) = DnsStateManifest::remove_manifest() {
+        eprintln!(
+            "⚠️ O DNS e as extensões foram restaurados, mas o registro da proteção não pôde ser apagado ({e:#}). Provavelmente outro programa o mantém aberto: feche-o e rode o desfazer de novo."
+        );
+    }
 }
 
 /// Devolve cada interface ao DNS de antes (automático ou os IPs gravados).
@@ -432,7 +452,7 @@ pub fn revert_dns_fallback() -> Result<()> {
     reset_all_interfaces(&RealRunner)?;
     crate::policy::revert_all()?;
     flush_dns(&RealRunner);
-    DnsStateManifest::remove_manifest()?;
+    remove_manifest_or_warn();
     Ok(())
 }
 

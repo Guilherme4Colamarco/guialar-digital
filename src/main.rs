@@ -345,6 +345,14 @@ fn revert_flow() -> anyhow::Result<String> {
             }
             Ok("Nenhum manifesto de proteção ativo encontrado para reverter.".into())
         }
+        // Falha de E/S ao LER (arquivo aberto por outro programa): o registro pode estar
+        // perfeito. Não o apaga nem cai no fallback; avisa e para sem alterar nada.
+        Err(e) if statedir::is_state_io_error(&e) => {
+            eprintln!(
+                "⚠️  {e:#}. Nada foi alterado; feche o programa que mantém o registro aberto e rode o desfazer de novo."
+            );
+            Err(e)
+        }
         Err(_) => {
             println!(
                 "⚠️  O registro da proteção está danificado: voltando o DNS ao padrão da rede..."
@@ -445,5 +453,30 @@ mod tests {
     #[test]
     fn verify_cli_grammar() {
         Cli::command().debug_assert();
+    }
+
+    /// B2: falha de E/S ao LER o registro (aqui, sem permissão de leitura; no Windows, o arquivo
+    /// aberto por outro programa) NÃO é «registro danificado»: o revert avisa, não apaga o
+    /// registro e não cai no fallback.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn revert_com_erro_de_leitura_nao_apaga_o_registro_nem_cai_no_fallback() {
+        use std::os::unix::fs::PermissionsExt;
+        if sysutil::is_root() {
+            return; // como root a leitura nunca é negada
+        }
+        let s = testenv::Sandbox::new("revert-io");
+        statedir::write_state(b"{\"nao\":\"importa\"}").unwrap();
+        let f = statedir::state_file().unwrap();
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let e = revert_flow().unwrap_err();
+        assert!(statedir::is_state_io_error(&e), "{e:#}");
+        assert!(
+            f.exists(),
+            "o registro não pode ser apagado por um erro de leitura"
+        );
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(std::fs::read(&f).unwrap(), b"{\"nao\":\"importa\"}");
+        drop(s);
     }
 }

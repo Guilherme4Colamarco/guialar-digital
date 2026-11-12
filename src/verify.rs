@@ -17,6 +17,10 @@ pub enum ProtectionStatus {
 
 /// Falta de permissão NÃO é arquivo corrompido (o arquivo pode ser de root).
 pub fn describe_load_error(e: &anyhow::Error) -> String {
+    // falha de E/S (arquivo aberto por outro programa): não é registro corrompido
+    if crate::statedir::is_state_io_error(e) {
+        return format!("{e:#}. Feche o programa que o mantém aberto e tente de novo.");
+    }
     let denied = e.chain().any(|c| {
         c.downcast_ref::<std::io::Error>()
             .is_some_and(|io| io.kind() == std::io::ErrorKind::PermissionDenied)
@@ -242,6 +246,23 @@ mod qa_tests {
             assert!(resolution_matches(&[un("0.0.0.0")], m));
             assert!(resolution_matches(&[un("::")], m));
         }
+    }
+
+    #[test]
+    fn falha_de_leitura_do_registro_nao_e_corrompido_e_nao_manda_para_o_home() {
+        let io = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        let e = anyhow::Error::new(io)
+            .context(crate::statedir::StateIo)
+            .context("Falha ao ler manifesto em x");
+        assert!(crate::statedir::is_state_io_error(&e));
+        let d = describe_load_error(&e);
+        assert!(!d.starts_with("Manifesto corrompido"), "{d}");
+        assert!(!d.contains("~/.config"), "{d}");
+        assert!(d.contains("aberto por outro programa"), "{d}");
+        // JSON inválido segue sendo «corrompido»
+        let e = anyhow::anyhow!("json ruim");
+        assert!(!crate::statedir::is_state_io_error(&e));
+        assert!(describe_load_error(&e).starts_with("Manifesto corrompido"));
     }
 
     #[test]
