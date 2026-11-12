@@ -31,6 +31,7 @@ Fuzzing, testes de carga, automação de GUI por captura de tela, mock do GitHub
 
 ## Limites
 - **UAC negado no Windows não passa pela costura.** `run_elevated_hidden` (ShellExecuteEx) fica fora do `CommandRunner`; os testes só provam a tradução do resultado (`elevation_result`) e a mensagem «Nada foi alterado». Que o UAC negado deixa manifesto e DNS intactos no Windows real é coberto pelo E2E do gl-qa (`scripts/e2e.ps1`) e pela checagem manual do release candidate. No Linux o critério (e) é coberto pela costura (pkexec 126).
+- **No runner Windows hospedado os testes rodam com admin.** O GitHub desliga o UAC nas VMs Windows e não há opção de rodar `cargo test` como usuário comum (no Linux o job tem a guarda `test "$(id -u)" -ne 0`). Aceito como limite. A proteção vem do `CommandRunner` substituível (nenhum teste executa `netsh`/PowerShell reais) e do sandbox do `testenv`, não do usuário que roda os testes.
 - Testes só gravam estado em `testenv::Sandbox`; em `cargo test`, manifesto e trava de operação falham alto fora dele.
 
 ## Divisão

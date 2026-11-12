@@ -12,6 +12,14 @@ on:
     # 03:00 America/Sao_Paulo (UTC-3). Job e2e só neste evento e no dispatch.
     - cron: "0 6 * * *"
 
+permissions:
+  contents: read
+
+# Cancela runs antigos só em PR; push, cron e dispatch nunca cancelam.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -22,13 +30,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
+      - name: Rust (rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
       - name: Formato
         run: cargo fmt --all -- --check
       - name: Clippy
         run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Guarda - testes como usuario comum (nunca root)
+        run: test "$(id -u)" -ne 0
       # N1 (review ADR-029): cargo test como usuário comum. ubuntu-latest não é root,
       # então o skip de apply_twice como root não esconde falha neste job. Gate intacto.
       - name: Testes
@@ -47,14 +56,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-unknown-linux-musl
-          components: clippy
+      - name: Rust (rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
       - name: musl-tools
         run: sudo apt-get update && sudo apt-get install -y musl-tools
       - name: Clippy musl
         run: cargo clippy --locked --all-targets --target x86_64-unknown-linux-musl -- -D warnings
+      - name: Guarda - testes como usuario comum (nunca root)
+        run: test "$(id -u)" -ne 0
       # N1: mesmo usuário comum do runner; cargo test não é root.
       - name: Testes musl
         run: cargo test --locked --target x86_64-unknown-linux-musl
@@ -65,9 +74,8 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
+      - name: Rust (rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
       - name: Clippy
         run: cargo clippy --locked --all-targets -- -D warnings
       - name: Testes
@@ -101,12 +109,11 @@ jobs:
       GUIALAR_NO_INTEGRATION: "1"
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        if: runner.os == 'Linux'
-        with:
-          components: llvm-tools-preview
-      - uses: dtolnay/rust-toolchain@stable
-        if: runner.os == 'Windows'
+      - name: Rust (rust-toolchain.toml)
+        shell: bash
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          if [ "$RUNNER_OS" = "Linux" ]; then rustup component add llvm-tools-preview; fi
 
       - name: E2E Linux (container privilegiado, resolv.conf direto)
         if: runner.os == 'Linux'
@@ -121,6 +128,7 @@ jobs:
               apt-get update
               apt-get install -y --no-install-recommends bind9-dnsutils ca-certificates libc-bin coreutils
               printf "nameserver 1.1.1.1\nnameserver 1.0.0.1\n" > /etc/resolv.conf
+              rustup show active-toolchain || rustup toolchain install
               cargo build --locked --release
               bash scripts/e2e.sh /src/target/release/guialar'
 
