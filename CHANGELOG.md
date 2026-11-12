@@ -10,8 +10,10 @@ Primeira versão pública em Rust. Substitui o Java na `main`. O Java permanece 
 - «Protegido» só aparece com o DNS do modo escolhido **e** a sonda de bloqueio respondendo (ADR-025). O programa mostra o DNS de agora e o novo antes de ativar ou trocar, e confirma antes de desativar (ADR-026).
 - «Parcial» quando há DNS de fora ou ilegível; ativar de novo reaplica o filtro (ADR-027).
 - NetworkManager: o revert devolve o DNS fixo que a conexão tinha (IPv4 e IPv6, com `ignore-auto-dns` sim ou não), em vez de zerá-lo.
-- Linux (AppImage): a elevação extrai numa pasta privada que é apagada ao final, e o atalho do menu só é reescrito pelo próprio AppImage (ADR-028).
-- Bloqueador de anúncios nos navegadores (Windows): uBlock Origin Lite no Chrome, Edge e Brave, com o ID de cada loja (o Edge usa o da loja do Edge); uBlock Origin no Firefox. No Linux, a página da extensão abre na loja certa. Chromium no Windows não é detectado.
+- Estado e trava numa **pasta do sistema**, gravada só pelo processo elevado (ADR-031): Linux `/var/lib/guialar/` e `/run/guialar/op.lock`; Windows `%ProgramData%\GuiaLar\` com ACL só de administradores para escrita. O programa confere o dono antes de confiar no que lê, e o `apply` confere o estado **antes** de mexer no DNS. O registro da beta (na pasta pessoal) é validado e migrado uma vez no `revert`.
+- Linux (AppImage): a elevação roda uma **cópia** do binário numa pasta privada do usuário (sem shell, sem extração como root, nunca no `/tmp`), apagada ao final; o atalho do menu só é reescrito pelo próprio AppImage, e `APPIMAGE` só vale com o executável dentro do `APPDIR` (ADR-028).
+- Windows: o `policies.json` do Firefox não atravessa junção nem link, e o Firefox só é configurado em `Program Files` (ADR-030).
+- Bloqueador de anúncios nos navegadores (Windows): uBlock Origin Lite no Chrome, Edge e Brave, com o ID de cada loja (o Edge usa o da loja do Edge); uBlock Origin no Firefox. Um valor `9101` de outra política não é sobrescrito, e a falha em um navegador não impede os outros. No Linux, a página da extensão abre na loja certa. Chromium no Windows não é detectado.
 - Trava de operação (`OpLock`) com PID; trava órfã não prende o programa.
 - Instância única da janela. Subcomandos internos exigem administrador.
 

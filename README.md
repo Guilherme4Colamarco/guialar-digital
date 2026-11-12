@@ -9,7 +9,7 @@ Proteção de navegação por **DNS filtrado**, com duas opções:
 
 O modo familiar também cuida do bloqueador de anúncios nos navegadores. **No Windows**, o programa o instala por política: o **uBlock Origin Lite** no Chrome, no Edge e no Brave, e o **uBlock Origin** no Firefox; ele aparece quando o navegador é reaberto. **No Linux**, o botão **Proteger este computador** só muda o DNS: o bloqueador é um passo à parte (`guialar setup` ou `guialar browser`), que abre a página da extensão na loja de cada navegador (uBlock Origin Lite no Chrome, Chromium, Brave e Edge; uBlock Origin no Firefox). O modo "só anúncios" não mexe nos navegadores.
 
-Desativar a proteção devolve o DNS que estava antes. Se o registro da proteção (`state.json`) for apagado ou estragar, o programa não sabe mais o que havia antes: o DNS volta ao **automático da rede**, e um DNS fixo que você tinha configurado à mão precisa ser colocado de novo.
+Desativar a proteção devolve o DNS que estava antes. Se o registro da proteção (`state.json`, veja onde fica em «Desfazer e remover») for apagado ou estragar, o programa não sabe mais o que havia antes: o DNS volta ao **automático da rede**, e um DNS fixo que você tinha configurado à mão precisa ser colocado de novo.
 
 > **Limites do filtro por DNS.** Ele bloqueia por **domínio**: não pega anúncio servido pelo mesmo domínio do site, nem navegador ou app com DNS próprio (DoH), nem tráfego que sai por uma VPN. Se a rede já tem outro bloqueador (um Pi-hole, por exemplo), o bloqueio pode vir dele e não do GuiaLar; por isso o programa só diz "Protegido" quando o DNS configurado é o do modo escolhido e o teste de bloqueio responde.
 
@@ -55,6 +55,13 @@ guialar --help
 - **Desativar proteção** (janela) ou `guialar revert` devolve o DNS. No Windows, também tira o bloqueador de anúncios que o programa instalou nos navegadores. No Linux, **não** remove a extensão que você instalou na loja do navegador.
 - Para **remover o programa**: no Linux, apague o AppImage, o atalho `~/.local/share/applications/guialar-digital.desktop` e o ícone `~/.local/share/icons/hicolor/256x256/apps/br.uniube.pi.guialar.png`. No Windows, apague o `.exe` (nada é instalado).
 - Desative a proteção **antes** de apagar o programa, para o DNS voltar ao que era.
+
+### Onde o programa guarda o registro e como apagá-lo
+O registro que permite desfazer (`state.json`, só com endereços de DNS e nomes de conexão) fica numa pasta **do sistema**, gravada apenas pelo programa com permissão de administrador; o seu usuário só a lê:
+- **Linux:** `/var/lib/guialar/state.json`. A trava que impede duas operações ao mesmo tempo fica em `/run/guialar/op.lock` (some ao reiniciar). Para apagar o registro: `sudo rm -rf /var/lib/guialar`.
+- **Windows:** `%ProgramData%\GuiaLar\state.json` (e `op.lock` na mesma pasta), com acesso de escrita só para administradores. Para apagar, como administrador: `rmdir /s /q "%ProgramData%\GuiaLar"`.
+
+Apagar o registro **não desfaz o DNS**: faça isso depois de desativar a proteção (ou, sem o registro, rode `guialar revert`, que volta o DNS ao automático da rede). Quem usou a versão beta tinha o registro na pasta pessoal (`~/.config/guialar` no Linux, `%LOCALAPPDATA%\GuiaLar` no Windows): ao desativar, o programa lê esse registro antigo uma vez, confere se ainda faz sentido e o apaga; se estiver estranho, ignora e volta o DNS ao automático.
 
 ## Requisitos
 
