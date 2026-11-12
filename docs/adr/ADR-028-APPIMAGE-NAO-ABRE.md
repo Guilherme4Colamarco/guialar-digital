@@ -25,3 +25,17 @@ Numa VM Fedora de teste, o AppImage baixado não abriu a janela por duplo clique
 
 ## Fora
 Trocar o formato do pacote. Instalar FUSE pelo programa.
+
+## Revisão 2 (2026-11-12, depois do review de segurança do primeiro conserto)
+O primeiro conserto (pasta privada via `/bin/sh -c` e `TMPDIR`) resolveu a sobra no `/tmp`, mas a revisão achou três problemas:
+- A trava de operação morava em `temp_dir()`, então o processo elevado passou a ver outra trava. Apply e revert ficaram sem exclusão mútua.
+- O diálogo do polkit passou a mostrar um script de shell, o que assusta e esconde o que vai rodar.
+- `APPIMAGE` é herdado por qualquer processo filho de outro AppImage.
+
+Decisão, substituindo o item 2:
+1. **Elevar uma cópia do binário, não o AppImage.** O processo do usuário copia `/proc/self/exe` para uma pasta nova e aleatória em `$XDG_RUNTIME_DIR` (0700, do próprio usuário) e eleva essa cópia com `internal-apply`/`internal-revert`. Não há shell, nem extração como root, nem `/tmp`. O polkit mostra o caminho do GuiaLar e o subcomando. O usuário apaga a cópia ao fim, com sucesso ou com erro.
+   - Pré-condição medida antes de adotar: a cópia roda os subcomandos internos fora do AppImage, na Fedora e na Void. Se não rodar, para e reporta; não se volta ao shell sem nova decisão.
+   - Sem `$XDG_RUNTIME_DIR`, usar `mktemp -d` dentro de uma pasta do usuário que não seja compartilhada. Nunca no `/tmp`.
+2. **Trava fora de diretórios temporários:** `/run/guialar/op.lock`, criada pelo processo elevado com `O_NOFOLLOW`. O usuário só lê para checar se está livre.
+3. **Só confiar em `APPIMAGE` quando `current_exe` estiver dentro de `APPDIR`**, tanto para o atalho do menu quanto para a elevação.
+4. **Código de saída 127 do runtime** aparece como "o AppImage não pôde ser executado", não como "permissão negada".
