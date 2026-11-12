@@ -87,6 +87,7 @@ jobs:
           name: linux-appimage
           path: dist/*
           if-no-files-found: error
+          retention-days: 5
 
   windows:
     name: Windows exe
@@ -132,6 +133,7 @@ jobs:
           name: windows-exe
           path: dist/*.exe
           if-no-files-found: error
+          retention-days: 5
 
   publish:
     name: GitHub Release
