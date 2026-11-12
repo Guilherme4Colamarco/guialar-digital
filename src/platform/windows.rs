@@ -84,7 +84,7 @@ pub fn apply_dns() -> Result<()> {
 
 /// Troca o filtro mantendo o DNS original do manifesto (e tirando as políticas de navegador
 /// quando o novo modo é só anúncios).
-pub fn switch_mode(mut manifest: DnsStateManifest) -> Result<()> {
+pub fn switch_mode(manifest: DnsStateManifest) -> Result<()> {
     if elevate_if_needed(&format!(
         "internal-apply --mode {}",
         current_mode().cli_name()
@@ -92,16 +92,43 @@ pub fn switch_mode(mut manifest: DnsStateManifest) -> Result<()> {
         return Ok(());
     }
     let _lock = crate::sysutil::OpLock::acquire()?;
-    let mode = current_mode();
-    set_servers_on_connections(&RealRunner, &manifest, mode)?;
-    if mode == crate::config::FilterMode::AdsOnly {
-        crate::policy::revert_all()?;
-    } else {
-        crate::policy::install_all()?; // voltou ao familiar: o bloqueador de anúncios volta junto
-    }
-    manifest.mode = mode;
-    manifest.save_atomic()?;
+    switch_mode_with(&RealRunner, manifest, current_mode(), |m| {
+        if m == crate::config::FilterMode::AdsOnly {
+            crate::policy::revert_all()
+        } else {
+            crate::policy::install_all().map(|_| ()) // voltou ao familiar: o bloqueador volta junto
+        }
+    })?;
     flush_dns(&RealRunner);
+    Ok(())
+}
+
+/// A troca de modo, com as políticas dos navegadores injetáveis para teste. O registro (com o
+/// modo novo) é gravado ANTES de qualquer mudança: se nem isso der (registro aberto por outro
+/// programa), nada foi alterado. Se o DNS ou as políticas falham no meio, volta tudo ao modo
+/// anterior (DNS, políticas e registro).
+fn switch_mode_with(
+    r: &dyn CommandRunner,
+    mut manifest: DnsStateManifest,
+    mode: crate::config::FilterMode,
+    mut politicas: impl FnMut(crate::config::FilterMode) -> Result<()>,
+) -> Result<()> {
+    let anterior = manifest.mode;
+    manifest.mode = mode;
+    manifest.save_atomic().context("Nada foi alterado no DNS")?;
+    let feito = set_servers_on_connections(r, &manifest, mode).and_then(|()| politicas(mode));
+    if let Err(e) = feito {
+        manifest.mode = anterior;
+        let desfeito = set_servers_on_connections(r, &manifest, anterior)
+            .and_then(|()| politicas(anterior))
+            .and_then(|()| manifest.save_atomic());
+        return Err(match desfeito {
+            Ok(()) => e.context("Falha ao trocar o filtro; voltei ao modo anterior"),
+            Err(re) => e.context(format!(
+                "Falha ao trocar o filtro e não consegui voltar ao modo anterior ({re:#}); use «Desativar» para restaurar"
+            )),
+        });
+    }
     Ok(())
 }
 

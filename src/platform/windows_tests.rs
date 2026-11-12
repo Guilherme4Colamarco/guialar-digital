@@ -749,3 +749,162 @@ fn registro_preso_no_apply_para_com_mensagem_clara_e_sem_alterar_o_dns() {
     assert!(sets(&r).is_empty());
     drop(preso);
 }
+
+// ------------------------------- switch_mode: registro antes, desfazer para o modo anterior
+
+mod troca_de_modo {
+    use super::*;
+    use crate::config::FilterMode;
+
+    fn aplicado_em_familia(nome: &str) -> (Sandbox, PsFake, DnsStateManifest) {
+        let s = Sandbox::new(nome);
+        let r = two_ifaces();
+        apply_core_with(&r).unwrap();
+        let m = DnsStateManifest::load().unwrap().unwrap();
+        assert_eq!(m.mode, FilterMode::Family);
+        (s, r, m)
+    }
+
+    fn modo_no_disco() -> FilterMode {
+        DnsStateManifest::load().unwrap().unwrap().mode
+    }
+
+    #[test]
+    fn grava_o_registro_antes_de_trocar_o_dns_e_as_politicas() {
+        let (_s, r, m) = aplicado_em_familia("win-switch-ordem");
+        let familia = (r.registry_of(5), r.registry_of(7));
+        let chamadas = RefCell::new(Vec::new());
+        r.calls.borrow_mut().clear();
+        switch_mode_with(&r, m, FilterMode::AdsOnly, |modo| {
+            // quando as políticas rodam, o registro já tem o modo novo e o DNS já foi trocado
+            chamadas.borrow_mut().push((modo, modo_no_disco()));
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            chamadas.into_inner(),
+            [(FilterMode::AdsOnly, FilterMode::AdsOnly)]
+        );
+        assert_eq!(modo_no_disco(), FilterMode::AdsOnly);
+        assert_ne!((r.registry_of(5), r.registry_of(7)), familia, "DNS trocado");
+        assert_eq!(sets(&r).len(), 2);
+    }
+
+    #[test]
+    fn registro_preso_para_sem_alterar_dns_nem_politicas() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let (s, r, m) = aplicado_em_familia("win-switch-preso");
+        let antes = r.all_dns();
+        let preso = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(1)
+            .open(s.manifest_path())
+            .unwrap();
+        r.calls.borrow_mut().clear();
+        let politicas = std::cell::Cell::new(0);
+        let e = format!(
+            "{:#}",
+            switch_mode_with(&r, m, FilterMode::AdsOnly, |_| {
+                politicas.set(politicas.get() + 1);
+                Ok(())
+            })
+            .unwrap_err()
+        );
+        assert!(e.contains("Nada foi alterado no DNS"), "{e}");
+        assert!(e.contains("aberto por outro programa"), "{e}");
+        assert!(sets(&r).is_empty(), "nenhum Set");
+        assert_eq!(politicas.get(), 0, "nenhuma política");
+        assert_eq!(r.all_dns(), antes);
+        drop(preso);
+        assert_eq!(modo_no_disco(), FilterMode::Family);
+    }
+
+    #[test]
+    fn set_que_falha_no_meio_volta_dns_politicas_e_registro_ao_modo_anterior() {
+        let (_s, r, m) = aplicado_em_familia("win-switch-set-falha");
+        let familia = (r.registry_of(5), r.registry_of(7));
+        // o Set do Wi-Fi (segunda interface) falha UMA vez: o desfazer passa
+        let falhou = std::cell::Cell::new(false);
+        let r = OneShotFail {
+            inner: r,
+            padrao: "-InterfaceAlias 'Wi-Fi' -ServerAddresses",
+            ja: &falhou,
+        };
+        let politicas = RefCell::new(Vec::new());
+        let e = switch_mode_with(&r, m, FilterMode::AdsOnly, |modo| {
+            politicas.borrow_mut().push(modo);
+            Ok(())
+        })
+        .unwrap_err();
+        assert!(
+            format!("{e:#}").contains("voltei ao modo anterior"),
+            "{e:#}"
+        );
+        let r = r.inner;
+        assert_eq!((r.registry_of(5), r.registry_of(7)), familia, "DNS voltou");
+        assert_eq!(modo_no_disco(), FilterMode::Family, "registro voltou");
+        // o Wi-Fi falhou antes das políticas: só o desfazer as roda, no modo anterior
+        assert_eq!(politicas.into_inner(), [FilterMode::Family]);
+    }
+
+    #[test]
+    fn se_o_desfazer_tambem_falha_manda_usar_desativar() {
+        let (_s, r, m) = aplicado_em_familia("win-switch-set-falha-2");
+        // o Set do Wi-Fi falha sempre: na troca e no desfazer
+        *r.fail_on.borrow_mut() = Some("-InterfaceAlias 'Wi-Fi' -ServerAddresses".into());
+        let e = switch_mode_with(&r, m, FilterMode::AdsOnly, |_| Ok(())).unwrap_err();
+        let e = format!("{e:#}");
+        assert!(e.contains("não consegui voltar ao modo anterior"), "{e}");
+        assert!(e.contains("Desativar"), "{e}");
+    }
+
+    /// Falha o primeiro comando que contém `padrao` e deixa os seguintes passarem.
+    struct OneShotFail<'a> {
+        inner: PsFake,
+        padrao: &'static str,
+        ja: &'a std::cell::Cell<bool>,
+    }
+
+    impl CommandRunner for OneShotFail<'_> {
+        fn run(&self, cmd: &Cmd) -> io::Result<Outcome> {
+            if !self.ja.get() && cmd.program == "powershell" {
+                let script = decode_ps(&cmd.args.last().unwrap().to_string_lossy());
+                if script.contains(self.padrao) {
+                    self.ja.set(true);
+                    return Ok(Outcome {
+                        code: Some(1),
+                        stderr: b"falhou".to_vec(),
+                        ..Outcome::default()
+                    });
+                }
+            }
+            self.inner.run(cmd)
+        }
+    }
+
+    #[test]
+    fn politica_que_falha_desfaz_o_dns_e_roda_as_politicas_do_modo_anterior() {
+        let (_s, r, m) = aplicado_em_familia("win-switch-politica-falha");
+        let familia = (r.registry_of(5), r.registry_of(7));
+        let politicas = RefCell::new(Vec::new());
+        let e = switch_mode_with(&r, m, FilterMode::AdsOnly, |modo| {
+            politicas.borrow_mut().push(modo);
+            if modo == FilterMode::AdsOnly {
+                anyhow::bail!("reg.exe falhou");
+            }
+            Ok(())
+        })
+        .unwrap_err();
+        let e = format!("{e:#}");
+        assert!(
+            e.contains("voltei ao modo anterior") && e.contains("reg.exe falhou"),
+            "{e}"
+        );
+        assert_eq!(
+            politicas.into_inner(),
+            [FilterMode::AdsOnly, FilterMode::Family]
+        );
+        assert_eq!((r.registry_of(5), r.registry_of(7)), familia, "DNS voltou");
+        assert_eq!(modo_no_disco(), FilterMode::Family);
+    }
+}
