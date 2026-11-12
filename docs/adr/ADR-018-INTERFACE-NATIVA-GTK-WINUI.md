@@ -150,3 +150,5 @@ guialar-rs/
    - Iniciar a GUI no Linux (`fedora` / `void`) e no Windows 11 (`win11`), capturar screenshots (`vm shot` / `/tmp/win11-gui.png` e `/tmp/linux-gui.png`) comprovando o visual nativo WinUI no Windows 11 e GTK4/Libadwaita no Linux, e testar o clique de ativação/desativação pela interface.
 4. **`gl-devops` (Empacotamento Desktop e Exibição na VM Windows 11):**
    - Atualizar o `.AppImage` (com ícone `.svg` e `.desktop` integrados ao sistema) e o `guialar-0.3.0-windows.exe` (com ícone `.ico`, `VERSIONINFO` e manifesto embutidos), disponibilizar na VM `win11` aberta na tela do usuário e deixar a janela gráfica aberta na área de trabalho do Windows 11 para inspeção imediata.
+
+> Nota (2026-11-12): o caminho do manifesto citado acima (`~/.config/guialar/state.json`) foi substituído pela ADR-031 (`/var/lib/guialar/state.json` no Linux, `%ProgramData%\GuiaLar\state.json` no Windows). O texto original fica como registro histórico.
