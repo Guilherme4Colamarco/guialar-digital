@@ -256,7 +256,12 @@ pub fn known_connection_ids() -> Vec<String> {
 
 /// Migração do manifesto antigo da beta (ADR-031); ver `platform::migrate_legacy`.
 pub fn migrate_legacy() -> Result<Option<String>> {
-    super::migrate_legacy_generic(&known_connection_ids(), revert_dns, revert_dns_fallback)
+    super::migrate_legacy_generic(
+        BackendKind::WindowsPowerShell,
+        &known_connection_ids(),
+        revert_dns,
+        revert_dns_fallback,
+    )
 }
 
 fn list_active_interfaces(r: &dyn CommandRunner) -> Result<Vec<(String, u32)>> {
