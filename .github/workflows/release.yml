@@ -1,14 +1,19 @@
 # Gate 7 da ADR-023: release v* com AppImage + exe + SHA256SUMS gerados pela CI.
-# Só dispara em tag. Não publique a tag antes da aprovação final e da main Rust.
+# Tag estável: vX.Y.Z. Pré-release: vX.Y.Z-rcN. Qualquer outra tag v* é ignorada.
+# A branch release-dry-run ensaia o build e sobe os artefatos do run, sem tag nem release.
+# Não publique a tag antes da aprovação final e da main Rust.
 name: Release
 
 on:
   push:
     tags:
-      - "v*"
+      - "v[0-9]+.[0-9]+.[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+-rc*"
+    branches:
+      - release-dry-run
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -17,12 +22,49 @@ env:
   APPIMAGETOOL_SHA256: 46fdd785094c7f6e545b61afcfb0f3d98d8eab243f644b4b17698c01d06083d1
 
 jobs:
+  meta:
+    name: Versão e tag
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      prerelease: ${{ steps.v.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Versão do Cargo.toml x tag
+        id: v
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          cargo_ver="$(sed -n 's/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -n1)"
+          test -n "$cargo_ver" || { echo "::error::versão não encontrada no Cargo.toml"; exit 1; }
+          prerelease=false
+          if [ "$REF_TYPE" = "tag" ]; then
+            if ! printf '%s' "$REF_NAME" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-rc[0-9A-Za-z.]*)?$'; then
+              echo "::error::tag '$REF_NAME' fora do padrão vX.Y.Z ou vX.Y.Z-rcN"; exit 1
+            fi
+            base="${REF_NAME#v}"; base="${base%%-rc*}"
+            if [ "$base" != "$cargo_ver" ]; then
+              echo "::error::tag '$REF_NAME' não bate com a versão do Cargo.toml ($cargo_ver)"; exit 1
+            fi
+            version="${REF_NAME#v}"
+            case "$REF_NAME" in *-rc*) prerelease=true ;; esac
+          else
+            version="$cargo_ver"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
+          echo "versão=$version prerelease=$prerelease ref=$REF_TYPE/$REF_NAME"
+
   linux:
     name: AppImage
+    needs: meta
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Rust (rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
       - name: Build release gnu
         run: cargo build --locked --release
       - name: appimagetool
@@ -33,9 +75,8 @@ jobs:
           sudo install -m 755 /tmp/appimagetool /usr/local/bin/appimagetool
       - name: Empacotar AppImage
         env:
-          VERSION: ${{ github.ref_name }}
+          VERSION: ${{ needs.meta.outputs.version }}
         run: |
-          VERSION="${VERSION#v}"
           export NAME="guialar-${VERSION}-x86_64.AppImage"
           bash scripts/package-appimage.sh
           ls -lh dist/
@@ -47,18 +88,30 @@ jobs:
 
   windows:
     name: Windows exe
+    needs: meta
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Rust (rust-toolchain.toml)
+        shell: bash
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Conferir llvm-windres
+        shell: pwsh
+        run: |
+          if ($env:GUIALAR_WINDRES) { $w = $env:GUIALAR_WINDRES } else { $w = 'llvm-windres' }
+          $cmd = Get-Command $w -ErrorAction SilentlyContinue
+          if (-not $cmd) {
+            Write-Error "llvm-windres nao encontrado no PATH (o build.rs precisa dele para os recursos do Windows). Instale o LLVM (choco install llvm) ou defina GUIALAR_WINDRES."
+            exit 1
+          }
+          Write-Host "llvm-windres: $($cmd.Source)"
       - name: Build release
         run: cargo build --locked --release
       - name: Nomear artefato
         shell: bash
         env:
-          VERSION: ${{ github.ref_name }}
+          VERSION: ${{ needs.meta.outputs.version }}
         run: |
-          VERSION="${VERSION#v}"
           mkdir -p dist
           cp target/release/guialar.exe "dist/guialar-${VERSION}-windows.exe"
       - uses: actions/upload-artifact@v4
@@ -69,8 +122,10 @@ jobs:
 
   publish:
     name: GitHub Release
-    needs: [linux, windows]
+    needs: [meta, linux, windows]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -81,9 +136,18 @@ jobs:
           cd dist
           sha256sum * | tee SHA256SUMS
           ls -lh
+      # Sempre: prova do ensaio (branch) e cópia da tag. Retenção curta; repo público.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-bundle
+          path: dist/*
+          retention-days: 5
+          if-no-files-found: error
       - name: Criar release
+        if: github.ref_type == 'tag'
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*
           generate_release_notes: true
           fail_on_unmatched_files: true
+          prerelease: ${{ needs.meta.outputs.prerelease == 'true' }}
