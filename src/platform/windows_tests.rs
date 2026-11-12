@@ -46,6 +46,8 @@ struct PsFake {
     dhcp: BTreeMap<u32, Vec<String>>,
     calls: RefCell<Vec<String>>,
     fail_on: RefCell<Option<String>>,
+    /// uma segunda parte de script que também falha
+    fail_also: RefCell<Option<String>>,
     /// interfaces cujo `InterfaceGuid` volta num formato inválido
     bad_guid: RefCell<Vec<u32>>,
 }
@@ -95,6 +97,7 @@ impl PsFake {
             dhcp: BTreeMap::new(),
             calls: RefCell::new(Vec::new()),
             fail_on: RefCell::new(None),
+            fail_also: RefCell::new(None),
             bad_guid: RefCell::new(Vec::new()),
         }
     }
@@ -239,14 +242,14 @@ impl CommandRunner for PsFake {
             .expect("prefixo UTF-8/Stop")
             .to_string();
         self.calls.borrow_mut().push(script.clone());
-        if let Some(f) = self.fail_on.borrow().as_deref() {
-            if script.contains(f) {
-                return Ok(Outcome {
-                    code: Some(1),
-                    stderr: b"falhou".to_vec(),
-                    ..Outcome::default()
-                });
-            }
+        let falha =
+            |f: &RefCell<Option<String>>| f.borrow().as_deref().is_some_and(|f| script.contains(f));
+        if falha(&self.fail_on) || falha(&self.fail_also) {
+            return Ok(Outcome {
+                code: Some(1),
+                stderr: b"falhou".to_vec(),
+                ..Outcome::default()
+            });
         }
         let out: String = script.split(';').map(|s| self.stmt(s)).collect();
         Ok(Outcome {
@@ -631,4 +634,33 @@ fn todas_sem_guid_falha_sem_alterar_nada() {
     assert!(format!("{e:#}").contains("pôde ser inspecionada"), "{e:#}");
     assert!(sets(&r).is_empty());
     assert_eq!(r.all_dns(), antes);
+}
+
+// ------------------------------- falha num Set no meio do laço (B1 do 7ec97d7)
+
+#[test]
+fn falha_no_set_da_segunda_interface_desfaz_a_primeira_e_nao_deixa_manifesto() {
+    let _s = Sandbox::new("win-set-falha");
+    let r = two_ifaces();
+    let antes = r.all_dns();
+    *r.fail_on.borrow_mut() = Some("-InterfaceIndex 7 -ServerAddresses".into());
+    let e = apply_core_with(&r).unwrap_err();
+    assert!(format!("{e:#}").contains("foi desfeito"), "{e:#}");
+    assert_eq!(r.all_dns(), antes, "a Ethernet voltou ao que era");
+    assert!(DnsStateManifest::load().unwrap().is_none());
+}
+
+#[test]
+fn falha_no_set_e_no_desfazer_deixa_o_manifesto_para_o_desativar() {
+    let _s = Sandbox::new("win-set-falha-2");
+    let r = two_ifaces();
+    *r.fail_on.borrow_mut() = Some("-InterfaceIndex 7 -ServerAddresses".into());
+    *r.fail_also.borrow_mut() = Some("-InterfaceAlias".into()); // o desfazer também falha
+    let e = apply_core_with(&r).unwrap_err();
+    assert!(format!("{e:#}").contains("não consegui desfazer"), "{e:#}");
+    // a Ethernet já estava com o filtro; o registro do estado de antes existe
+    let m = DnsStateManifest::load()
+        .unwrap()
+        .expect("manifesto gravado antes do laço");
+    assert_eq!(m.connections.len(), 2);
 }

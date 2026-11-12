@@ -190,15 +190,30 @@ fn apply_core_with(r: &dyn CommandRunner) -> Result<()> {
     if alvos.is_empty() {
         bail!("Nenhuma interface de rede ativa pôde ser inspecionada no Windows");
     }
+    // O manifesto descreve o estado de ANTES: grava-o antes de trocar qualquer DNS, para que uma
+    // falha no meio do laço (adaptador que some, Wi-Fi que cai) nunca deixe DNS trocado sem
+    // registro para desfazer.
+    manifest.save_atomic()?;
     for index in alvos {
-        run_powershell(
+        if let Err(e) = run_powershell(
             r,
             &format!(
                 "Set-DnsClientServerAddress -InterfaceIndex {index} -ServerAddresses @({servers})"
             ),
-        )?;
+        ) {
+            // desfaz o que já foi trocado (restaurar uma interface intacta é inócuo); se o
+            // desfazer funcionou, o registro não tem mais o que guardar
+            return match restore_connections(r, &manifest) {
+                Ok(()) => {
+                    let _ = DnsStateManifest::remove_manifest();
+                    Err(e.context("Falha ao trocar o DNS; o que já tinha sido trocado foi desfeito"))
+                }
+                Err(re) => Err(e.context(format!(
+                    "Falha ao trocar o DNS e não consegui desfazer ({re:#}); use «Desativar» para restaurar"
+                ))),
+            };
+        }
     }
-    manifest.save_atomic()?;
     flush_dns(r);
     Ok(())
 }
