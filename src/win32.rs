@@ -636,6 +636,27 @@ extern "system" {
     pub fn ConvertSidToStringSidW(sid: *mut c_void, s: *mut *mut u16) -> i32;
 }
 
+// N1: arquivos do estado criados com DACL protegida explícita e conferência da DACL.
+pub const GENERIC_WRITE: u32 = 0x4000_0000;
+pub const CREATE_NEW: u32 = 1;
+pub const FILE_ATTRIBUTE_NORMAL: u32 = 0x80;
+pub const SE_DACL_PROTECTED: u16 = 0x1000;
+pub const ACL_SIZE_INFORMATION_CLASS: u32 = 2;
+
+#[repr(C)]
+pub struct ACL_SIZE_INFORMATION {
+    pub AceCount: u32,
+    pub AclBytesInUse: u32,
+    pub AclBytesFree: u32,
+}
+
+#[link(name = "advapi32")]
+extern "system" {
+    pub fn GetSecurityDescriptorControl(sd: *mut c_void, control: *mut u16, rev: *mut u32) -> i32;
+    pub fn GetAclInformation(acl: *mut c_void, info: *mut c_void, len: u32, class: u32) -> i32;
+    pub fn GetAce(acl: *mut c_void, index: u32, ace: *mut *mut c_void) -> i32;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -381,6 +381,10 @@ fn create_lock_file(path: &Path) -> std::io::Result<std::fs::File> {
         use std::os::unix::fs::OpenOptionsExt;
         o.mode(0o644).custom_flags(crate::safefs::O_NOFOLLOW);
     }
+    // Windows: DACL protegida explícita, sem herdar da pasta (N1)
+    #[cfg(windows)]
+    let f = crate::statedir::create_new_protected(path)?;
+    #[cfg(not(windows))]
     let f = o.open(path)?;
     #[cfg(target_os = "linux")]
     {

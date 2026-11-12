@@ -60,6 +60,45 @@ fn is_core_name(name: &str) -> bool {
     name == STATE_FILE || name == "op.lock"
 }
 
+/// Uma ACE da DACL de um arquivo, já reduzida ao que importa para a confiança.
+#[cfg(any(windows, test))]
+#[derive(Debug, Clone)]
+struct AceInfo {
+    /// `true` para «permitir»; ACEs de negar são ignoradas (só restringem).
+    allow: bool,
+    mask: u32,
+    sid: String,
+}
+
+/// Direitos que deixam alterar o arquivo, apagá-lo ou trocar sua ACL/dono: `FILE_WRITE_DATA`,
+/// `FILE_APPEND_DATA`, `FILE_WRITE_EA`, `FILE_DELETE_CHILD`, `FILE_WRITE_ATTRIBUTES`, `DELETE`,
+/// `WRITE_DAC`, `WRITE_OWNER`, `GENERIC_WRITE` e `GENERIC_ALL`.
+#[cfg(any(windows, test))]
+const WRITE_LIKE_MASK: u32 =
+    0x2 | 0x4 | 0x10 | 0x40 | 0x100 | 0x1_0000 | 0x4_0000 | 0x8_0000 | 0x4000_0000 | 0x1000_0000;
+
+/// A DACL de um ARQUIVO do estado é segura? Protegida (não herda da pasta, que uma conta comum
+/// pode ter reaberto, N1) e sem direito de escrita para quem não seja Administradores/SYSTEM.
+/// `aces = None` é uma DACL nula (todos com tudo).
+#[cfg(any(windows, test))]
+fn file_dacl_is_safe(protected: bool, aces: Option<&[AceInfo]>) -> bool {
+    let Some(aces) = aces else { return false };
+    protected
+        && aces.iter().all(|a| {
+            !a.allow
+                || a.mask & WRITE_LIKE_MASK == 0
+                || a.sid == "S-1-5-32-544"
+                || a.sid == "S-1-5-18"
+        })
+}
+
+/// Cria um arquivo NOVO (`CREATE_NEW`) já com dono Administradores e DACL protegida explícita
+/// (Administradores e SYSTEM controle total, Usuários só leitura), sem herdar da pasta.
+#[cfg(windows)]
+pub fn create_new_protected(path: &Path) -> std::io::Result<std::fs::File> {
+    imp::create_new_protected(path)
+}
+
 /// Grava o manifesto (temp + `rename`) na pasta do sistema.
 pub fn write_state(data: &[u8]) -> Result<()> {
     let dir = ensure_dir()?;
@@ -302,7 +341,181 @@ mod imp {
         if crate::testenv::sandboxed() {
             return true;
         }
-        owner_sid(path).is_some_and(|s| TRUSTED_SIDS.contains(&s.as_str()))
+        if !owner_sid(path).is_some_and(|s| TRUSTED_SIDS.contains(&s.as_str())) {
+            return false;
+        }
+        // Arquivo: a DACL também conta (N1). Uma conta comum que tenha mantido um handle com
+        // WRITE_DAC na pasta antes do primeiro fechamento pode reabri-la; o dono do arquivo
+        // seria Administradores mesmo assim, mas gravável por ela.
+        if m.is_file() {
+            return read_dacl(path)
+                .is_some_and(|(prot, aces)| file_dacl_is_safe(prot, aces.as_deref()));
+        }
+        true
+    }
+
+    /// DACL do objeto: (protegida?, ACEs). `None` se não deu para ler; ACEs `None` = DACL nula.
+    fn read_dacl(path: &Path) -> Option<(bool, Option<Vec<AceInfo>>)> {
+        let w = wide(path.as_os_str());
+        let mut dacl: *mut std::ffi::c_void = std::ptr::null_mut();
+        let mut sd: *mut std::ffi::c_void = std::ptr::null_mut();
+        // SAFETY: nome terminado em NUL e ponteiros de saída válidos; `sd` é liberado abaixo.
+        let r = unsafe {
+            win32::GetNamedSecurityInfoW(
+                w.as_ptr(),
+                win32::SE_FILE_OBJECT,
+                win32::DACL_SECURITY_INFORMATION,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut dacl,
+                std::ptr::null_mut(),
+                &mut sd,
+            )
+        };
+        if r != 0 || sd.is_null() {
+            return None;
+        }
+        let mut control: u16 = 0;
+        let mut rev: u32 = 0;
+        // SAFETY: `sd` válido até o LocalFree; saídas válidas.
+        let ok = unsafe { win32::GetSecurityDescriptorControl(sd, &mut control, &mut rev) } != 0;
+        let out = ok.then(|| {
+            let protected = control & win32::SE_DACL_PROTECTED != 0;
+            if dacl.is_null() {
+                return (protected, None);
+            }
+            let mut info = win32::ACL_SIZE_INFORMATION {
+                AceCount: 0,
+                AclBytesInUse: 0,
+                AclBytesFree: 0,
+            };
+            // SAFETY: `dacl` aponta para dentro de `sd`; `info` tem o tamanho da classe.
+            let got = unsafe {
+                win32::GetAclInformation(
+                    dacl,
+                    (&raw mut info).cast(),
+                    std::mem::size_of::<win32::ACL_SIZE_INFORMATION>() as u32,
+                    win32::ACL_SIZE_INFORMATION_CLASS,
+                )
+            } != 0;
+            let mut aces = Vec::new();
+            if !got {
+                // não leu a lista: trata como DACL desconhecida (nunca confiável)
+                return (protected, None);
+            }
+            for i in 0..info.AceCount {
+                let mut ace: *mut std::ffi::c_void = std::ptr::null_mut();
+                // SAFETY: índice dentro de `AceCount`; `ace` aponta para dentro da DACL.
+                if unsafe { win32::GetAce(dacl, i, &mut ace) } == 0 || ace.is_null() {
+                    return (protected, None);
+                }
+                // ACE_HEADER {tipo u8, flags u8, tamanho u16}; as ACEs de permitir/negar
+                // «simples» (tipos 0 e 1) seguem com Mask u32 e o SID a partir do byte 8.
+                // SAFETY: cabeçalho de 4 bytes e, para os tipos 0/1, máscara e SID válidos.
+                let tipo = unsafe { *(ace as *const u8) };
+                if tipo > 1 {
+                    // qualquer outro tipo (objeto, callback, auditoria...): desconhecido
+                    aces.push(AceInfo {
+                        allow: true,
+                        mask: u32::MAX,
+                        sid: "?".into(),
+                    });
+                    continue;
+                }
+                // SAFETY: ver acima.
+                let mask = unsafe { *((ace as *const u8).add(4) as *const u32) };
+                let mut s: *mut u16 = std::ptr::null_mut();
+                let sid = unsafe { (ace as *mut u8).add(8) };
+                // SAFETY: o SID está dentro da ACE; a string é liberada abaixo.
+                let conv = unsafe { win32::ConvertSidToStringSidW(sid.cast(), &mut s) };
+                let sid = if conv != 0 && !s.is_null() {
+                    let t = from_wide_ptr(s);
+                    // SAFETY: veio de ConvertSidToStringSidW.
+                    unsafe { win32::LocalFree(s.cast()) };
+                    t
+                } else {
+                    "?".into()
+                };
+                aces.push(AceInfo {
+                    allow: tipo == 0,
+                    mask,
+                    sid,
+                });
+            }
+            (protected, Some(aces))
+        });
+        // SAFETY: `sd` veio do GetNamedSecurityInfoW.
+        unsafe { win32::LocalFree(sd) };
+        out
+    }
+
+    /// `CREATE_NEW` com dono Administradores e DACL protegida explícita (ver o nível acima).
+    pub fn create_new_protected(path: &Path) -> std::io::Result<std::fs::File> {
+        use std::os::windows::io::FromRawHandle;
+        #[cfg(test)]
+        if crate::testenv::sandboxed() {
+            // nos testes unitários a conta de teste não é administradora: arquivo comum
+            return std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path);
+        }
+        // dono Administradores, grupo SYSTEM, DACL protegida; Usuários só leem
+        let sd = security_descriptor_from("O:BAG:SYD:P(A;;FA;;;BA)(A;;FA;;;SY)(A;;FR;;;BU)")
+            .map_err(std::io::Error::other)?;
+        let sa = win32::SECURITY_ATTRIBUTES {
+            nLength: std::mem::size_of::<win32::SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: sd,
+            bInheritHandle: 0,
+        };
+        let w = wide(path.as_os_str());
+        // SAFETY: caminho terminado em NUL e atributos válidos durante a chamada. Compartilha
+        // leitura/escrita/apagar como o `std` (o usuário lê o PID da trava).
+        let h = unsafe {
+            win32::CreateFileW(
+                w.as_ptr(),
+                win32::GENERIC_WRITE,
+                win32::FILE_SHARE_ALL,
+                (&raw const sa).cast_mut().cast(),
+                win32::CREATE_NEW,
+                win32::FILE_ATTRIBUTE_NORMAL | win32::FILE_FLAG_OPEN_REPARSE_POINT,
+                std::ptr::null_mut(),
+            )
+        };
+        let err = std::io::Error::last_os_error();
+        // SAFETY: `sd` veio da conversão.
+        unsafe { win32::LocalFree(sd) };
+        if h == win32::INVALID_HANDLE_VALUE {
+            return Err(err);
+        }
+        // SAFETY: handle de arquivo válido, de posse única; o `File` o fecha.
+        Ok(unsafe { std::fs::File::from_raw_handle(h) })
+    }
+
+    /// Só para testes de ACL real: o que um atacante com um handle `WRITE_DAC` faz — reabre a
+    /// DACL da pasta dando controle total a Usuários. Devolve o código do `SetSecurityInfo`.
+    #[cfg(test)]
+    pub fn test_grant_users_full(h: &Handle) -> u32 {
+        let sd = security_descriptor_from("D:(A;OICI;FA;;;BU)").unwrap();
+        let mut dacl: *mut std::ffi::c_void = std::ptr::null_mut();
+        let (mut present, mut defaulted) = (0i32, 0i32);
+        // SAFETY: `sd` válido; saídas internas a `sd`.
+        unsafe { win32::GetSecurityDescriptorDacl(sd, &mut present, &mut dacl, &mut defaulted) };
+        // SAFETY: handle válido; `dacl` pertence a `sd`.
+        let r = unsafe {
+            win32::SetSecurityInfo(
+                h.0,
+                win32::SE_FILE_OBJECT,
+                win32::DACL_SECURITY_INFORMATION,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                dacl,
+                std::ptr::null_mut(),
+            )
+        };
+        // SAFETY: veio da conversão.
+        unsafe { win32::LocalFree(sd) };
+        r
     }
 
     /// Só para testes de ACL real: troca o dono de `path` (SDDL tipo `O:BU`).
@@ -434,7 +647,7 @@ mod imp {
     }
 
     /// Handle que fecha sozinho.
-    struct Handle(win32::HANDLE);
+    pub struct Handle(win32::HANDLE);
     impl Drop for Handle {
         fn drop(&mut self) {
             // SAFETY: o handle veio de `CreateFileW` e é fechado uma vez.
@@ -444,7 +657,7 @@ mod imp {
 
     /// Abre `path` SEM seguir ponto de reparse (`FILE_FLAG_OPEN_REPARSE_POINT`): se o nome for
     /// uma junção/link, o handle é o da própria junção, não o do alvo.
-    fn open_no_follow(path: &Path, access: u32) -> std::io::Result<Handle> {
+    pub fn open_no_follow(path: &Path, access: u32) -> std::io::Result<Handle> {
         let w = wide(path.as_os_str());
         // SAFETY: caminho terminado em NUL; sem atributos de segurança nem modelo.
         let h = unsafe {
@@ -709,10 +922,8 @@ mod imp {
         ));
         let target = dir.join(name);
         let result = (|| -> Result<()> {
-            let mut f = std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&tmp)
+            // DACL protegida explícita (não herda da pasta, que pode ter sido reaberta, N1)
+            let mut f = create_new_protected(&tmp)
                 .with_context(|| format!("Falha ao criar arquivo temporário {tmp:?}"))?;
             f.write_all(data)?;
             f.flush()?;
@@ -772,6 +983,54 @@ mod tests {
             unlink_now(&f).unwrap_err().kind(),
             std::io::ErrorKind::NotFound
         );
+    }
+
+    fn ace(allow: bool, mask: u32, sid: &str) -> AceInfo {
+        AceInfo {
+            allow,
+            mask,
+            sid: sid.into(),
+        }
+    }
+
+    #[test]
+    fn dacl_de_arquivo_so_e_segura_protegida_e_sem_escrita_para_outros() {
+        const FA: u32 = 0x1F_01FF;
+        const FR: u32 = 0x12_0089;
+        let (ba, sy, bu) = ("S-1-5-32-544", "S-1-5-18", "S-1-5-32-545");
+        let boa = [ace(true, FA, ba), ace(true, FA, sy), ace(true, FR, bu)];
+        assert!(file_dacl_is_safe(true, Some(&boa)));
+        // não protegida: herdaria da pasta (N1)
+        assert!(!file_dacl_is_safe(false, Some(&boa)));
+        // DACL nula = todos com tudo
+        assert!(!file_dacl_is_safe(true, None));
+        // Usuários com qualquer direito de escrita, apagar ou mexer na ACL/dono
+        for perigo in [
+            FA,
+            0x2,
+            0x4,
+            0x10,
+            0x40,
+            0x100,
+            0x1_0000,
+            0x4_0000,
+            0x8_0000,
+            0x4000_0000,
+            0x1000_0000,
+        ] {
+            let ruim = [ace(true, FA, ba), ace(true, perigo, bu)];
+            assert!(!file_dacl_is_safe(true, Some(&ruim)), "{perigo:#x}");
+        }
+        // «Todos» e o próprio usuário também valem
+        for sid in ["S-1-1-0", "S-1-5-21-1-2-3-1001", "S-1-5-11", "?"] {
+            assert!(
+                !file_dacl_is_safe(true, Some(&[ace(true, 0x2, sid)])),
+                "{sid}"
+            );
+        }
+        // negar não concede nada
+        let com_negar = [ace(true, FA, ba), ace(false, FA, bu), ace(true, FR, bu)];
+        assert!(file_dacl_is_safe(true, Some(&com_negar)));
     }
 
     fn modo(p: &Path) -> u32 {
@@ -983,12 +1242,13 @@ mod tests_win {
             .unwrap();
         let facl = String::from_utf8_lossy(&f.stdout).into_owned();
         println!("{facl}");
+        // N1: o manifesto NÃO herda da pasta; tem DACL própria, protegida, com Usuários só leitura
         assert!(
-            facl.contains("Users:(I)(R)"),
-            "o arquivo herda leitura para Usuários: {facl}"
+            facl.contains("Users:(R)") && !facl.contains("(I)"),
+            "DACL explícita, sem herança, leitura para Usuários: {facl}"
         );
         assert!(
-            !facl.contains("Users:(I)(F)") && !facl.contains("(M)") && !facl.contains("(W)"),
+            !facl.contains("Users:(F)") && !facl.contains("(M)") && !facl.contains("(W)"),
             "{facl}"
         );
         // pasta que não é nossa (junção): sai do caminho e a certa é recriada
@@ -1260,6 +1520,164 @@ mod tests_win {
         drop(preso);
         let d = ensure_dir().expect("sem o handle, a ativação segue");
         assert!(!d.join("op.lock").exists());
+        limpar_real(&dir);
+    }
+
+    /// Sonda do N1 (medição manual com `atacante.ps1` numa conta sem admin): espera a conta
+    /// comum criar a pasta, fecha com `ensure_dir` e grava o manifesto várias vezes enquanto o
+    /// atacante reabre a DACL pelo handle antigo. Imprime o que ficou.
+    #[test]
+    #[ignore = "medição manual do N1 na win11 (precisa do atacante.ps1 rodando)"]
+    fn n1_sonda_manifesto_com_atacante_segurando_handle_write_dac() {
+        let dir = state_dir().unwrap();
+        for _ in 0..100 {
+            if dir.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        assert!(dir.exists(), "o atacante não criou a pasta");
+        std::thread::sleep(std::time::Duration::from_millis(1500)); // o handle já está aberto
+        let t0 = std::time::Instant::now();
+        let (mut i, mut herdou_escrita) = (0, 0);
+        while t0.elapsed() < std::time::Duration::from_secs(14) {
+            i += 1;
+            match write_state(format!("{{\"n\":{i}}}").as_bytes()) {
+                Ok(()) => {}
+                Err(e) => println!("write_state #{i} falhou: {e:#}"),
+            }
+            // o manifesto recém-gravado deu escrita a «Users» por herança?
+            let acl = icacls(&dir.join(STATE_FILE));
+            if acl.contains("Users:(I)(F)")
+                || acl.contains("Users:(I)(M)")
+                || acl.contains("Users:(I)(W)")
+            {
+                herdou_escrita += 1;
+            }
+        }
+        println!(
+            "MEDIDA: {i} gravações do manifesto; {herdou_escrita} nasceram com escrita para Users"
+        );
+        let st = dir.join(STATE_FILE);
+        println!("PASTA:\n{}", icacls(&dir));
+        println!("STATE.JSON:\n{}", icacls(&st));
+        println!(
+            "is_trusted(state.json)={} is_trusted(pasta)={} dono(state.json)={:?}",
+            is_trusted(&st),
+            is_trusted(&dir),
+            imp::owner_sid(&st)
+        );
+    }
+
+    /// N1: uma conta comum que criou a pasta e MANTÉM um handle com `WRITE_DAC` reabre a DACL
+    /// (Usuários com controle total) enquanto o `ensure_dir` fecha e o manifesto é gravado.
+    /// O manifesto e a trava não herdam da pasta: nascem com DACL protegida, sem escrita para
+    /// Usuários, e um arquivo que NÃO esteja assim é ignorado como se fosse de dono alheio.
+    #[test]
+    #[ignore = "cria %ProgramData%\\GuiaLar de verdade (administrador, VM)"]
+    fn acl_real_n1_handle_write_dac_aberto_antes_nao_forja_manifesto_nem_trava() {
+        use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+        let dir = state_dir().unwrap();
+        limpar_real(&dir);
+        std::fs::create_dir(&dir).unwrap(); // criada pela «conta comum»: herda a ACL
+        let parar = std::sync::Arc::new(AtomicBool::new(false));
+        let reabertas = std::sync::Arc::new(AtomicU32::new(0));
+        let (p2, r2) = (parar.clone(), reabertas.clone());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let dir2 = dir.clone();
+        let atacante = std::thread::spawn(move || {
+            // WRITE_DAC | READ_CONTROL, aberto ANTES do primeiro fechamento da pasta
+            let h = imp::open_no_follow(&dir2, 0x4_0000 | 0x2_0000).unwrap();
+            tx.send(()).unwrap();
+            while !p2.load(Ordering::Relaxed) {
+                if imp::test_grant_users_full(&h) == 0 {
+                    r2.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            drop(h);
+        });
+        rx.recv().unwrap(); // o handle já está aberto
+        let st = dir.join(STATE_FILE);
+        let lk = dir.join("op.lock");
+        let mut ruins = Vec::new();
+        for i in 0..150 {
+            if let Err(e) = write_state(format!("{{\"n\":{i}}}").as_bytes()) {
+                ruins.push(format!("write_state #{i}: {e:#}"));
+                continue;
+            }
+            let a = icacls(&st);
+            if a.contains("Users:(I)") || a.contains("Users:(F)") || a.contains("Users:(M)") {
+                ruins.push(format!("#{i}: manifesto com escrita para Users:\n{a}"));
+            }
+            // a trava, criada pelo caminho de produção
+            match crate::sysutil::OpLock::acquire_in(&lk) {
+                Ok(l) => {
+                    let a = icacls(&lk);
+                    if a.contains("Users:(I)") || a.contains("Users:(F)") || a.contains("Users:(M)")
+                    {
+                        ruins.push(format!("#{i}: trava com escrita para Users:\n{a}"));
+                    }
+                    drop(l);
+                }
+                Err(e) => ruins.push(format!("acquire_in #{i}: {e:#}")),
+            }
+        }
+        parar.store(true, Ordering::Relaxed);
+        atacante.join().unwrap();
+        println!(
+            "o atacante reabriu a DACL da pasta {} vezes",
+            reabertas.load(Ordering::Relaxed)
+        );
+        assert!(
+            reabertas.load(Ordering::Relaxed) > 0,
+            "premissa: o handle WRITE_DAC continua válido depois do fechamento"
+        );
+        assert!(ruins.is_empty(), "{}", ruins.join("\n"));
+        limpar_real(&dir);
+    }
+
+    /// N1 (b): `state.json` com DACL herdada ou com escrita para Usuários (por exemplo, de uma
+    /// versão anterior ou forjado) não é confiável: o `read_state` o ignora, avisando.
+    #[test]
+    #[ignore = "cria %ProgramData%\\GuiaLar de verdade (administrador, VM)"]
+    fn acl_real_n1_manifesto_com_dacl_herdada_ou_gravavel_nao_e_confiavel() {
+        let dir = state_dir().unwrap();
+        limpar_real(&dir);
+        let d = ensure_dir().unwrap();
+        write_state(b"{\"ok\":true}").unwrap();
+        let st = d.join(STATE_FILE);
+        assert!(is_trusted(&st), "o manifesto da produção é confiável");
+        assert!(read_state().unwrap().is_some());
+        // 1) DACL herdada da pasta (não protegida), mesmo com dono Administradores
+        let o = std::process::Command::new("icacls")
+            .arg(&st)
+            .arg("/inheritance:e")
+            .output()
+            .unwrap();
+        assert!(o.status.success(), "{o:?}");
+        assert!(!is_trusted(&st), "ACL não protegida: {}", icacls(&st));
+        assert!(read_state().unwrap().is_none(), "ignorado");
+        // 2) protegida, mas com escrita para Usuários
+        write_state(b"{}").unwrap();
+        let o = std::process::Command::new("icacls")
+            .arg(&st)
+            .args([
+                "/inheritance:r",
+                "/grant",
+                "Users:(M)",
+                "Administrators:(F)",
+                "SYSTEM:(F)",
+            ])
+            .output()
+            .unwrap();
+        assert!(o.status.success(), "{o:?}");
+        assert!(!is_trusted(&st), "Usuários com M: {}", icacls(&st));
+        assert!(read_state().unwrap().is_none());
+        // 3) a trava segue a mesma regra
+        let lk = d.join("op.lock");
+        std::fs::write(&lk, std::process::id().to_string()).unwrap(); // herda da pasta
+        assert!(!is_trusted(&lk), "trava com ACL herdada: {}", icacls(&lk));
+        std::fs::remove_file(&lk).unwrap();
         limpar_real(&dir);
     }
 }

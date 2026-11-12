@@ -357,7 +357,8 @@ fn apply_depois_restaurar_devolve_o_dns_original() {
 fn falha_do_powershell_nao_grava_manifesto() {
     let s = Sandbox::new("win-fail");
     let r = two_ifaces();
-    *r.fail_on.borrow_mut() = Some("-ServerAddresses @(".into());
+    // o primeiro Set falha: nada foi trocado, o registro gravado antes do laço é apagado
+    *r.fail_on.borrow_mut() = Some("-InterfaceIndex 5 -ServerAddresses".into());
     let e = apply_core_with(&r).unwrap_err();
     assert!(format!("{e:#}").contains("PowerShell falhou"));
     assert!(!s.manifest_path().exists());
