@@ -150,6 +150,54 @@ pub fn browsers_without_blocker() -> Vec<String> {
     }
 }
 
+/// O que há no valor `9101` da chave do navegador (X1 do review do `ca665cf`).
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub enum PolicyValue {
+    /// Não existe.
+    Absent,
+    /// Existe como `REG_SZ` com este dado.
+    Sz(String),
+    /// Existe com outro tipo (`REG_EXPAND_SZ`, `REG_MULTI_SZ`…): é de outra política.
+    Other,
+}
+
+impl PolicyValue {
+    pub fn sz(&self) -> Option<&str> {
+        match self {
+            PolicyValue::Sz(d) => Some(d),
+            _ => None,
+        }
+    }
+}
+
+/// Interpreta `reg query <chave> /v 9101`: saída ≠ 0 = ausente; `REG_SZ` = dado; qualquer
+/// outra linha do valor = presente com outro tipo (conta como de terceiros, não como ausente).
+pub fn classify_reg_query(success: bool, stdout: &str, name: &str) -> PolicyValue {
+    if !success {
+        return PolicyValue::Absent;
+    }
+    match parse_reg_sz(stdout, name) {
+        Some(d) => PolicyValue::Sz(d),
+        None => PolicyValue::Other,
+    }
+}
+
+/// Como `cleanup_action`, mas um valor de outro tipo é sempre de terceiros (`Keep`).
+pub fn cleanup_action_for(browser: &str, value: &PolicyValue) -> PolicyCleanup {
+    if *value == PolicyValue::Other {
+        return PolicyCleanup::Keep;
+    }
+    cleanup_action(browser, value.sz())
+}
+
+/// Como `install_decision`, mas um valor de outro tipo não é sobrescrito.
+pub fn install_decision_for(browser: &str, value: &PolicyValue) -> InstallDecision {
+    if *value == PolicyValue::Other {
+        return InstallDecision::SkipForeign;
+    }
+    install_decision(browser, value.sz())
+}
+
 /// O que o `install_all` faz com a política de um navegador Chromium (E1 do review do #27).
 #[derive(Debug, PartialEq, Eq)]
 pub enum InstallDecision {
@@ -168,18 +216,31 @@ pub fn install_decision(browser: &str, existing: Option<&str>) -> InstallDecisio
 }
 
 /// Junta o resultado de cada navegador (E2): uma falha não impede os outros, e o erro final
-/// lista o que falhou e diz que o DNS continua aplicado.
-pub fn summarize_install(done: Vec<String>, falhas: Vec<String>) -> Result<Vec<String>> {
+/// lista o que falhou e diz que o DNS continua aplicado. `avisos` (X2) são navegadores que
+/// foram pulados de propósito (o `9101` é de outra política, por exemplo um GPO): não são
+/// erro do `apply`; saem como linhas de aviso depois das feitas.
+pub fn summarize_install(
+    done: Vec<String>,
+    avisos: Vec<String>,
+    falhas: Vec<String>,
+) -> Result<Vec<String>> {
     if falhas.is_empty() {
-        return Ok(done);
+        let mut out = done;
+        out.extend(avisos.into_iter().map(|a| format!("⚠️ {a}")));
+        return Ok(out);
     }
     let feitos = if done.is_empty() {
         String::new()
     } else {
         format!(" Configurado em: {}.", done.join("; "))
     };
+    let pulados = if avisos.is_empty() {
+        String::new()
+    } else {
+        format!(" Pulado: {}.", avisos.join("; "))
+    };
     anyhow::bail!(
-        "O bloqueador de anúncios não ficou configurado em {} navegador(es): {}.{feitos} O DNS continua aplicado.",
+        "O bloqueador de anúncios não ficou configurado em {} navegador(es): {}.{feitos}{pulados} O DNS continua aplicado.",
         falhas.len(),
         falhas.join(" | ")
     )
@@ -216,6 +277,7 @@ mod win {
     pub fn install_all() -> Result<Vec<String>> {
         let mut done = Vec::new();
         let mut falhas: Vec<String> = Vec::new();
+        let mut avisos: Vec<String> = Vec::new();
         let candidates = [
             ("Google Chrome", r"Google\Chrome\Application\chrome.exe"),
             ("Microsoft Edge", r"Microsoft\Edge\Application\msedge.exe"),
@@ -231,18 +293,20 @@ mod win {
             let Some((_, key, data)) = chromium_policies().into_iter().find(|p| p.0 == name) else {
                 continue;
             };
-            // E1: um `9101` de outra política não é sobrescrito
-            if install_decision(name, read_policy_value(key).as_deref())
-                == InstallDecision::SkipForeign
-            {
-                falhas.push(format!(
-                    "{name} (o valor 9101 já é usado por outra política; não o sobrescrevi)"
+            // E1/X1: um `9101` de outra política (qualquer tipo) não é sobrescrito; X2: isso é
+            // um aviso («gerenciado pela organização»), não um erro do apply
+            if install_decision_for(name, &read_policy_value(key)) == InstallDecision::SkipForeign {
+                avisos.push(format!(
+                    "{name}: o valor 9101 já é usado por outra política (gerenciado pela organização); não o alterei"
                 ));
                 continue;
             }
             let r = reg_add(key, &data).and_then(|()| {
                 // só diz que instalou o que a leitura de volta confirma
-                if read_policy_value(key).is_some_and(|d| policy_value_covers(name, &d)) {
+                if read_policy_value(key)
+                    .sz()
+                    .is_some_and(|d| policy_value_covers(name, d))
+                {
                     Ok(())
                 } else {
                     anyhow::bail!("a política não ficou gravada como esperado")
@@ -279,7 +343,7 @@ mod win {
                 Err(e) => falhas.push(format!("Firefox ({e:#})")),
             }
         }
-        summarize_install(done, falhas)
+        summarize_install(done, avisos, falhas)
     }
 
     pub fn browsers_without_blocker() -> Vec<String> {
@@ -301,7 +365,9 @@ mod win {
             };
             // coberto só se a política gravada é a certa DESTA loja (o valor antigo do Edge,
             // com o ID da loja do Chrome, não instala nada e conta como «sem bloqueador»)
-            let has = read_policy_value(key).is_some_and(|d| policy_value_covers(name, &d));
+            let has = read_policy_value(key)
+                .sz()
+                .is_some_and(|d| policy_value_covers(name, d));
             if !has {
                 out.push(name.to_string());
             }
@@ -326,7 +392,7 @@ mod win {
             // só apaga o valor se o dado é do GuiaLar (o atual ou o antigo errado do Edge);
             // um `9101` de terceiros fica intacto
             let existing = read_policy_value(key);
-            if cleanup_action(name, existing.as_deref()) != PolicyCleanup::Remove {
+            if cleanup_action_for(name, &existing) != PolicyCleanup::Remove {
                 continue;
             }
             let status =
@@ -363,15 +429,16 @@ mod win {
         Ok(())
     }
 
-    /// Dado do valor `9101` da chave, se existir.
-    fn read_policy_value(key: &str) -> Option<String> {
-        let out = hidden(Command::new("reg").args(["query", key, "/v", POLICY_VALUE_NAME]))
-            .output()
-            .ok()?;
-        out.status
-            .success()
-            .then(|| parse_reg_sz(&String::from_utf8_lossy(&out.stdout), POLICY_VALUE_NAME))
-            .flatten()
+    /// O que há no valor `9101` da chave (ausente, `REG_SZ` ou outro tipo).
+    fn read_policy_value(key: &str) -> PolicyValue {
+        match hidden(Command::new("reg").args(["query", key, "/v", POLICY_VALUE_NAME])).output() {
+            Ok(o) => classify_reg_query(
+                o.status.success(),
+                &String::from_utf8_lossy(&o.stdout),
+                POLICY_VALUE_NAME,
+            ),
+            Err(_) => PolicyValue::Absent,
+        }
     }
 
     /// Sem janela de console piscando (CREATE_NO_WINDOW).
@@ -566,11 +633,68 @@ mod tests {
     }
 
     #[test]
+    fn nove_um_zero_um_de_outro_tipo_conta_como_de_terceiros_e_nao_como_ausente() {
+        let reg =
+            |tipo: &str| format!("\r\nHKEY_LOCAL_MACHINE\\X\r\n    9101    {tipo}    dado\r\n");
+        assert_eq!(classify_reg_query(false, "", "9101"), PolicyValue::Absent);
+        assert_eq!(
+            classify_reg_query(true, &reg("REG_SZ"), "9101"),
+            PolicyValue::Sz("dado".into())
+        );
+        for t in ["REG_EXPAND_SZ", "REG_MULTI_SZ", "REG_DWORD"] {
+            assert_eq!(
+                classify_reg_query(true, &reg(t), "9101"),
+                PolicyValue::Other,
+                "{t}"
+            );
+        }
+        // de outro tipo: nunca sobrescrito nem apagado
+        assert_eq!(
+            install_decision_for("Microsoft Edge", &PolicyValue::Other),
+            InstallDecision::SkipForeign
+        );
+        assert_eq!(
+            cleanup_action_for("Google Chrome", &PolicyValue::Other),
+            PolicyCleanup::Keep
+        );
+        // os outros casos seguem as regras de antes
+        assert_eq!(
+            install_decision_for("Brave", &PolicyValue::Absent),
+            InstallDecision::Write
+        );
+        assert_eq!(
+            cleanup_action_for("Brave", &PolicyValue::Absent),
+            PolicyCleanup::Absent
+        );
+    }
+
+    #[test]
+    fn valor_gerenciado_por_outra_politica_e_aviso_e_nao_erro_do_apply() {
+        let ok = vec!["Brave: uBlock Origin Lite instalado".to_string()];
+        let aviso = "Microsoft Edge: o valor 9101 já é usado por outra política (gerenciado pela organização); não o alterei".to_string();
+        // só avisos: o apply termina bem e o aviso sai junto das linhas feitas
+        let linhas = summarize_install(ok.clone(), vec![aviso.clone()], vec![]).unwrap();
+        assert_eq!(linhas[0], ok[0]);
+        assert!(linhas[1].starts_with("⚠️") && linhas[1].contains("gerenciado pela organização"));
+        assert!(summarize_install(vec![], vec![aviso.clone()], vec![]).is_ok());
+        // com uma falha de verdade, o erro cita também o que foi pulado
+        let m = format!(
+            "{:#}",
+            summarize_install(ok, vec![aviso], vec!["Firefox (x)".into()]).unwrap_err()
+        );
+        assert!(
+            m.contains("Pulado:") && m.contains("gerenciado pela organização"),
+            "{m}"
+        );
+    }
+
+    #[test]
     fn falha_num_navegador_nao_derruba_os_outros_e_diz_que_o_dns_continua() {
         let ok = vec!["Brave: uBlock Origin Lite instalado".to_string()];
-        assert_eq!(summarize_install(ok.clone(), vec![]).unwrap(), ok);
+        assert_eq!(summarize_install(ok.clone(), vec![], vec![]).unwrap(), ok);
         let e = summarize_install(
             ok,
+            vec![],
             vec![
                 "Microsoft Edge (releitura falhou)".into(),
                 "Firefox (sem acesso)".into(),
@@ -587,7 +711,7 @@ mod tests {
         // só falhas
         let m = format!(
             "{:#}",
-            summarize_install(vec![], vec!["Edge (x)".into()]).unwrap_err()
+            summarize_install(vec![], vec![], vec!["Edge (x)".into()]).unwrap_err()
         );
         assert!(
             !m.contains("Configurado em") && m.contains("O DNS continua aplicado"),

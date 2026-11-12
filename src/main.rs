@@ -186,12 +186,23 @@ fn handle_setup(interativo: bool) -> anyhow::Result<()> {
     result
 }
 
+/// Linha de resultado do bloqueador: ✓ para o que foi feito, o próprio aviso (⚠️) para o que
+/// foi pulado de propósito.
+#[cfg(windows)]
+fn print_install_line(line: &str) {
+    if line.starts_with("⚠️") {
+        println!("  {line}");
+    } else {
+        println!("  ✓ {line}");
+    }
+}
+
 fn handle_internal_browser() -> anyhow::Result<()> {
     sysutil::require_privileged()?;
     let _lock = sysutil::OpLock::acquire()?;
     #[cfg(windows)]
     for line in policy::install_all()? {
-        println!("  ✓ {line}");
+        print_install_line(&line);
     }
     Ok(())
 }
@@ -372,7 +383,7 @@ fn handle_browser(install_all: bool) -> anyhow::Result<()> {
             anyhow::bail!("Nenhum navegador compatível (Chrome, Edge, Brave, Firefox) encontrado.");
         }
         for line in feitos {
-            println!("  ✓ {line}");
+            print_install_line(&line);
         }
         Ok(())
     }
