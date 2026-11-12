@@ -150,6 +150,41 @@ pub fn browsers_without_blocker() -> Vec<String> {
     }
 }
 
+/// O que o `install_all` faz com a política de um navegador Chromium (E1 do review do #27).
+#[derive(Debug, PartialEq, Eq)]
+pub enum InstallDecision {
+    /// Grava (ou regrava) o valor `9101` do GuiaLar.
+    Write,
+    /// O `9101` é de outra política: não sobrescreve (o `revert_all` o apagaria depois).
+    SkipForeign,
+}
+
+pub fn install_decision(browser: &str, existing: Option<&str>) -> InstallDecision {
+    if cleanup_action(browser, existing) == PolicyCleanup::Keep {
+        InstallDecision::SkipForeign
+    } else {
+        InstallDecision::Write
+    }
+}
+
+/// Junta o resultado de cada navegador (E2): uma falha não impede os outros, e o erro final
+/// lista o que falhou e diz que o DNS continua aplicado.
+pub fn summarize_install(done: Vec<String>, falhas: Vec<String>) -> Result<Vec<String>> {
+    if falhas.is_empty() {
+        return Ok(done);
+    }
+    let feitos = if done.is_empty() {
+        String::new()
+    } else {
+        format!(" Configurado em: {}.", done.join("; "))
+    };
+    anyhow::bail!(
+        "O bloqueador de anúncios não ficou configurado em {} navegador(es): {}.{feitos} O DNS continua aplicado.",
+        falhas.len(),
+        falhas.join(" | ")
+    )
+}
+
 #[cfg(windows)]
 pub use win::{install_all, revert_all};
 
@@ -180,6 +215,7 @@ mod win {
 
     pub fn install_all() -> Result<Vec<String>> {
         let mut done = Vec::new();
+        let mut falhas: Vec<String> = Vec::new();
         let candidates = [
             ("Google Chrome", r"Google\Chrome\Application\chrome.exe"),
             ("Microsoft Edge", r"Microsoft\Edge\Application\msedge.exe"),
@@ -192,34 +228,58 @@ mod win {
             if find_exe(rel).is_none() {
                 continue;
             }
-            if let Some((_, key, data)) = chromium_policies().into_iter().find(|p| p.0 == name) {
-                reg_add(key, &data)?;
-                // só diz que instalou o que a leitura de volta confirma
-                if !read_policy_value(key).is_some_and(|d| policy_value_covers(name, &d)) {
-                    anyhow::bail!("{name}: a política não ficou gravada como esperado");
-                }
-                done.push(format!(
-                    "{name}: uBlock Origin Lite instalado ao reabrir o navegador"
+            let Some((_, key, data)) = chromium_policies().into_iter().find(|p| p.0 == name) else {
+                continue;
+            };
+            // E1: um `9101` de outra política não é sobrescrito
+            if install_decision(name, read_policy_value(key).as_deref())
+                == InstallDecision::SkipForeign
+            {
+                falhas.push(format!(
+                    "{name} (o valor 9101 já é usado por outra política; não o sobrescrevi)"
                 ));
+                continue;
+            }
+            let r = reg_add(key, &data).and_then(|()| {
+                // só diz que instalou o que a leitura de volta confirma
+                if read_policy_value(key).is_some_and(|d| policy_value_covers(name, &d)) {
+                    Ok(())
+                } else {
+                    anyhow::bail!("a política não ficou gravada como esperado")
+                }
+            });
+            match r {
+                Ok(()) => done.push(format!(
+                    "{name}: uBlock Origin Lite instalado ao reabrir o navegador"
+                )),
+                Err(e) => falhas.push(format!("{name} ({e:#})")),
             }
         }
         if let Some(exe) = find_firefox() {
-            let dir = exe.parent().context("pasta do Firefox")?;
-            // sem seguir link nem junção em `distribution` nem em `policies.json` (ADR-030)
-            let owner = crate::safefs::caller_owner();
-            let current =
-                crate::safefs::read_file(dir, &["distribution"], "policies.json", &owner)?
-                    .map(|b| String::from_utf8_lossy(&b).into_owned());
-            crate::safefs::write_file(
-                dir,
-                &["distribution"],
-                "policies.json",
-                merge_firefox_policies(current.as_deref())?.as_bytes(),
-            )
-            .context("gravando policies.json do Firefox")?;
-            done.push("Firefox: uBlock Origin instalado ao reabrir o navegador".into());
+            // E2: o Firefox também entra na lista de falhas, sem derrubar o que já foi feito
+            let r = (|| -> Result<()> {
+                let dir = exe.parent().context("pasta do Firefox")?;
+                // sem seguir link nem junção em `distribution` nem em `policies.json` (ADR-030)
+                let owner = crate::safefs::caller_owner();
+                let current =
+                    crate::safefs::read_file(dir, &["distribution"], "policies.json", &owner)?
+                        .map(|b| String::from_utf8_lossy(&b).into_owned());
+                crate::safefs::write_file(
+                    dir,
+                    &["distribution"],
+                    "policies.json",
+                    merge_firefox_policies(current.as_deref())?.as_bytes(),
+                )
+                .context("gravando policies.json do Firefox")
+            })();
+            match r {
+                Ok(()) => {
+                    done.push("Firefox: uBlock Origin instalado ao reabrir o navegador".into())
+                }
+                Err(e) => falhas.push(format!("Firefox ({e:#})")),
+            }
         }
-        Ok(done)
+        summarize_install(done, falhas)
     }
 
     pub fn browsers_without_blocker() -> Vec<String> {
@@ -473,6 +533,65 @@ mod tests {
         assert_eq!(
             cleanup_action("Microsoft Edge", None),
             PolicyCleanup::Absent
+        );
+    }
+
+    #[test]
+    fn install_nao_sobrescreve_um_9101_de_terceiros() {
+        let (_, edge) = politica("Microsoft Edge");
+        let antigo = format!("{UBOL_CWS_ID};{EDGE_UPDATE_URL}");
+        // sem valor, valor nosso (o atual) e o valor antigo errado do Edge: grava
+        assert_eq!(
+            install_decision("Microsoft Edge", None),
+            InstallDecision::Write
+        );
+        assert_eq!(
+            install_decision("Microsoft Edge", Some(&edge)),
+            InstallDecision::Write
+        );
+        assert_eq!(
+            install_decision("Microsoft Edge", Some(&antigo)),
+            InstallDecision::Write
+        );
+        // 9101 de outra política: pula, sem sobrescrever
+        assert_eq!(
+            install_decision("Microsoft Edge", Some("abcdefgh;https://exemplo.test/crx")),
+            InstallDecision::SkipForeign
+        );
+        assert_eq!(
+            install_decision("Google Chrome", Some(&antigo)),
+            InstallDecision::SkipForeign,
+            "o valor antigo do Edge não é nosso no Chrome"
+        );
+    }
+
+    #[test]
+    fn falha_num_navegador_nao_derruba_os_outros_e_diz_que_o_dns_continua() {
+        let ok = vec!["Brave: uBlock Origin Lite instalado".to_string()];
+        assert_eq!(summarize_install(ok.clone(), vec![]).unwrap(), ok);
+        let e = summarize_install(
+            ok,
+            vec![
+                "Microsoft Edge (releitura falhou)".into(),
+                "Firefox (sem acesso)".into(),
+            ],
+        )
+        .unwrap_err();
+        let m = format!("{e:#}");
+        assert!(
+            m.contains("2 navegador(es)") && m.contains("Microsoft Edge") && m.contains("Firefox"),
+            "{m}"
+        );
+        assert!(m.contains("Configurado em: Brave"), "{m}");
+        assert!(m.contains("O DNS continua aplicado"), "{m}");
+        // só falhas
+        let m = format!(
+            "{:#}",
+            summarize_install(vec![], vec!["Edge (x)".into()]).unwrap_err()
+        );
+        assert!(
+            !m.contains("Configurado em") && m.contains("O DNS continua aplicado"),
+            "{m}"
         );
     }
 
