@@ -455,28 +455,24 @@ mod tests {
         Cli::command().debug_assert();
     }
 
-    /// B2: falha de E/S ao LER o registro (aqui, sem permissão de leitura; no Windows, o arquivo
-    /// aberto por outro programa) NÃO é «registro danificado»: o revert avisa, não apaga o
-    /// registro e não cai no fallback.
+    /// B3: só «arquivo ocupado por outro programa» (Windows) é erro de E/S marcado e poupa o
+    /// registro. Uma leitura negada por outro motivo (aqui, sem permissão no Linux) volta ao
+    /// caminho de antes: o `load` falha sem a marca e o `revert_flow` cai no fallback, que
+    /// nunca deixa o DNS preso no filtro.
     #[cfg(target_os = "linux")]
     #[test]
-    fn revert_com_erro_de_leitura_nao_apaga_o_registro_nem_cai_no_fallback() {
+    fn leitura_negada_no_linux_nao_e_erro_de_es_marcado() {
         use std::os::unix::fs::PermissionsExt;
         if sysutil::is_root() {
             return; // como root a leitura nunca é negada
         }
         let s = testenv::Sandbox::new("revert-io");
-        statedir::write_state(b"{\"nao\":\"importa\"}").unwrap();
+        statedir::write_state(b"{}").unwrap();
         let f = statedir::state_file().unwrap();
         std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o000)).unwrap();
-        let e = revert_flow().unwrap_err();
-        assert!(statedir::is_state_io_error(&e), "{e:#}");
-        assert!(
-            f.exists(),
-            "o registro não pode ser apagado por um erro de leitura"
-        );
+        let e = DnsStateManifest::load().unwrap_err();
+        assert!(!statedir::is_state_io_error(&e), "{e:#}");
         std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o644)).unwrap();
-        assert_eq!(std::fs::read(&f).unwrap(), b"{\"nao\":\"importa\"}");
         drop(s);
     }
 }

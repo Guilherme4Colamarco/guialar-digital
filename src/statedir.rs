@@ -105,10 +105,13 @@ pub fn write_state(data: &[u8]) -> Result<()> {
     imp::write_atomic(&dir, STATE_FILE, data)
 }
 
-/// Marca (como contexto do `anyhow`) uma falha de E/S ao LER o registro, por exemplo o arquivo
-/// aberto por outro programa: diferente de um registro inválido ou não confiável. Quem decide o
-/// que fazer com o erro (`revert`, status) usa `is_state_io_error` para não tratar a falha de
-/// leitura como «registro danificado» e apagá-lo.
+/// Marca (como contexto do `anyhow`) a falha de LER o registro porque outro programa o mantém
+/// aberto (Windows: acesso negado/violação de compartilhamento que persistiu depois das
+/// tentativas): o registro pode estar perfeito, então quem decide o que fazer com o erro
+/// (`revert`, status) usa `is_state_io_error` para não o tratar como «danificado» e apagá-lo.
+/// Qualquer outro erro de E/S (arquivo corrompido pelo disco, link, nome inválido...) NÃO é
+/// marcado e segue o caminho de antes: fallback para o DNS da rede, que nunca deixa o DNS
+/// preso no filtro. No Linux nada é marcado (não há bloqueio de arquivo aberto).
 #[derive(Debug)]
 pub struct StateIo;
 
@@ -118,7 +121,12 @@ impl std::fmt::Display for StateIo {
     }
 }
 
-/// O erro é uma falha de E/S ao ler o registro (e não conteúdo inválido)?
+/// A leitura falhou porque o arquivo está ocupado por outro programa? (Windows, 5 e 32.)
+fn is_busy_error(e: &std::io::Error) -> bool {
+    cfg!(windows) && matches!(e.raw_os_error(), Some(5 | 32))
+}
+
+/// O erro é uma falha de leitura por arquivo ocupado (e não conteúdo inválido nem outra E/S)?
 pub fn is_state_io_error(e: &anyhow::Error) -> bool {
     e.downcast_ref::<StateIo>().is_some()
 }
@@ -156,7 +164,13 @@ pub fn read_state() -> Result<Option<Vec<u8>>> {
         return ignorar();
     }
     match imp::read_trusted_file(&file)
-        .map_err(|e| anyhow::Error::new(e).context(StateIo))
+        .map_err(|e| {
+            if is_busy_error(&e) {
+                anyhow::Error::new(e).context(StateIo)
+            } else {
+                anyhow::Error::new(e)
+            }
+        })
         .with_context(|| format!("Falha ao ler manifesto em {file:?}"))?
     {
         ReadOutcome::Missing => Ok(None),
@@ -1279,6 +1293,21 @@ mod tests {
             imp::read_trusted_file(&f).unwrap(),
             ReadOutcome::Untrusted
         ));
+    }
+
+    #[test]
+    fn so_arquivo_ocupado_vira_erro_de_es_marcado_e_no_linux_nenhum() {
+        for raw in [5, 32] {
+            let e = std::io::Error::from_raw_os_error(raw);
+            assert_eq!(is_busy_error(&e), cfg!(windows), "{raw}");
+        }
+        // outros erros de E/S nunca são «ocupado» (1920 = nome que não abre, 1392 = disco)
+        for raw in [1, 2, 13, 40, 1392, 1920] {
+            assert!(
+                !is_busy_error(&std::io::Error::from_raw_os_error(raw)),
+                "{raw}"
+            );
+        }
     }
 
     fn modo(p: &Path) -> u32 {
