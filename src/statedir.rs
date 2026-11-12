@@ -44,6 +44,22 @@ pub fn is_trusted(path: &Path) -> bool {
     imp::is_trusted(path)
 }
 
+/// Apaga um arquivo AGORA: no Windows desvincula o nome na hora (`FileDispositionInfoEx` com
+/// semântica POSIX), mesmo que outro processo o tenha aberto com `FILE_SHARE_DELETE`. Um
+/// arquivo aberto SEM esse compartilhamento não pode ser apagado nem renomeado por ninguém
+/// enquanto o outro processo o segurar (medido na win11): o erro sobe.
+pub fn unlink_now(path: &Path) -> std::io::Result<()> {
+    imp::unlink_now(path)
+}
+
+/// Nomes que o GuiaLar grava na pasta de estado e de que o apply depende: se um intruso os
+/// ocupa e não dá para apagar, o apply tem de parar com um erro claro. Qualquer outro nome
+/// alheio que não saia só é avisado (a pasta já está fechada; o arquivo nunca é lido).
+#[cfg(any(windows, test))]
+fn is_core_name(name: &str) -> bool {
+    name == STATE_FILE || name == "op.lock"
+}
+
 /// Grava o manifesto (temp + `rename`) na pasta do sistema.
 pub fn write_state(data: &[u8]) -> Result<()> {
     let dir = ensure_dir()?;
@@ -94,6 +110,10 @@ mod imp {
 
     pub fn system_dir() -> Result<PathBuf> {
         Ok(PathBuf::from("/var/lib/guialar"))
+    }
+
+    pub fn unlink_now(path: &Path) -> std::io::Result<()> {
+        std::fs::remove_file(path)
     }
 
     /// UID que deve ser dono do estado: root. Nos testes, o usuário que roda o teste (ou o
@@ -235,7 +255,7 @@ mod imp {
         Ok(PathBuf::from(s).join("GuiaLar"))
     }
 
-    fn owner_sid(path: &Path) -> Option<String> {
+    pub fn owner_sid(path: &Path) -> Option<String> {
         let w = wide(path.as_os_str());
         let mut owner: *mut std::ffi::c_void = std::ptr::null_mut();
         let mut sd: *mut std::ffi::c_void = std::ptr::null_mut();
@@ -413,17 +433,93 @@ mod imp {
         }
     }
 
+    /// Handle que fecha sozinho.
+    struct Handle(win32::HANDLE);
+    impl Drop for Handle {
+        fn drop(&mut self) {
+            // SAFETY: o handle veio de `CreateFileW` e é fechado uma vez.
+            unsafe { win32::CloseHandle(self.0) };
+        }
+    }
+
+    /// Abre `path` SEM seguir ponto de reparse (`FILE_FLAG_OPEN_REPARSE_POINT`): se o nome for
+    /// uma junção/link, o handle é o da própria junção, não o do alvo.
+    fn open_no_follow(path: &Path, access: u32) -> std::io::Result<Handle> {
+        let w = wide(path.as_os_str());
+        // SAFETY: caminho terminado em NUL; sem atributos de segurança nem modelo.
+        let h = unsafe {
+            win32::CreateFileW(
+                w.as_ptr(),
+                access,
+                win32::FILE_SHARE_ALL,
+                std::ptr::null_mut(),
+                win32::OPEN_EXISTING,
+                win32::FILE_FLAG_BACKUP_SEMANTICS | win32::FILE_FLAG_OPEN_REPARSE_POINT,
+                std::ptr::null_mut(),
+            )
+        };
+        if h == win32::INVALID_HANDLE_VALUE {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(Handle(h))
+    }
+
+    /// Atributos lidos DO HANDLE (não do nome), para saber o que de fato foi aberto.
+    fn handle_attributes(h: &Handle) -> std::io::Result<u32> {
+        // SAFETY: `h` é válido; a estrutura é só de saída.
+        let mut info: win32::BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+        if unsafe { win32::GetFileInformationByHandle(h.0, &mut info) } == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(info.dwFileAttributes)
+    }
+
+    /// O que `harden` encontrou.
+    #[derive(Debug, PartialEq, Eq)]
+    pub enum Hardened {
+        /// Pasta de verdade: dono e DACL aplicados.
+        Done,
+        /// Junção, link ou não-pasta: NADA foi gravado; quem chama a afasta do caminho.
+        NotOurs,
+    }
+
     /// Reaplica o descritor do GuiaLar a uma pasta que já existe: dono Administradores e DACL
     /// protegida (Administradores/SYSTEM total, Usuários leitura, sem herança do pai). É
     /// idempotente, vale mesmo com a pasta criada pelo Explorer (ACL herdada de `ProgramData`)
     /// e com handles abertos por outra conta; assume a posse com `SeTakeOwnership/SeRestore`.
-    fn harden(dir: &Path) -> Result<()> {
+    ///
+    /// Abre a pasta UMA vez, sem seguir ponto de reparse, confere pelo próprio handle que é uma
+    /// pasta de verdade e aplica o descritor nesse handle (`SetSecurityInfo`). Nunca repete a
+    /// operação pelo nome: uma conta comum não consegue trocar o nome por uma junção entre a
+    /// checagem e a escrita da ACL (a DACL cairia no alvo da junção).
+    pub fn harden(dir: &Path) -> Result<Hardened> {
         #[cfg(test)]
-        if crate::testenv::sandboxed() {
-            return Ok(());
+        let sandboxed = crate::testenv::sandboxed();
+        #[cfg(not(test))]
+        let sandboxed = false;
+        if !sandboxed {
+            enable_privilege("SeTakeOwnershipPrivilege");
+            enable_privilege("SeRestorePrivilege");
+            enable_privilege("SeBackupPrivilege");
         }
-        enable_privilege("SeTakeOwnershipPrivilege");
-        enable_privilege("SeRestorePrivilege");
+        let access = if sandboxed {
+            win32::READ_CONTROL
+        } else {
+            win32::READ_CONTROL | win32::WRITE_DAC | win32::WRITE_OWNER
+        };
+        let h = open_no_follow(dir, access).with_context(|| {
+            format!("não foi possível abrir {} para fechar a ACL", dir.display())
+        })?;
+        let attrs = handle_attributes(&h)
+            .with_context(|| format!("não foi possível ler os atributos de {}", dir.display()))?;
+        if attrs & win32::FILE_ATTRIBUTE_REPARSE_POINT != 0
+            || attrs & win32::FILE_ATTRIBUTE_DIRECTORY == 0
+        {
+            return Ok(Hardened::NotOurs);
+        }
+        if sandboxed {
+            return Ok(Hardened::Done);
+        }
         let sd = security_descriptor()?;
         let mut owner: *mut std::ffi::c_void = std::ptr::null_mut();
         let mut dacl: *mut std::ffi::c_void = std::ptr::null_mut();
@@ -435,11 +531,10 @@ mod imp {
                     != 0
         };
         let r = if ok && present != 0 && !owner.is_null() {
-            let w = wide(dir.as_os_str());
-            // SAFETY: caminho terminado em NUL; dono e DACL pertencem a `sd` (vivo até o free).
+            // SAFETY: handle válido; dono e DACL pertencem a `sd` (vivo até o free).
             unsafe {
-                win32::SetNamedSecurityInfoW(
-                    w.as_ptr(),
+                win32::SetSecurityInfo(
+                    h.0,
                     win32::SE_FILE_OBJECT,
                     win32::OWNER_SECURITY_INFORMATION
                         | win32::DACL_SECURITY_INFORMATION
@@ -461,11 +556,42 @@ mod imp {
                 dir.display()
             );
         }
-        Ok(())
+        Ok(Hardened::Done)
+    }
+
+    /// Desvincula o nome na hora (`FileDispositionInfoEx`, semântica POSIX): vale mesmo que
+    /// outro processo mantenha o arquivo aberto COM `FILE_SHARE_DELETE`, e o nome fica livre
+    /// para o `create_new` seguinte. Um handle SEM `FILE_SHARE_DELETE` (por exemplo, abrir com
+    /// `FileShare.None`) impede até a abertura para apagar: o erro sobe (ver `unlink_now`).
+    pub fn unlink_now(path: &Path) -> std::io::Result<()> {
+        let h = open_no_follow(path, win32::DELETE)?;
+        let flags: u32 = win32::FILE_DISPOSITION_UNLINK_NOW;
+        // SAFETY: `h` válido; `flags` vive durante a chamada e tem 4 bytes.
+        let ok = unsafe {
+            win32::SetFileInformationByHandle(
+                h.0,
+                win32::FILE_DISPOSITION_INFO_EX,
+                (&raw const flags).cast(),
+                4,
+            )
+        };
+        let err = std::io::Error::last_os_error();
+        drop(h);
+        if ok != 0 {
+            return Ok(());
+        }
+        // Windows sem a classe «Ex» (anterior ao 10 1709): apagar do jeito comum
+        if matches!(err.raw_os_error(), Some(1 | 87)) {
+            return std::fs::remove_file(path);
+        }
+        Err(err)
     }
 
     /// Apaga o que há na pasta e não é de Administradores/SYSTEM (uma conta comum pode ter
     /// plantado `op.lock`, um `.tmp` previsível ou uma pasta). Não segue junção: remove a junção.
+    /// Um nome alheio que não sai (arquivo preso por outro processo): se for `op.lock` ou
+    /// `state.json`, erro claro, porque o apply depende deles; qualquer outro, só aviso, já que
+    /// a pasta está fechada e esse arquivo nunca é lido.
     fn remove_foreign_entries(dir: &Path) -> Result<()> {
         for e in std::fs::read_dir(dir)
             .with_context(|| format!("não foi possível listar {}", dir.display()))?
@@ -485,12 +611,31 @@ mod imp {
             } else if m.is_dir() {
                 std::fs::remove_dir(&p)
             } else {
-                std::fs::remove_file(&p)
+                unlink_now(&p)
             };
-            r.with_context(|| format!("não foi possível remover {} (dono alheio)", p.display()))?;
-            eprintln!("⚠️ Removido {} (não era do sistema).", p.display());
+            match r {
+                Ok(()) => eprintln!("⚠️ Removido {} (não era do sistema).", p.display()),
+                Err(err) if is_core_name(&e.file_name().to_string_lossy()) => bail!(
+                    "{} é de outro dono e está aberto por outro programa, que não permite apagá-lo ({err}). Feche esse programa (ou saia da conta que o abriu) e tente de novo.",
+                    p.display()
+                ),
+                Err(err) => eprintln!(
+                    "⚠️ Não consegui remover {} ({err}); a pasta está fechada e esse arquivo não é usado.",
+                    p.display()
+                ),
+            }
         }
         Ok(())
+    }
+
+    /// Tira o nome do caminho (junção, link ou não-pasta): renomeia com sufixo aleatório.
+    fn afastar(dir: &Path) -> std::io::Result<PathBuf> {
+        let aside = dir.with_file_name(format!(
+            "GuiaLar.recusada-{}",
+            random_hex().map_err(std::io::Error::other)?
+        ));
+        std::fs::rename(dir, &aside)?;
+        Ok(aside)
     }
 
     /// Prepara a pasta de estado:
@@ -498,43 +643,28 @@ mod imp {
     /// - ponto de reparse (junção/link): sai do caminho (renomeada, sem seguir) com sufixo
     ///   aleatório e a certa é criada;
     /// - pasta de verdade, nossa ou de outro dono: assume (dono Administradores + DACL
-    ///   protegida) e apaga o que for de dono alheio. Nunca renomeia pasta real, que uma conta
-    ///   comum poderia travar com um handle aberto.
+    ///   protegida, pelo handle) e apaga o que for de dono alheio. Nunca renomeia pasta real,
+    ///   que uma conta comum poderia travar com um handle aberto. Se na hora de fechar o nome
+    ///   virou junção, nada é gravado e ela é afastada como as outras.
     pub fn ensure_dir() -> Result<PathBuf> {
         let dir = state_dir()?;
         for tentativa in 0..3 {
-            match std::fs::symlink_metadata(&dir) {
-                Ok(m)
-                    if m.file_type().is_symlink()
+            let afastar_agora = match std::fs::symlink_metadata(&dir) {
+                Ok(m) => {
+                    let ja_e_link = m.file_type().is_symlink()
                         || m.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
-                        || !m.is_dir() =>
-                {
-                    let aside = dir.with_file_name(format!("GuiaLar.recusada-{}", random_hex()?));
-                    match std::fs::rename(&dir, &aside) {
-                        Ok(()) => eprintln!(
-                            "⚠️ {} era um link; renomeada para {} e recriada.",
-                            dir.display(),
-                            aside.display()
-                        ),
-                        // outro nome ao acaso na próxima volta; esgotadas, o erro sobe
-                        Err(e) if tentativa < 2 => {
-                            let _ = e;
-                            continue;
+                        || !m.is_dir();
+                    // `harden` só roda em pasta de verdade e devolve `NotOurs` se, ao abrir,
+                    // o nome já era outra coisa (troca no meio): nada é gravado nesse caso
+                    if ja_e_link || harden(&dir)? == Hardened::NotOurs {
+                        true
+                    } else {
+                        remove_foreign_entries(&dir)?;
+                        if !is_trusted(&dir) {
+                            bail!("{} continua sem dono do sistema", dir.display());
                         }
-                        Err(e) => {
-                            return Err(e).with_context(|| {
-                                format!("não foi possível afastar {}", dir.display())
-                            })
-                        }
+                        return Ok(dir);
                     }
-                }
-                Ok(_) => {
-                    harden(&dir)?;
-                    remove_foreign_entries(&dir)?;
-                    if !is_trusted(&dir) {
-                        bail!("{} continua sem dono do sistema", dir.display());
-                    }
-                    return Ok(dir);
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                     match create_protected(&dir) {
@@ -550,6 +680,21 @@ mod imp {
                     }
                 }
                 Err(e) => return Err(e).context("não foi possível checar a pasta de estado"),
+            };
+            if afastar_agora {
+                match afastar(&dir) {
+                    Ok(aside) => eprintln!(
+                        "⚠️ {} era um link; renomeada para {} e recriada.",
+                        dir.display(),
+                        aside.display()
+                    ),
+                    // outro nome ao acaso na próxima volta; esgotadas, o erro sobe
+                    Err(_) if tentativa < 2 => continue,
+                    Err(e) => {
+                        return Err(e)
+                            .with_context(|| format!("não foi possível afastar {}", dir.display()))
+                    }
+                }
             }
         }
         bail!("não foi possível preparar {}", dir.display())
@@ -588,6 +733,9 @@ mod imp {
     pub fn system_dir() -> Result<PathBuf> {
         bail!("plataforma sem suporte")
     }
+    pub fn unlink_now(path: &Path) -> std::io::Result<()> {
+        std::fs::remove_file(path)
+    }
     pub fn is_trusted(_: &Path) -> bool {
         false
     }
@@ -604,6 +752,27 @@ mod tests {
     use super::*;
     use crate::testenv::Sandbox;
     use std::os::unix::fs::{symlink, MetadataExt, PermissionsExt};
+
+    #[test]
+    fn so_op_lock_e_state_json_sao_nomes_de_que_o_apply_depende() {
+        assert!(is_core_name("op.lock") && is_core_name("state.json"));
+        for outro in ["", "OP.LOCK2", "estado.json", ".state.json.1.ab.tmp", "x"] {
+            assert!(!is_core_name(outro), "{outro:?}");
+        }
+    }
+
+    #[test]
+    fn unlink_now_apaga_o_nome_e_diz_quando_nao_existe() {
+        let s = Sandbox::new("statedir-unlink");
+        let f = s.dir().join("op.lock");
+        std::fs::write(&f, "1").unwrap();
+        unlink_now(&f).unwrap();
+        assert!(!f.exists());
+        assert_eq!(
+            unlink_now(&f).unwrap_err().kind(),
+            std::io::ErrorKind::NotFound
+        );
+    }
 
     fn modo(p: &Path) -> u32 {
         std::fs::metadata(p).unwrap().permissions().mode() & 0o777
@@ -953,6 +1122,144 @@ mod tests_win {
             })
             .count();
         assert_eq!(afastadas, 0, "nada foi renomeado para o lado");
+        limpar_real(&dir);
+    }
+
+    /// M1: a ACL só pode cair na pasta de estado, nunca no alvo de uma junção/link posto no
+    /// lugar dela. MEDIDO na win11: `SetNamedSecurityInfoW` pelo nome NÃO seguiu junção nem
+    /// link de pasta (gravou no próprio ponto de reparse), então o furo descrito no review não
+    /// se reproduz nesta versão do Windows; o `harden` por handle (sem seguir reparse) torna
+    /// isso uma garantia nossa, e não um comportamento da API. O teste chama o `harden` no
+    /// caminho que já é junção ("troca entre a checagem e a escrita") e confere o alvo.
+    #[test]
+    #[ignore = "cria %ProgramData%\\GuiaLar de verdade (administrador, VM)"]
+    fn acl_real_harden_nao_segue_juncao_e_nao_grava_a_acl_no_alvo() {
+        let dir = state_dir().unwrap();
+        limpar_real(&dir);
+        let base = std::env::temp_dir();
+        let premissa = base.join("guialar-m1-premissa");
+        let fora = base.join("guialar-m1-fora");
+        for d in [&premissa, &fora] {
+            let _ = std::fs::remove_dir_all(d);
+            std::fs::create_dir_all(d).unwrap();
+        }
+        // premissa: a API por nome atravessa a junção (o dono do ALVO muda)
+        let dono_antes = imp::owner_sid(&premissa);
+        crate::safefs::junction(&dir, &premissa);
+        imp::test_set_owner(&dir, "O:BU").unwrap();
+        println!(
+            "MEDIDA: dono do alvo antes={dono_antes:?} depois={:?}; dono lido pelo nome da junção={:?}",
+            imp::owner_sid(&premissa),
+            imp::owner_sid(&dir)
+        );
+        std::fs::remove_dir(&dir).unwrap();
+        // mesma medida com um link simbólico de pasta (precisa de privilégio; administrador tem)
+        let st = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/D"])
+            .arg(&dir)
+            .arg(&premissa)
+            .output()
+            .unwrap();
+        if st.status.success() {
+            imp::test_set_owner(&dir, "O:BU").unwrap();
+            println!(
+                "MEDIDA symlink: dono do alvo depois={:?}; dono pelo nome={:?}",
+                imp::owner_sid(&premissa),
+                imp::owner_sid(&dir)
+            );
+            std::fs::remove_dir(&dir).unwrap();
+        }
+        // o conserto: o harden reconhece a junção pelo handle e não grava nada no alvo
+        let acl_antes = icacls(&fora);
+        let dono_fora = imp::owner_sid(&fora);
+        crate::safefs::junction(&dir, &fora);
+        assert_eq!(imp::harden(&dir).unwrap(), imp::Hardened::NotOurs);
+        assert_eq!(icacls(&fora), acl_antes, "a ACL do alvo não mudou");
+        assert_eq!(imp::owner_sid(&fora), dono_fora, "o dono do alvo não mudou");
+        // e o ensure_dir completo afasta a junção e recria a pasta certa
+        let d = ensure_dir().unwrap();
+        assert!(is_trusted(&d));
+        assert_eq!(icacls(&fora), acl_antes);
+        assert!(std::fs::read_dir(&fora).unwrap().next().is_none());
+        limpar_real(&dir);
+        for d in [&premissa, &fora] {
+            let _ = std::fs::remove_dir_all(d);
+        }
+    }
+
+    /// Cria `dir\nome` de dono Usuários (alheio) e o devolve aberto com o compartilhamento dado.
+    fn plantar(dir: &Path, nome: &str, share: u32) -> std::fs::File {
+        use std::os::windows::fs::OpenOptionsExt;
+        let f = dir.join(nome);
+        std::fs::write(&f, "99999").unwrap();
+        imp::test_set_owner(&f, "O:BU").unwrap();
+        assert!(!is_trusted(&f));
+        std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(share)
+            .open(&f)
+            .unwrap()
+    }
+
+    /// M2 (nome qualquer): arquivo alheio preso SEM compartilhamento não impede a ativação.
+    #[test]
+    #[ignore = "cria %ProgramData%\\GuiaLar de verdade (administrador, VM)"]
+    fn acl_real_arquivo_alheio_preso_de_outro_nome_so_avisa() {
+        let dir = state_dir().unwrap();
+        limpar_real(&dir);
+        std::fs::create_dir(&dir).unwrap();
+        let preso = plantar(&dir, "qualquer.txt", 0); // FileShare.None
+        let d = ensure_dir().expect("a pasta fecha mesmo com o arquivo preso");
+        assert!(
+            d.join("qualquer.txt").exists(),
+            "não deu para apagar: segue"
+        );
+        assert!(!icacls(&d).contains("(I)"), "a ACL protegida valeu");
+        // o apply segue: a trava e o manifesto saem normalmente
+        drop(crate::sysutil::OpLock::acquire_in(&d.join("op.lock")).unwrap());
+        write_state(b"{}").unwrap();
+        drop(preso);
+        limpar_real(&dir);
+    }
+
+    /// M2 (`op.lock`/`state.json`): se o outro processo permite apagar (`FILE_SHARE_DELETE`), o
+    /// nome é desvinculado na hora e o `create_new` seguinte funciona, mesmo com o handle velho.
+    #[test]
+    #[ignore = "cria %ProgramData%\\GuiaLar de verdade (administrador, VM)"]
+    fn acl_real_trava_e_manifesto_alheios_abertos_com_share_delete_sao_desvinculados() {
+        let dir = state_dir().unwrap();
+        limpar_real(&dir);
+        std::fs::create_dir(&dir).unwrap();
+        let velha_trava = plantar(&dir, "op.lock", 7);
+        let velho_estado = plantar(&dir, STATE_FILE, 7);
+        let d = ensure_dir().unwrap();
+        assert!(!d.join("op.lock").exists() && !d.join(STATE_FILE).exists());
+        let l = crate::sysutil::OpLock::acquire_in(&d.join("op.lock")).unwrap();
+        write_state(b"{\"novo\":true}").unwrap();
+        assert_eq!(
+            read_state().unwrap().as_deref(),
+            Some(&b"{\"novo\":true}"[..])
+        );
+        drop((l, velha_trava, velho_estado));
+        limpar_real(&dir);
+    }
+
+    /// M2, o limite medido: `op.lock` alheio aberto SEM `FILE_SHARE_DELETE` não pode ser
+    /// apagado nem renomeado por ninguém enquanto o outro processo o segurar. O apply para
+    /// com um erro claro (antes de mexer no DNS) e volta a funcionar quando o handle fecha.
+    #[test]
+    #[ignore = "cria %ProgramData%\\GuiaLar de verdade (administrador, VM)"]
+    fn acl_real_trava_alheia_presa_sem_share_delete_da_erro_claro_e_se_recupera() {
+        let dir = state_dir().unwrap();
+        limpar_real(&dir);
+        std::fs::create_dir(&dir).unwrap();
+        let preso = plantar(&dir, "op.lock", 3); // READ | WRITE, sem DELETE
+        let e = format!("{:#}", ensure_dir().unwrap_err());
+        assert!(e.contains("aberto por outro programa"), "{e}");
+        assert!(!icacls(&dir).contains("(I)"), "a pasta já estava fechada");
+        drop(preso);
+        let d = ensure_dir().expect("sem o handle, a ativação segue");
+        assert!(!d.join("op.lock").exists());
         limpar_real(&dir);
     }
 }

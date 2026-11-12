@@ -443,7 +443,9 @@ impl OpLock {
                     // trava de dono alheio (uma conta comum a plantou numa pasta que ficou
                     // aberta) não é uma operação nossa: conta como abandonada (ADR-031)
                     if lock_is_stale(path) || !crate::statedir::is_trusted(path) {
-                        let _ = std::fs::remove_file(path);
+                        // Windows: desvincula na hora, mesmo com o arquivo aberto por outro
+                        // processo que permita apagar; senão a volta seguinte falha e sobe o erro
+                        let _ = crate::statedir::unlink_now(path);
                         continue;
                     }
                     bail!(LOCK_BUSY);

@@ -523,6 +523,63 @@ extern "system" {
     pub fn GetCurrentProcess() -> HANDLE;
 }
 
+// Abrir o diretório de estado sem seguir ponto de reparse e mexer no descritor pelo HANDLE.
+pub const INVALID_HANDLE_VALUE: HANDLE = -1isize as HANDLE;
+pub const OPEN_EXISTING: u32 = 3;
+pub const FILE_SHARE_ALL: u32 = 7; // READ | WRITE | DELETE
+pub const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+pub const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+pub const DELETE: u32 = 0x0001_0000;
+pub const READ_CONTROL: u32 = 0x0002_0000;
+pub const WRITE_DAC: u32 = 0x0004_0000;
+pub const WRITE_OWNER: u32 = 0x0008_0000;
+pub const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
+pub const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+/// `FILE_INFO_BY_HANDLE_CLASS::FileDispositionInfoEx`.
+pub const FILE_DISPOSITION_INFO_EX: i32 = 21;
+/// `FILE_DISPOSITION_FLAG_DELETE | POSIX_SEMANTICS | IGNORE_READONLY_ATTRIBUTE`.
+pub const FILE_DISPOSITION_UNLINK_NOW: u32 = 0x1 | 0x2 | 0x10;
+
+#[repr(C)]
+pub struct FILETIME {
+    pub dwLowDateTime: u32,
+    pub dwHighDateTime: u32,
+}
+
+#[repr(C)]
+pub struct BY_HANDLE_FILE_INFORMATION {
+    pub dwFileAttributes: u32,
+    pub ftCreationTime: FILETIME,
+    pub ftLastAccessTime: FILETIME,
+    pub ftLastWriteTime: FILETIME,
+    pub dwVolumeSerialNumber: u32,
+    pub nFileSizeHigh: u32,
+    pub nFileSizeLow: u32,
+    pub nNumberOfLinks: u32,
+    pub nFileIndexHigh: u32,
+    pub nFileIndexLow: u32,
+}
+
+#[link(name = "kernel32")]
+extern "system" {
+    pub fn GetFileInformationByHandle(h: HANDLE, info: *mut BY_HANDLE_FILE_INFORMATION) -> i32;
+    pub fn SetFileInformationByHandle(h: HANDLE, class: i32, info: *const c_void, size: u32)
+        -> i32;
+}
+
+#[link(name = "advapi32")]
+extern "system" {
+    pub fn SetSecurityInfo(
+        h: HANDLE,
+        object_type: u32,
+        info: u32,
+        owner: *mut c_void,
+        group: *mut c_void,
+        dacl: *mut c_void,
+        sacl: *mut c_void,
+    ) -> u32;
+}
+
 #[link(name = "advapi32")]
 extern "system" {
     pub fn OpenProcessToken(process: HANDLE, access: u32, token: *mut HANDLE) -> i32;
@@ -535,6 +592,8 @@ extern "system" {
         previous: *mut c_void,
         return_len: *mut u32,
     ) -> i32;
+    /// Só os testes de ACL real (trocar o dono de um arquivo de teste); a produção usa o handle.
+    #[cfg(test)]
     pub fn SetNamedSecurityInfoW(
         name: *const u16,
         object_type: u32,
