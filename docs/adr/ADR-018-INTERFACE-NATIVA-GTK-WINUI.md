@@ -1,6 +1,6 @@
 # ADR-018 — Arquitetura de Interface Gráfica Nativa por SO (GTK4/Libadwaita no Linux e WinUI/Fluent no Windows)
 
-- **Status:** Aceito (Revoga ADR-003 da Trilha Rust que previa `egui`/`eframe`)
+- **Status:** Aceito (Revoga ADR-003 da Trilha Rust que previa `egui`/`eframe`; a ADR-003 é anterior a este repositório e não foi trazida para `docs/adr/`)
 - **Data:** 08/11/2026
 - **Autor:** `gl-arquiteto` (Arquiteto do `guialar-digital`)
 - **Alvo:** `guialar-rs` v0.3.0

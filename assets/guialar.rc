@@ -18,7 +18,7 @@ BEGIN
       VALUE "FileDescription", "GuiaLar Digital - Prote\347\343o Familiar de Rede e Navegadores"
       VALUE "FileVersion", "0.3.0.0"
       VALUE "InternalName", "guialar"
-      VALUE "LegalCopyright", "Copyright (c) 2026 GuiaLar Digital - Licen\347a MIT"
+      VALUE "LegalCopyright", "Copyright (c) 2026 GuiaLar Digital - Licen\347a MIT ou Apache-2.0"
       VALUE "OriginalFilename", "guialar.exe"
       VALUE "ProductName", "GuiaLar Digital"
       VALUE "ProductVersion", "0.3.0.0"

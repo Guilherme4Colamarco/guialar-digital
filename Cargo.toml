@@ -3,7 +3,7 @@ name = "guialar"
 version = "0.3.0"
 edition = "2021"
 authors = ["Guilherme Amaral Colamarco Resende de Melo <88679520+Guilherme4Colamarco@users.noreply.github.com>"]
-description = "Proteção familiar de navegação via DNS Cloudflare Family e instalador uBlock Origin para Linux (NetworkManager, systemd-resolved, runit/resolvconf) e Windows"
+description = "Proteção de navegação por DNS filtrado (familiar: Cloudflare for Families; só anúncios: AdGuard DNS) e bloqueador de anúncios nos navegadores, para Linux (NetworkManager, systemd-resolved, runit/resolvconf) e Windows"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
