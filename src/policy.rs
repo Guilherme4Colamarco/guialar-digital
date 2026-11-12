@@ -167,6 +167,17 @@ mod win {
             .find(|p| p.is_file())
     }
 
+    /// Firefox onde o processo elevado pode gravar `policies.json`: só em `Program Files`.
+    /// Uma instalação por usuário (`%LOCALAPPDATA%`) fica fora: o caminho é de uma conta comum
+    /// e uma junção ali faria o administrador gravar ou apagar arquivos alheios (ADR-030).
+    fn find_firefox() -> Option<PathBuf> {
+        ["ProgramFiles", "ProgramFiles(x86)"]
+            .iter()
+            .filter_map(std::env::var_os)
+            .map(|d| PathBuf::from(d).join(r"Mozilla Firefox\firefox.exe"))
+            .find(|p| p.is_file())
+    }
+
     pub fn install_all() -> Result<Vec<String>> {
         let mut done = Vec::new();
         let candidates = [
@@ -192,16 +203,20 @@ mod win {
                 ));
             }
         }
-        if let Some(exe) = find_exe(r"Mozilla Firefox\firefox.exe") {
-            let dist = exe
-                .parent()
-                .context("pasta do Firefox")?
-                .join("distribution");
-            std::fs::create_dir_all(&dist).context("criando pasta distribution do Firefox")?;
-            let file = dist.join("policies.json");
-            let current = std::fs::read_to_string(&file).ok();
-            std::fs::write(&file, merge_firefox_policies(current.as_deref())?)
-                .context("gravando policies.json do Firefox")?;
+        if let Some(exe) = find_firefox() {
+            let dir = exe.parent().context("pasta do Firefox")?;
+            // sem seguir link nem junção em `distribution` nem em `policies.json` (ADR-030)
+            let owner = crate::safefs::caller_owner();
+            let current =
+                crate::safefs::read_file(dir, &["distribution"], "policies.json", &owner)?
+                    .map(|b| String::from_utf8_lossy(&b).into_owned());
+            crate::safefs::write_file(
+                dir,
+                &["distribution"],
+                "policies.json",
+                merge_firefox_policies(current.as_deref())?.as_bytes(),
+            )
+            .context("gravando policies.json do Firefox")?;
             done.push("Firefox: uBlock Origin instalado ao reabrir o navegador".into());
         }
         Ok(done)
@@ -231,7 +246,7 @@ mod win {
                 out.push(name.to_string());
             }
         }
-        if let Some(exe) = find_exe(r"Mozilla Firefox\firefox.exe") {
+        if let Some(exe) = find_firefox() {
             let file = exe
                 .parent()
                 .map(|d| d.join("distribution").join("policies.json"));
@@ -262,19 +277,25 @@ mod win {
                 anyhow::bail!("reg delete falhou em {key} ({:?})", status.code());
             }
         }
-        if let Some(exe) = find_exe(r"Mozilla Firefox\firefox.exe") {
-            let file = exe
-                .parent()
-                .context("pasta do Firefox")?
-                .join("distribution")
-                .join("policies.json");
-            if let Ok(current) = std::fs::read_to_string(&file) {
+        if let Some(exe) = find_firefox() {
+            let dir = exe.parent().context("pasta do Firefox")?;
+            let owner = crate::safefs::caller_owner();
+            let current =
+                crate::safefs::read_file(dir, &["distribution"], "policies.json", &owner)?;
+            if let Some(current) = current.map(|b| String::from_utf8_lossy(&b).into_owned()) {
                 if let Some(novo) = remove_firefox_policy(&current)? {
                     if is_empty_policies(&novo) {
                         // Criado só por nós: não deixa arquivo vazio para trás.
-                        std::fs::remove_file(&file).context("removendo policies.json vazio")?;
+                        crate::safefs::remove_file(dir, &["distribution"], "policies.json", &owner)
+                            .context("removendo policies.json vazio")?;
                     } else {
-                        std::fs::write(&file, novo).context("gravando policies.json do Firefox")?;
+                        crate::safefs::write_file(
+                            dir,
+                            &["distribution"],
+                            "policies.json",
+                            novo.as_bytes(),
+                        )
+                        .context("gravando policies.json do Firefox")?;
                     }
                 }
             }

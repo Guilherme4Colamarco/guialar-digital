@@ -554,6 +554,7 @@ mod tests {
         assert!(OpLock::acquire_in(&f).is_ok());
     }
 
+    #[cfg(unix)]
     #[test]
     fn appimage_so_vale_com_o_executavel_dentro_do_appdir() {
         use std::ffi::OsStr;

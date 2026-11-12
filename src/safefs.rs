@@ -83,7 +83,6 @@ pub fn remove_file(base: &Path, comps: &[&str], file: &str, owner: &Owner) -> Re
 /// Grava `data` em `base/comps…/file` de forma atômica (temp + `rename`), criando as pastas
 /// que faltam. Só Windows (o `policies.json` do Firefox). Recusa link/junção no caminho.
 #[cfg(windows)]
-#[allow(dead_code)] // usado a seguir, pelo `policies.json` do Firefox
 pub fn write_file(base: &Path, comps: &[&str], file: &str, data: &[u8]) -> Result<()> {
     check_names(comps, file)?;
     imp::write_file(base, comps, file, data)
@@ -315,7 +314,6 @@ mod imp {
         Ok(Some(cur))
     }
 
-    #[allow(dead_code)]
     pub fn write_file(base: &Path, comps: &[&str], file: &str, data: &[u8]) -> Result<()> {
         let dir = dir_chain(base, comps, true)?.context("pasta ausente")?;
         let target = dir.join(file);
@@ -500,5 +498,69 @@ mod tests {
         ] {
             assert!(read_file(s.dir(), &c, f, &o).is_err(), "{c:?} {f:?}");
         }
+    }
+}
+
+/// Cria uma junção (`mklink /J`, não pede administrador) de `link` para `alvo`.
+#[cfg(all(test, windows))]
+pub(crate) fn junction(link: &Path, alvo: &Path) {
+    let st = std::process::Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(link)
+        .arg(alvo)
+        .output()
+        .expect("mklink");
+    assert!(st.status.success(), "mklink /J falhou: {st:?}");
+}
+
+#[cfg(all(test, windows))]
+mod tests_win {
+    use super::*;
+    use crate::testenv::Sandbox;
+
+    #[test]
+    fn grava_le_e_remove_sem_junção() {
+        let s = Sandbox::new("safefs-win-ok");
+        let o = caller_owner();
+        write_file(s.dir(), &["distribution"], "policies.json", b"{\"a\":1}").unwrap();
+        let lido = read_file(s.dir(), &["distribution"], "policies.json", &o).unwrap();
+        assert_eq!(lido.as_deref(), Some(&b"{\"a\":1}"[..]));
+        write_file(s.dir(), &["distribution"], "policies.json", b"{}").unwrap(); // regrava
+        let nomes: Vec<_> = std::fs::read_dir(s.dir().join("distribution"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(nomes, ["policies.json"], "sem .tmp esquecido");
+        remove_file(s.dir(), &["distribution"], "policies.json", &o).unwrap();
+        assert!(read_file(s.dir(), &["distribution"], "policies.json", &o)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn pasta_como_juncao_para_fora_e_recusada_sem_tocar_o_alvo() {
+        let s = Sandbox::new("safefs-win-junction");
+        let o = caller_owner();
+        let fora = s.dir().join("FORA");
+        std::fs::create_dir_all(&fora).unwrap();
+        std::fs::write(fora.join("policies.json"), "do-alvo").unwrap();
+        junction(&s.dir().join("distribution"), &fora); // distribution -> FORA
+        for r in [
+            write_file(s.dir(), &["distribution"], "policies.json", b"x").map(|_| ()),
+            read_file(s.dir(), &["distribution"], "policies.json", &o).map(|_| ()),
+            remove_file(s.dir(), &["distribution"], "policies.json", &o),
+        ] {
+            let e = r.unwrap_err();
+            assert!(format!("{e:#}").contains("junção"), "{e:#}");
+        }
+        assert_eq!(
+            std::fs::read_to_string(fora.join("policies.json")).unwrap(),
+            "do-alvo"
+        );
+        let nomes: Vec<_> = std::fs::read_dir(&fora)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(nomes, ["policies.json"], "nada criado no alvo");
     }
 }

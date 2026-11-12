@@ -510,3 +510,139 @@ mod tests {
         assert!(read_state().unwrap().is_none());
     }
 }
+
+#[cfg(all(test, windows))]
+mod tests_win {
+    use super::*;
+    use crate::testenv::Sandbox;
+
+    #[test]
+    fn estado_so_na_pasta_do_sistema_e_le_de_volta() {
+        let s = Sandbox::new("statedir-win-ok");
+        let dir = state_dir().unwrap();
+        assert!(dir.starts_with(s.dir().join("sistema")));
+        write_state(b"{\"a\":1}").unwrap();
+        assert_eq!(read_state().unwrap().as_deref(), Some(&b"{\"a\":1}"[..]));
+        let nomes: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(nomes, [STATE_FILE], "sem .tmp esquecido");
+        remove_state().unwrap();
+        assert!(read_state().unwrap().is_none());
+    }
+
+    #[test]
+    fn pasta_preexistente_como_juncao_e_afastada_e_recriada_sem_tocar_o_alvo() {
+        let s = Sandbox::new("statedir-win-junction");
+        let dir = state_dir().unwrap();
+        let fora = s.dir().join("FORA");
+        std::fs::create_dir_all(&fora).unwrap();
+        std::fs::write(fora.join("state.json"), "{\"forjado\":true}").unwrap();
+        crate::safefs::junction(&dir, &fora); // GuiaLar -> FORA (plantada por uma conta comum)
+                                              // o estado forjado atrás da junção não é lido
+        assert!(read_state().unwrap().is_none());
+        write_state(b"{\"ok\":true}").unwrap();
+        // a junção saiu do caminho (renomeada, sem seguir) e a pasta certa foi recriada
+        let pai = dir.parent().unwrap();
+        let afastadas: Vec<_> = std::fs::read_dir(pai)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with("GuiaLar.recusada-"))
+            .collect();
+        assert_eq!(afastadas.len(), 1, "{afastadas:?}");
+        assert_eq!(
+            std::fs::read_to_string(fora.join("state.json")).unwrap(),
+            "{\"forjado\":true}"
+        );
+        assert_eq!(
+            read_state().unwrap().as_deref(),
+            Some(&b"{\"ok\":true}"[..])
+        );
+    }
+
+    /// Toca o `%ProgramData%` de verdade: só como administrador, numa VM, com
+    /// `--ignored`. Confere o dono, a DACL protegida e o desvio de uma pasta que não é nossa.
+    #[test]
+    #[ignore = "cria %ProgramData%\\GuiaLar de verdade (administrador, VM)"]
+    fn acl_real_do_programdata() {
+        let dir = state_dir().unwrap();
+        assert!(dir.ends_with("GuiaLar"), "{dir:?}");
+        let pai = dir.parent().unwrap().to_path_buf();
+        let limpar = |dir: &Path, pai: &Path| {
+            let _ = std::fs::remove_dir_all(dir);
+            for e in std::fs::read_dir(pai).unwrap().flatten() {
+                if e.file_name()
+                    .to_string_lossy()
+                    .starts_with("GuiaLar.recusada-")
+                {
+                    let _ = std::fs::remove_dir_all(e.path());
+                }
+            }
+        };
+        limpar(&dir, &pai);
+        let d = ensure_dir().unwrap();
+        assert!(is_trusted(&d), "dono tem de ser Administradores ou SYSTEM");
+        let icacls = std::process::Command::new("icacls")
+            .arg(&d)
+            .output()
+            .unwrap();
+        let acl = String::from_utf8_lossy(&icacls.stdout).into_owned();
+        println!("{acl}");
+        assert!(acl.contains("Administrators:(OI)(CI)(F)"), "{acl}");
+        assert!(acl.contains("SYSTEM:(OI)(CI)(F)"), "{acl}");
+        assert!(
+            acl.contains("Users:(OI)(CI)(R)"),
+            "Usuários só leitura: {acl}"
+        );
+        assert!(
+            !acl.contains("CREATOR OWNER") && !acl.contains("(I)"),
+            "sem herança: {acl}"
+        );
+        // grava, lê e arquivos novos herdam a ACL (Usuários só leem)
+        write_state(b"{\"ok\":true}").unwrap();
+        assert_eq!(
+            read_state().unwrap().as_deref(),
+            Some(&b"{\"ok\":true}"[..])
+        );
+        let f = std::process::Command::new("icacls")
+            .arg(d.join(STATE_FILE))
+            .output()
+            .unwrap();
+        let facl = String::from_utf8_lossy(&f.stdout).into_owned();
+        println!("{facl}");
+        assert!(
+            facl.contains("Users:(I)(R)"),
+            "o arquivo herda leitura para Usuários: {facl}"
+        );
+        assert!(
+            !facl.contains("Users:(I)(F)") && !facl.contains("(M)") && !facl.contains("(W)"),
+            "{facl}"
+        );
+        // pasta que não é nossa (junção): sai do caminho e a certa é recriada
+        remove_state().unwrap();
+        std::fs::remove_dir(&d).unwrap();
+        let fora = std::env::temp_dir().join("guialar-acl-fora");
+        let _ = std::fs::remove_dir_all(&fora);
+        std::fs::create_dir_all(&fora).unwrap();
+        crate::safefs::junction(&d, &fora);
+        let novo = ensure_dir().unwrap();
+        assert!(is_trusted(&novo));
+        assert!(
+            std::fs::read_dir(&fora).unwrap().next().is_none(),
+            "nada gravado atrás da junção"
+        );
+        let afastadas = std::fs::read_dir(&pai)
+            .unwrap()
+            .flatten()
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("GuiaLar.recusada-")
+            })
+            .count();
+        assert_eq!(afastadas, 1);
+        limpar(&dir, &pai);
+        let _ = std::fs::remove_dir_all(&fora);
+    }
+}
