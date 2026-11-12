@@ -67,6 +67,8 @@ jobs:
         run: rustup show active-toolchain || rustup toolchain install
       - name: Build release gnu
         run: cargo build --locked --release
+      - name: desktop-file-utils (appimagetool valida o .desktop)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends desktop-file-utils
       - name: appimagetool
         run: |
           curl -sSfL -o /tmp/appimagetool "$APPIMAGETOOL_URL"
@@ -95,16 +97,27 @@ jobs:
       - name: Rust (rust-toolchain.toml)
         shell: bash
         run: rustup show active-toolchain || rustup toolchain install
-      - name: Conferir llvm-windres
+      - name: Localizar windres (llvm-windres ou mingw)
         shell: pwsh
         run: |
-          if ($env:GUIALAR_WINDRES) { $w = $env:GUIALAR_WINDRES } else { $w = 'llvm-windres' }
-          $cmd = Get-Command $w -ErrorAction SilentlyContinue
-          if (-not $cmd) {
-            Write-Error "llvm-windres nao encontrado no PATH (o build.rs precisa dele para os recursos do Windows). Instale o LLVM (choco install llvm) ou defina GUIALAR_WINDRES."
+          # build.rs precisa de llvm-windres (ou GUIALAR_WINDRES). Procura no PATH e em locais do runner.
+          if ($env:GUIALAR_WINDRES) { $cands = @($env:GUIALAR_WINDRES) } else { $cands = @('llvm-windres', 'windres') }
+          $cands += @(
+            'C:\Program Files\LLVM\bin\llvm-windres.exe',
+            'C:\msys64\mingw64\bin\windres.exe',
+            'C:\mingw64\bin\windres.exe',
+            'C:\Strawberry\c\bin\windres.exe')
+          $found = $null
+          foreach ($c in $cands) {
+            $cmd = Get-Command $c -ErrorAction SilentlyContinue
+            if ($cmd) { $found = $cmd.Source; break }
+          }
+          if (-not $found) {
+            Write-Error "llvm-windres/windres nao encontrado (build.rs precisa dele para os recursos do Windows). Procurado: $($cands -join ', '). Defina GUIALAR_WINDRES."
             exit 1
           }
-          Write-Host "llvm-windres: $($cmd.Source)"
+          Write-Host "windres: $found"
+          "GUIALAR_WINDRES=$found" >> $env:GITHUB_ENV
       - name: Build release
         run: cargo build --locked --release
       - name: Nomear artefato

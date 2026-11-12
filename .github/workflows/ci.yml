@@ -76,6 +76,27 @@ jobs:
       - uses: actions/checkout@v4
       - name: Rust (rust-toolchain.toml)
         run: rustup show active-toolchain || rustup toolchain install
+      - name: Localizar windres (llvm-windres ou mingw)
+        shell: pwsh
+        run: |
+          # build.rs precisa de llvm-windres (ou GUIALAR_WINDRES). Procura no PATH e em locais do runner.
+          if ($env:GUIALAR_WINDRES) { $cands = @($env:GUIALAR_WINDRES) } else { $cands = @('llvm-windres', 'windres') }
+          $cands += @(
+            'C:\Program Files\LLVM\bin\llvm-windres.exe',
+            'C:\msys64\mingw64\bin\windres.exe',
+            'C:\mingw64\bin\windres.exe',
+            'C:\Strawberry\c\bin\windres.exe')
+          $found = $null
+          foreach ($c in $cands) {
+            $cmd = Get-Command $c -ErrorAction SilentlyContinue
+            if ($cmd) { $found = $cmd.Source; break }
+          }
+          if (-not $found) {
+            Write-Error "llvm-windres/windres nao encontrado (build.rs precisa dele para os recursos do Windows). Procurado: $($cands -join ', '). Defina GUIALAR_WINDRES."
+            exit 1
+          }
+          Write-Host "windres: $found"
+          "GUIALAR_WINDRES=$found" >> $env:GITHUB_ENV
       - name: Clippy
         run: cargo clippy --locked --all-targets -- -D warnings
       - name: Testes
