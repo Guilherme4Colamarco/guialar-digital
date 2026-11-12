@@ -188,6 +188,10 @@ mod qa_tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
+            // a pasta também: `create_dir_all` com umask 0002 a deixa 0775 (gravável pelo grupo)
+            if let Some(dir) = path.parent() {
+                std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644)).unwrap();
         }
     }

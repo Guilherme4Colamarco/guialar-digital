@@ -92,6 +92,23 @@ fn apply_twice_keeps_original_manifest_untouched() {
     std::fs::create_dir_all(&dir).unwrap();
     let manifest = r#"{"backend":"DirectResolvConf","applied_at_utc":"1","connections":[],"previous_resolv_conf":"nameserver 9.9.9.9\n"}"#;
     std::fs::write(dir.join("state.json"), manifest).unwrap();
+    // o modo não pode depender da `umask` de quem roda o teste (0002 cria 0775/0664, que o
+    // `is_trusted` recusa): fixa o que a produção grava (0755 na pasta, 0644 no arquivo)
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for (p, m) in [
+            (&home, 0o755),
+            (&home.join("sistema"), 0o755),
+            (&dir, 0o755),
+        ] {
+            std::fs::set_permissions(p, std::fs::Permissions::from_mode(m)).unwrap();
+        }
+        std::fs::set_permissions(
+            dir.join("state.json"),
+            std::fs::Permissions::from_mode(0o644),
+        )
+        .unwrap();
+    }
     let empty_bin = home.join("bin-vazio");
     std::fs::create_dir_all(&empty_bin).unwrap();
 
