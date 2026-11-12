@@ -103,6 +103,7 @@ pub fn migrate_legacy() -> Result<Option<String>> {
 }
 
 pub(crate) fn migrate_legacy_generic(
+    active: crate::config::BackendKind,
     known: &[String],
     revert: impl FnOnce(&DnsStateManifest) -> Result<()>,
     fallback: impl FnOnce() -> Result<()>,
@@ -115,7 +116,17 @@ pub(crate) fn migrate_legacy_generic(
             return Ok(None);
         }
     };
-    match legacy.validate_legacy(known) {
+    // L1: o manifesto antigo só vale se o backend dele é o que está ativo agora; um
+    // `DirectResolvConf` forjado num sistema com NetworkManager não pode regravar o resolv.conf
+    let validated = if legacy.backend == active {
+        legacy.validate_legacy(known)
+    } else {
+        Err(format!(
+            "o backend do registro ({:?}) não é o ativo agora ({:?})",
+            legacy.backend, active
+        ))
+    };
+    match validated {
         Ok(()) => {
             println!("🔄 Restaurando a partir do registro antigo (beta)...");
             revert(&legacy)?;

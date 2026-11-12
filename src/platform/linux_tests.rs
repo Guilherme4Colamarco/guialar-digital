@@ -1212,8 +1212,10 @@ fn migracao_sem_registro_antigo_nao_faz_nada() {
     let r = nm_machine();
     assert!(migrar(&r).unwrap().is_none());
     assert!(
-        r.argvs().iter().all(|a| a[0] == "nmcli" && a[1] == "-t"),
-        "só leitura: {:?}",
+        r.argvs()
+            .iter()
+            .all(|a| a[0] == "nmcli" && (a[1] == "-t" || a[1] == "general")),
+        "só leitura (backend ativo e conexões): {:?}",
         r.argvs()
     );
 }
@@ -1370,4 +1372,30 @@ fn nm_leitura_do_v6_que_sai_com_erro_e_tratada_como_falha_e_nao_bloqueia_o_apply
     apply_dns_with(&r).unwrap();
     let m = manifest();
     assert!(m.connections[0].was_dhcp_ipv6 && m.connections[0].original_ipv6_dns.is_empty());
+}
+
+#[test]
+fn migracao_com_backend_diferente_do_ativo_cai_no_fallback_e_nao_mexe_no_resolv_conf() {
+    // L1: um manifesto antigo forjado como DirectResolvConf num sistema com NetworkManager
+    let s = Sandbox::new("adr31-mig-backend");
+    let r = nm_machine().with_file(RESOLV, "nameserver 10.0.0.1\n");
+    let forjado = serde_json::json!({
+        "backend": "DirectResolvConf", "applied_at_utc": "1", "connections": [],
+        "previous_resolv_conf": "nameserver 9.9.9.9\n", "mode": "family"
+    })
+    .to_string();
+    std::fs::write(legado_dir(&s).join("state.json"), forjado).unwrap();
+    let msg = migrar(&r).unwrap().expect("fallback");
+    assert!(msg.contains("inválido"), "{msg}");
+    assert!(!legado_dir(&s).join("state.json").exists());
+    assert_eq!(
+        r.state().files.get(RESOLV).map(String::as_str),
+        Some("nameserver 10.0.0.1\n"),
+        "resolv.conf intacto"
+    );
+    assert!(
+        !r.argvs().iter().any(|a| a[0] == "tee"),
+        "nada foi gravado em /etc: {:?}",
+        r.argvs()
+    );
 }

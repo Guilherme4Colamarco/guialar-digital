@@ -411,6 +411,7 @@ pub fn migrate_legacy() -> Result<Option<String>> {
 
 pub(super) fn migrate_legacy_with(r: &dyn CommandRunner) -> Result<Option<String>> {
     super::migrate_legacy_generic(
+        detect_active_backend_with(r),
         &known_connection_ids_with(r),
         |m| revert_dns_with(r, m),
         || revert_dns_fallback_with(r),
