@@ -435,13 +435,24 @@ pub fn revert_dns_fallback() -> Result<()> {
     transaction::revert_fallback(&PsBackend(&RealRunner), crate::policy::revert_all)
 }
 
-/// DNS automático em todas as interfaces ativas (por índice).
+/// DNS automático em todas as interfaces ativas (por índice). Tenta TODAS (uma que falha não
+/// deixa as outras presas no filtro) e devolve as falhas juntas.
 fn reset_all_interfaces(r: &dyn CommandRunner) -> Result<()> {
-    for (_, index) in list_active_interfaces(r)? {
-        run_powershell(
+    let mut falhas: Vec<String> = Vec::new();
+    for (alias, index) in list_active_interfaces(r)? {
+        if let Err(e) = run_powershell(
             r,
             &format!("Set-DnsClientServerAddress -InterfaceIndex {index} -ResetServerAddresses"),
-        )?;
+        ) {
+            falhas.push(format!("{alias} (índice {index}): {e:#}"));
+        }
+    }
+    if !falhas.is_empty() {
+        bail!(
+            "Falha ao voltar o DNS ao automático em {} interface(s): {}",
+            falhas.len(),
+            falhas.join(" | ")
+        );
     }
     Ok(())
 }

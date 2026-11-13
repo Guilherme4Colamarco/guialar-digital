@@ -910,3 +910,33 @@ mod troca_de_modo {
         assert_eq!(modo_no_disco(), FilterMode::Family);
     }
 }
+
+// ---------------------------- review do 08113dd: B2 (reset de todas as interfaces)
+
+#[test]
+fn reset_tenta_todas_as_interfaces_e_junta_as_falhas() {
+    let _s = Sandbox::new("win-reset-falha");
+    let r = two_ifaces();
+    r.reg4.borrow_mut().insert(5, vec!["1.1.1.3".into()]);
+    r.reg4.borrow_mut().insert(7, vec!["1.1.1.3".into()]);
+    // o reset da PRIMEIRA interface (Ethernet, índice 5) falha
+    *r.fail_on.borrow_mut() = Some("-InterfaceIndex 5 -ResetServerAddresses".into());
+    let e = format!("{:#}", reset_all_interfaces(&r).unwrap_err());
+    assert!(
+        e.contains("1 interface(s)") && e.contains("Ethernet"),
+        "{e}"
+    );
+    assert!(!e.contains("Wi-Fi"), "só a que falhou entra na lista: {e}");
+    assert!(
+        r.dns_of(7).is_empty(),
+        "a segunda interface foi resetada mesmo assim"
+    );
+    assert_eq!(r.dns_of(5), ["1.1.1.3"], "a que falhou ficou como estava");
+    // duas falhas: a lista traz as duas
+    *r.fail_also.borrow_mut() = Some("-InterfaceIndex 7 -ResetServerAddresses".into());
+    let e = format!("{:#}", reset_all_interfaces(&r).unwrap_err());
+    assert!(
+        e.contains("2 interface(s)") && e.contains("Ethernet") && e.contains("Wi-Fi"),
+        "{e}"
+    );
+}
