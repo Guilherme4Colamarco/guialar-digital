@@ -806,6 +806,11 @@ fn inspect_nm_connection_unsanitized(
             ],
         ))
         .context("Falha ao inspecionar conexão do NetworkManager")?;
+    // Sem checar o código de saída, uma leitura que falhou viraria «DHCP, sem fixos» e o
+    // desfazer apagaria o DNS fixo da conexão.
+    if !output.success() {
+        bail!("nmcli saiu com erro ao ler o DNS da conexão {uuid}; nada foi alterado");
+    }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let mut was_dhcp = true;

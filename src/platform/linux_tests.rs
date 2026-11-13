@@ -1586,3 +1586,37 @@ fn migracao_com_backend_diferente_do_ativo_cai_no_fallback_e_nao_mexe_no_resolv_
         r.argvs()
     );
 }
+
+// ---------------------------- review do 08113dd: B1 (exit do nmcli v4) e B3 (Direct sem arquivo)
+
+#[test]
+fn nm_inspect_ipv4_com_nmcli_saindo_1_falha_e_nada_e_trocado() {
+    let s = Sandbox::new("nm-b1");
+    let r = nm_machine();
+    let original = r.state();
+    // a leitura do IPv4 do Wi-Fi sai com erro (stdout vazio): antes virava «DHCP, sem fixos»
+    r.add_exit_argv(
+        &[
+            "nmcli",
+            "-t",
+            "-f",
+            "ipv4.dns,ipv4.ignore-auto-dns",
+            "connection",
+            "show",
+            "uuid-wifi",
+        ],
+        1,
+    );
+    let e = format!("{:#}", apply_dns_with(&r).unwrap_err());
+    assert!(
+        e.contains("uuid-wifi") && e.contains("nada foi alterado"),
+        "{e}"
+    );
+    assert_eq!(r.state(), original, "DNS intacto");
+    assert!(
+        !r.argvs().iter().any(|a| a.contains(&"modify".to_string())),
+        "nenhum modify: {:?}",
+        r.argvs()
+    );
+    assert!(!s.manifest_path().exists(), "sem registro");
+}
