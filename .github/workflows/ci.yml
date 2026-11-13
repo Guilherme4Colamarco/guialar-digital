@@ -28,6 +28,7 @@ jobs:
     name: Linux gnu (fmt clippy test build)
     if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - name: Rust (rust-toolchain.toml)
@@ -55,6 +56,7 @@ jobs:
     name: Linux musl (clippy test)
     if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - name: Rust (rust-toolchain.toml)
@@ -73,6 +75,7 @@ jobs:
     name: Windows (clippy test build)
     if: github.event_name != 'schedule'
     runs-on: windows-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - name: Rust (rust-toolchain.toml)
@@ -128,6 +131,7 @@ jobs:
           - name: windows
             os: windows-latest
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     env:
       GUIALAR_NO_INTEGRATION: "1"
     steps:
