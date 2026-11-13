@@ -19,7 +19,6 @@ mod verify;
 #[cfg(windows)]
 mod win32;
 
-use crate::config::DnsStateManifest;
 use crate::verify::ProtectionStatus;
 use clap::{Parser, Subcommand};
 use std::process::ExitCode;
@@ -230,7 +229,7 @@ fn handle_status() -> anyhow::Result<()> {
         ProtectionStatus::Unprotected => {
             println!("  Estado:  🔴 [NÃO PROTEGIDO]");
             println!("  Info:    O sistema está utilizando o DNS padrão da rede/provedor.");
-            if platform::cloudflare_dns_active() {
+            if platform::filter_dns_in_use() {
                 println!(
                     "  Aviso:   O filtro do GuiaLar ainda está na rede, mas não há registro dele."
                 );
@@ -267,22 +266,27 @@ fn handle_apply() -> anyhow::Result<()> {
 /// `with_browsers`: no Windows faz DNS + navegadores com um único UAC.
 fn apply_flow(with_browsers: bool) -> anyhow::Result<()> {
     let _guard = sysutil::guard_operation()?;
-    if let Some(m) = DnsStateManifest::load()? {
-        let wanted = config::current_mode();
-        match platform::plan_apply(Some(&m), wanted, &platform::configured_dns()) {
-            platform::ApplyPlan::AlreadyActive => {
-                println!(
-                    "ℹ️  A proteção já está ativa. Use 'guialar revert' antes de aplicar de novo."
-                );
-                return Ok(());
-            }
-            _ if m.mode != wanted => {
-                println!("🔁 Trocando o filtro para: {}", wanted.label());
-            }
-            _ => {
-                println!("🔁 O DNS deste computador não é o do GuiaLar: reaplicando o filtro...");
-            }
+    // a decisão é a da plataforma (a mesma que o processo elevado vai tomar)
+    match platform::plan_now()? {
+        platform::ApplyStep::AlreadyActive => {
+            println!(
+                "ℹ️  A proteção já está ativa. Use 'guialar revert' antes de aplicar de novo."
+            );
+            return Ok(());
         }
+        platform::ApplyStep::Switch(m) if m.mode != config::current_mode() => {
+            println!(
+                "🔁 Trocando o filtro para: {}",
+                config::current_mode().label()
+            );
+        }
+        platform::ApplyStep::Switch(_) => {
+            println!("🔁 O DNS deste computador não é o do GuiaLar: reaplicando o filtro...");
+        }
+        platform::ApplyStep::Stale => {
+            println!("ℹ️  O registro anterior não corresponde ao DNS em uso (a proteção estava desligada): aplicando do zero.");
+        }
+        platform::ApplyStep::Fresh => {}
     }
     println!(
         "⚙️  Aplicando \"{}\" no sistema...",
@@ -311,64 +315,9 @@ fn apply_flow(with_browsers: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Reverte a proteção. Cobre manifesto normal, ausente e corrompido (nunca deixa o
-/// DNS preso no filtro). Devolve a mensagem final.
-fn revert_flow() -> anyhow::Result<String> {
-    match DnsStateManifest::load() {
-        Ok(Some(manifest)) => {
-            println!("🔄 Restaurando configurações originais de DNS...");
-            platform::revert_dns(&manifest)?;
-            Ok("Configurações de DNS restauradas com sucesso para o estado anterior.".into())
-        }
-        Ok(None) => {
-            // Beta: o manifesto ficava na área do usuário. O processo elevado o valida e o
-            // migra uma vez; nunca mais é gravado ali (ADR-031).
-            if sysutil::is_privileged() {
-                if let Some(msg) = platform::migrate_legacy()? {
-                    return Ok(msg);
-                }
-            }
-            if platform::cloudflare_dns_active() {
-                println!("🔄 O DNS ainda usa o filtro, mas não há registro: voltando ao padrão da rede...");
-                platform::revert_dns_fallback()?;
-                return Ok("DNS restaurado para o padrão da rede.".into());
-            }
-            #[cfg(windows)]
-            {
-                // Sem DNS para reverter, mas ainda pode haver políticas do uBlock.
-                if platform::elevate_if_needed("internal-revert")? {
-                    return Ok(
-                        "Nenhum manifesto de proteção ativo encontrado para reverter.".into(),
-                    );
-                }
-                policy::revert_all()?;
-            }
-            Ok("Nenhum manifesto de proteção ativo encontrado para reverter.".into())
-        }
-        // Falha de E/S ao LER (arquivo aberto por outro programa): o registro pode estar
-        // perfeito. Não o apaga nem cai no fallback; avisa e para sem alterar nada.
-        Err(e) if statedir::is_state_io_error(&e) => {
-            eprintln!(
-                "⚠️  {e:#}. Nada foi alterado; feche o programa que mantém o registro aberto e rode o desfazer de novo."
-            );
-            Err(e)
-        }
-        Err(_) => {
-            println!(
-                "⚠️  O registro da proteção está danificado: voltando o DNS ao padrão da rede..."
-            );
-            if let Ok(path) = DnsStateManifest::file_path() {
-                let _ = std::fs::remove_file(path);
-            }
-            platform::revert_dns_fallback()?;
-            Ok("O registro estava danificado. DNS restaurado para o padrão da rede.".into())
-        }
-    }
-}
-
 fn handle_revert() -> anyhow::Result<()> {
     let _guard = sysutil::guard_operation()?;
-    let msg = revert_flow()?;
+    let msg = platform::revert_protection()?;
     let icone = if msg.starts_with("Nenhum") {
         "ℹ️ "
     } else {
@@ -442,12 +391,14 @@ fn handle_internal_apply() -> anyhow::Result<()> {
 fn handle_internal_revert() -> anyhow::Result<()> {
     sysutil::require_privileged()?;
     let _lock = sysutil::OpLock::acquire()?;
-    revert_flow().map(|_| ())
+    platform::revert_protection().map(|_| ())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "linux")]
+    use crate::config::DnsStateManifest;
     use clap::CommandFactory;
 
     #[test]
@@ -457,7 +408,7 @@ mod tests {
 
     /// B3: só «arquivo ocupado por outro programa» (Windows) é erro de E/S marcado e poupa o
     /// registro. Uma leitura negada por outro motivo (aqui, sem permissão no Linux) volta ao
-    /// caminho de antes: o `load` falha sem a marca e o `revert_flow` cai no fallback, que
+    /// caminho de antes: o `load` falha sem a marca e o `revert_protection` cai no fallback, que
     /// nunca deixa o DNS preso no filtro.
     #[cfg(target_os = "linux")]
     #[test]

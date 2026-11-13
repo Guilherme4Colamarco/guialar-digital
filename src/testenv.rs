@@ -217,8 +217,13 @@ mod tests {
         assert!(std::env::var_os("HOME").is_some_and(|h| Path::new(&h).starts_with(s.dir())));
         let dir = s.dir().to_path_buf();
         drop(s);
-        assert_eq!(std::env::var_os("HOME"), home_antes);
-        assert_eq!(std::env::var_os("LOCALAPPDATA"), local_antes);
+        {
+            // com a trava: sem ela, outro teste pode entrar num Sandbox logo depois do `drop`
+            // e este ler o `HOME` dele
+            let _g = lock();
+            assert_eq!(std::env::var_os("HOME"), home_antes);
+            assert_eq!(std::env::var_os("LOCALAPPDATA"), local_antes);
+        }
         assert!(!dir.exists(), "a pasta temporária some");
         assert!(!sandboxed());
         assert!(lock_dir().is_none());

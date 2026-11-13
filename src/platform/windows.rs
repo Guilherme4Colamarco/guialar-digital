@@ -4,6 +4,7 @@ use anyhow::{bail, Context, Result};
 use std::net::Ipv4Addr;
 
 use super::runner::{Cmd, CommandRunner, RealRunner};
+use super::transaction::{self, DnsBackend, PointError};
 use crate::config::{current_mode, BackendKind, ConnectionBackup, DnsStateManifest};
 use crate::sysutil::{encode_powershell, is_safe_ps_alias};
 
@@ -103,33 +104,15 @@ pub fn switch_mode(manifest: DnsStateManifest) -> Result<()> {
     Ok(())
 }
 
-/// A troca de modo, com as políticas dos navegadores injetáveis para teste. O registro (com o
-/// modo novo) é gravado ANTES de qualquer mudança: se nem isso der (registro aberto por outro
-/// programa), nada foi alterado. Se o DNS ou as políticas falham no meio, volta tudo ao modo
-/// anterior (DNS, políticas e registro).
+/// A troca de modo, com as políticas dos navegadores injetáveis para teste (a ordem segura
+/// está em `transaction::switch`).
 fn switch_mode_with(
     r: &dyn CommandRunner,
-    mut manifest: DnsStateManifest,
+    manifest: DnsStateManifest,
     mode: crate::config::FilterMode,
-    mut politicas: impl FnMut(crate::config::FilterMode) -> Result<()>,
+    politicas: impl FnMut(crate::config::FilterMode) -> Result<()>,
 ) -> Result<()> {
-    let anterior = manifest.mode;
-    manifest.mode = mode;
-    manifest.save_atomic().context("Nada foi alterado no DNS")?;
-    let feito = set_servers_on_connections(r, &manifest, mode).and_then(|()| politicas(mode));
-    if let Err(e) = feito {
-        manifest.mode = anterior;
-        let desfeito = set_servers_on_connections(r, &manifest, anterior)
-            .and_then(|()| politicas(anterior))
-            .and_then(|()| manifest.save_atomic());
-        return Err(match desfeito {
-            Ok(()) => e.context("Falha ao trocar o filtro; voltei ao modo anterior"),
-            Err(re) => e.context(format!(
-                "Falha ao trocar o filtro e não consegui voltar ao modo anterior ({re:#}); use «Desativar» para restaurar"
-            )),
-        });
-    }
-    Ok(())
+    transaction::switch(&PsBackend(r), manifest, mode, politicas)
 }
 
 /// Troca o DNS de cada conexão do manifesto pelo do `mode` (alias por nome).
@@ -137,7 +120,7 @@ fn set_servers_on_connections(
     r: &dyn CommandRunner,
     manifest: &DnsStateManifest,
     mode: crate::config::FilterMode,
-) -> Result<()> {
+) -> Result<(), PointError> {
     let servers = format!(
         "'{}','{}','{}','{}'",
         mode.ipv4()[0],
@@ -145,17 +128,24 @@ fn set_servers_on_connections(
         mode.ipv6()[0],
         mode.ipv6()[1]
     );
+    let mut tocadas: Vec<String> = Vec::new();
     for conn in &manifest.connections {
         if !is_safe_ps_alias(&conn.id) {
-            bail!("alias inválido no manifesto: {:?}", conn.id);
+            return Err(PointError::partial(
+                anyhow::anyhow!("alias inválido no manifesto: {:?}", conn.id),
+                tocadas,
+            ));
         }
-        run_powershell(
+        tocadas.push(conn.id.clone());
+        if let Err(e) = run_powershell(
             r,
             &format!(
                 "Set-DnsClientServerAddress -InterfaceAlias '{}' -ServerAddresses @({servers})",
                 conn.id
             ),
-        )?;
+        ) {
+            return Err(PointError::partial(e, tocadas));
+        }
     }
     Ok(())
 }
@@ -182,67 +172,62 @@ fn apply_core() -> Result<()> {
 
 fn apply_core_with(r: &dyn CommandRunner) -> Result<()> {
     let _lock = crate::sysutil::OpLock::acquire()?;
-    // se o estado não puder ser guardado com segurança, nada do DNS é alterado (ADR-031)
-    DnsStateManifest::preflight()?;
-    let interfaces = list_active_interfaces(r)?;
-    if interfaces.is_empty() {
-        bail!("Nenhuma interface de rede ativa encontrada no Windows");
+    transaction::apply(&PsBackend(r), current_mode())
+}
+
+/// O PowerShell como backend de DNS (a costura de `transaction`).
+struct PsBackend<'a>(&'a dyn CommandRunner);
+
+impl DnsBackend for PsBackend<'_> {
+    fn kind(&self) -> BackendKind {
+        BackendKind::WindowsPowerShell
     }
-    let servers = format!(
-        "'{}','{}','{}','{}'",
-        current_mode().ipv4()[0],
-        current_mode().ipv4()[1],
-        current_mode().ipv6()[0],
-        current_mode().ipv6()[1]
-    );
-    // Primeiro INSPECIONA todas as interfaces; só depois altera alguma. Assim um erro de leitura
-    // não deixa o DNS de umas trocado e as outras não, sem manifesto para desfazer.
-    let mut manifest = DnsStateManifest::new(BackendKind::WindowsPowerShell);
-    let mut alvos: Vec<u32> = Vec::new();
-    for (alias, index) in &interfaces {
-        if !is_safe_ps_alias(alias) {
-            bail!("Alias de interface inválido retornado pelo Windows: {alias:?}");
+
+    /// Lê o estado de TODAS as interfaces antes de alterar qualquer uma: um erro de leitura não
+    /// deixa o DNS de umas trocado e o das outras não.
+    fn inspect(&self, m: &mut DnsStateManifest) -> Result<()> {
+        let r = self.0;
+        let interfaces = list_active_interfaces(r)?;
+        if interfaces.is_empty() {
+            bail!("Nenhuma interface de rede ativa encontrada no Windows");
         }
-        match inspect_interface_state(r, *index, alias)? {
-            Some(backup) => {
-                manifest.connections.push(backup);
-                alvos.push(*index);
+        for (alias, index) in &interfaces {
+            if !is_safe_ps_alias(alias) {
+                bail!("Alias de interface inválido retornado pelo Windows: {alias:?}");
             }
-            // sem GUID não há como guardar o estado: não mexe nessa interface
-            None => eprintln!(
-                "⚠️ A interface {alias:?} foi ignorada: o Windows não informou um GUID válido, então o DNS dela não pode ser guardado nem restaurado."
-            ),
+            match inspect_interface_state(r, *index, alias)? {
+                Some(backup) => m.connections.push(backup),
+                // sem GUID não há como guardar o estado: não mexe nessa interface
+                None => eprintln!(
+                    "⚠️ A interface {alias:?} foi ignorada: o Windows não informou um GUID válido, então o DNS dela não pode ser guardado nem restaurado."
+                ),
+            }
         }
-    }
-    if alvos.is_empty() {
-        bail!("Nenhuma interface de rede ativa pôde ser inspecionada no Windows");
-    }
-    // O manifesto descreve o estado de ANTES: grava-o antes de trocar qualquer DNS, para que uma
-    // falha no meio do laço (adaptador que some, Wi-Fi que cai) nunca deixe DNS trocado sem
-    // registro para desfazer. Se nem isso der (registro aberto por outro programa), para aqui.
-    manifest.save_atomic().context("Nada foi alterado no DNS")?;
-    for index in alvos {
-        if let Err(e) = run_powershell(
-            r,
-            &format!(
-                "Set-DnsClientServerAddress -InterfaceIndex {index} -ServerAddresses @({servers})"
-            ),
-        ) {
-            // desfaz o que já foi trocado (restaurar uma interface intacta é inócuo); se o
-            // desfazer funcionou, o registro não tem mais o que guardar
-            return match restore_connections(r, &manifest) {
-                Ok(()) => {
-                    let _ = DnsStateManifest::remove_manifest();
-                    Err(e.context("Falha ao trocar o DNS; o que já tinha sido trocado foi desfeito"))
-                }
-                Err(re) => Err(e.context(format!(
-                    "Falha ao trocar o DNS e não consegui desfazer ({re:#}); use «Desativar» para restaurar"
-                ))),
-            };
+        if m.connections.is_empty() {
+            bail!("Nenhuma interface de rede ativa pôde ser inspecionada no Windows");
         }
+        Ok(())
     }
-    flush_dns(r);
-    Ok(())
+
+    fn point_to(
+        &self,
+        m: &DnsStateManifest,
+        mode: crate::config::FilterMode,
+    ) -> Result<(), PointError> {
+        set_servers_on_connections(self.0, m, mode)
+    }
+
+    fn restore(&self, m: &DnsStateManifest) -> Result<()> {
+        restore_connections(self.0, m)
+    }
+
+    fn reset(&self) -> Result<()> {
+        reset_all_interfaces(self.0)
+    }
+
+    fn after_change(&self) {
+        flush_dns(self.0);
+    }
 }
 
 pub fn revert_dns(manifest: &DnsStateManifest) -> Result<()> {
@@ -253,28 +238,14 @@ pub fn revert_dns(manifest: &DnsStateManifest) -> Result<()> {
     revert_dns_with(&RealRunner, manifest, crate::policy::revert_all)
 }
 
-/// O desfazer completo, com as extensões injetáveis para teste. Ordem: DNS, extensões, cache e
-/// só no fim apaga o registro. Se o registro não puder ser apagado (outra conta o mantém
-/// aberto sem `FILE_SHARE_DELETE`), o DNS e as extensões já foram revertidos: só avisa.
+/// O desfazer completo, com as extensões injetáveis para teste. Ordem (em
+/// `transaction::revert`): DNS, extensões, cache e só no fim apaga o registro.
 fn revert_dns_with(
     r: &dyn CommandRunner,
     manifest: &DnsStateManifest,
     revert_extensions: impl FnOnce() -> Result<()>,
 ) -> Result<()> {
-    restore_connections(r, manifest)?;
-    revert_extensions()?;
-    flush_dns(r);
-    remove_manifest_or_warn();
-    Ok(())
-}
-
-/// Apaga o registro; se não der, avisa com clareza em vez de falhar um desfazer já concluído.
-fn remove_manifest_or_warn() {
-    if let Err(e) = DnsStateManifest::remove_manifest() {
-        eprintln!(
-            "⚠️ O DNS e as extensões foram restaurados, mas o registro da proteção não pôde ser apagado ({e:#}). Provavelmente outro programa o mantém aberto: feche-o e rode o desfazer de novo."
-        );
-    }
+    transaction::revert(&PsBackend(r), manifest, revert_extensions)
 }
 
 /// Devolve cada interface ao DNS de antes (automático ou os IPs gravados).
@@ -455,32 +426,13 @@ fn configured_dns_with(r: &dyn CommandRunner) -> Vec<std::net::IpAddr> {
     out
 }
 
-/// `true` se alguma interface ativa ainda usa o DNS do filtro do GuiaLar.
-pub fn cloudflare_dns_active() -> bool {
-    powershell_output(
-        &RealRunner,
-        "(Get-DnsClientServerAddress -AddressFamily IPv4).ServerAddresses -join ','",
-    )
-    .map(|o| {
-        o.trim()
-            .split(',')
-            .filter_map(|s| s.trim().parse::<Ipv4Addr>().ok())
-            .any(|ip| crate::config::is_filter_ipv4(&ip))
-    })
-    .unwrap_or(false)
-}
-
 /// Reversão de emergência sem manifesto: DNS automático em todas as interfaces.
 pub fn revert_dns_fallback() -> Result<()> {
     if elevate_if_needed("internal-revert")? {
         return Ok(());
     }
     let _lock = crate::sysutil::OpLock::acquire()?;
-    reset_all_interfaces(&RealRunner)?;
-    crate::policy::revert_all()?;
-    flush_dns(&RealRunner);
-    remove_manifest_or_warn();
-    Ok(())
+    transaction::revert_fallback(&PsBackend(&RealRunner), crate::policy::revert_all)
 }
 
 /// DNS automático em todas as interfaces ativas (por índice).

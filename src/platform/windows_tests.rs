@@ -296,8 +296,9 @@ fn apply_usa_os_scripts_de_producao_na_ordem() {
     let s = Sandbox::new("win-apply");
     let r = two_ifaces();
     apply_core_with(&r).unwrap();
-    let set = |i: u32| {
-        format!("Set-DnsClientServerAddress -InterfaceIndex {i} -ServerAddresses @({FAMILY})")
+    // o DNS é trocado pelo alias (o mesmo caminho da troca de modo)
+    let set = |alias: &str| {
+        format!("Set-DnsClientServerAddress -InterfaceAlias '{alias}' -ServerAddresses @({FAMILY})")
     };
     // primeiro LÊ todas as interfaces (GUID, NameServer v4 e v6); só depois troca o DNS
     let reg = |i: u32, fam: &str| {
@@ -320,8 +321,8 @@ fn apply_usa_os_scripts_de_producao_na_ordem() {
             guid(7),
             reg(7, "Tcpip"),
             reg(7, "Tcpip6"),
-            set(5),
-            set(7),
+            set("Ethernet"),
+            set("Wi-Fi"),
             "ipconfig /flushdns".to_string()
         ]
     );
@@ -358,7 +359,7 @@ fn falha_do_powershell_nao_grava_manifesto() {
     let s = Sandbox::new("win-fail");
     let r = two_ifaces();
     // o primeiro Set falha: nada foi trocado, o registro gravado antes do laço é apagado
-    *r.fail_on.borrow_mut() = Some("-InterfaceIndex 5 -ServerAddresses".into());
+    *r.fail_on.borrow_mut() = Some("-InterfaceAlias 'Ethernet' -ServerAddresses".into());
     let e = apply_core_with(&r).unwrap_err();
     assert!(format!("{e:#}").contains("PowerShell falhou"));
     assert!(!s.manifest_path().exists());
@@ -641,10 +642,11 @@ fn todas_sem_guid_falha_sem_alterar_nada() {
 
 #[test]
 fn falha_no_set_da_segunda_interface_desfaz_a_primeira_e_nao_deixa_manifesto() {
+    // o padrão é o Set para o FILTRO: o desfazer (que devolve IPs de antes) não casa
     let _s = Sandbox::new("win-set-falha");
     let r = two_ifaces();
     let antes = r.all_dns();
-    *r.fail_on.borrow_mut() = Some("-InterfaceIndex 7 -ServerAddresses".into());
+    *r.fail_on.borrow_mut() = Some("-InterfaceAlias 'Wi-Fi' -ServerAddresses @('1.1.1.3'".into());
     let e = apply_core_with(&r).unwrap_err();
     assert!(format!("{e:#}").contains("foi desfeito"), "{e:#}");
     assert_eq!(r.all_dns(), antes, "a Ethernet voltou ao que era");
@@ -655,8 +657,8 @@ fn falha_no_set_da_segunda_interface_desfaz_a_primeira_e_nao_deixa_manifesto() {
 fn falha_no_set_e_no_desfazer_deixa_o_manifesto_para_o_desativar() {
     let _s = Sandbox::new("win-set-falha-2");
     let r = two_ifaces();
-    *r.fail_on.borrow_mut() = Some("-InterfaceIndex 7 -ServerAddresses".into());
-    *r.fail_also.borrow_mut() = Some("-InterfaceAlias".into()); // o desfazer também falha
+    *r.fail_on.borrow_mut() = Some("-InterfaceAlias 'Wi-Fi' -ServerAddresses @('1.1.1.3'".into());
+    *r.fail_also.borrow_mut() = Some("-ResetServerAddresses".into()); // o desfazer também falha
     let e = apply_core_with(&r).unwrap_err();
     assert!(format!("{e:#}").contains("não consegui desfazer"), "{e:#}");
     // a Ethernet já estava com o filtro; o registro do estado de antes existe

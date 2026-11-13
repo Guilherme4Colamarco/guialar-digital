@@ -41,6 +41,7 @@ struct State {
     fail_argv: Vec<Vec<String>>,
     exit_except: Vec<(String, i32, Vec<String>)>,
     exit_argv: Vec<(Vec<String>, i32)>,
+    exit_once: Vec<(Vec<String>, i32)>,
     on_run: Option<Hook>,
     prefix: Vec<&'static str>,
     root: bool,
@@ -166,6 +167,15 @@ impl FakeRunner {
         self.st
             .borrow_mut()
             .exit_argv
+            .push((prefix.iter().map(|p| p.to_string()).collect(), code));
+    }
+
+    /// Como `add_exit_argv`, mas só o **primeiro** comando que casa falha; os seguintes passam
+    /// (um `nmcli` que falha na ida e funciona no desfazer).
+    pub fn add_exit_argv_once(&self, prefix: &[&str], code: i32) {
+        self.st
+            .borrow_mut()
+            .exit_once
             .push((prefix.iter().map(|p| p.to_string()).collect(), code));
     }
 
@@ -370,6 +380,17 @@ impl CommandRunner for FakeRunner {
             .any(|p| real.starts_with(p))
         {
             return Err(io::Error::other("falha simulada pelo FakeRunner"));
+        }
+        let once = {
+            let mut st = self.st.borrow_mut();
+            let pos = st.exit_once.iter().position(|(p, _)| real.starts_with(p));
+            pos.map(|i| st.exit_once.remove(i).1)
+        };
+        if let Some(code) = once {
+            return Ok(Outcome {
+                code: Some(code),
+                ..Outcome::default()
+            });
         }
         let exit_argv = self
             .st

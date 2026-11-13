@@ -1,6 +1,7 @@
 //! Despacho de plataforma em tempo de compilação.
 
 pub mod runner;
+pub(crate) mod transaction;
 
 #[cfg(target_os = "linux")]
 pub mod linux;
@@ -40,53 +41,64 @@ pub fn plan_apply(
     }
 }
 
-/// Primeiro passo de todo `apply`: olha o manifesto e decide.
-enum ApplyStep {
+/// Primeiro passo de todo `apply`: olha o manifesto e decide. É a ÚNICA decisão: a linha de
+/// comando, a janela e o processo elevado a consultam (`next_apply_step`) e só diferem no que
+/// mostram.
+pub enum ApplyStep {
     /// Já protegido com o DNS do modo: nada a fazer.
     AlreadyActive,
     /// Há manifesto: reaplica o DNS do modo, mantendo o DNS original gravado.
     Switch(DnsStateManifest),
     /// Sem manifesto: aplica do zero.
     Fresh,
+    /// Sobrou um registro de uma proteção que já não está ligada (por exemplo, o desfazer
+    /// terminou mas não conseguiu apagar o registro): nenhum DNS em uso é do filtro. Aplica do
+    /// zero, que reinspeciona a rede e grava um registro novo, em vez de trocar de modo sobre
+    /// um estado velho (adaptador novo ficaria sem filtro, DNS trocado depois se perderia) e
+    /// religar a proteção sem o usuário pedir.
+    Stale,
 }
 
-fn next_apply_step(configured: impl FnOnce() -> Vec<std::net::IpAddr>) -> Result<ApplyStep> {
+pub fn next_apply_step(configured: impl FnOnce() -> Vec<std::net::IpAddr>) -> Result<ApplyStep> {
     let Some(m) = DnsStateManifest::load()? else {
         return Ok(ApplyStep::Fresh);
     };
     let configured = configured();
-    // Registro velho de uma proteção que já não está ligada (por exemplo, o desfazer terminou
-    // mas não conseguiu apagar o registro): nenhum DNS em uso é do filtro. Trocar de modo
-    // sobre ele não reinspeciona a rede (adaptador novo ficaria sem filtro, DNS trocado depois
-    // se perderia) e religaria a proteção sem o usuário pedir. Aplica do zero, que reinspeciona
-    // e grava um registro novo. Sem nenhum DNS legível (ou só o stub local) não dá para saber:
-    // mantém o registro.
+    // Sem nenhum DNS legível (ou só o stub local) não dá para saber: mantém o registro.
     let reais: Vec<_> = configured
         .iter()
         .filter(|ip| !crate::config::is_local_stub(ip))
         .collect();
     if !reais.is_empty() && !reais.iter().any(|ip| crate::config::is_filter_ip(ip)) {
-        eprintln!(
-            "ℹ️  O registro anterior não corresponde ao DNS em uso (a proteção estava desligada): aplicando do zero."
-        );
-        return Ok(ApplyStep::Fresh);
+        return Ok(ApplyStep::Stale);
     }
     if plan_apply(Some(&m), crate::config::current_mode(), &configured) == ApplyPlan::AlreadyActive
     {
-        println!("ℹ️  A proteção já está ativa. Use 'guialar revert' antes de aplicar de novo.");
         return Ok(ApplyStep::AlreadyActive);
     }
     Ok(ApplyStep::Switch(m))
+}
+
+/// O que um `apply` faria agora (lê o manifesto e o DNS; não altera nada).
+pub fn plan_now() -> Result<ApplyStep> {
+    next_apply_step(configured_dns)
+}
+
+fn notice_already_active() {
+    println!("ℹ️  A proteção já está ativa. Use 'guialar revert' antes de aplicar de novo.");
 }
 
 pub fn apply_dns() -> Result<()> {
     let _guard = crate::sysutil::guard_operation()?;
     // Idempotente: um segundo `apply` regravaria o manifesto com o DNS já da Cloudflare
     // como "original" e o `revert` nunca restauraria o DNS verdadeiro.
-    match next_apply_step(configured_dns)? {
-        ApplyStep::AlreadyActive => return Ok(()),
+    match plan_now()? {
+        ApplyStep::AlreadyActive => {
+            notice_already_active();
+            return Ok(());
+        }
         ApplyStep::Switch(m) => return switch_mode(m), // mantém o DNS original do manifesto
-        ApplyStep::Fresh => {}
+        ApplyStep::Fresh | ApplyStep::Stale => {}
     }
     #[cfg(target_os = "linux")]
     {
@@ -193,10 +205,13 @@ pub fn elevate_if_needed(subcomando: &str) -> Result<bool> {
 /// Linux: só o DNS (o bloqueador é um passo separado, "Proteger navegadores").
 pub fn apply_all() -> Result<()> {
     let _guard = crate::sysutil::guard_operation()?;
-    match next_apply_step(configured_dns)? {
-        ApplyStep::AlreadyActive => return Ok(()),
+    match plan_now()? {
+        ApplyStep::AlreadyActive => {
+            notice_already_active();
+            return Ok(());
+        }
         ApplyStep::Switch(m) => return switch_mode(m),
-        ApplyStep::Fresh => {}
+        ApplyStep::Fresh | ApplyStep::Stale => {}
     }
     #[cfg(target_os = "windows")]
     {
@@ -208,19 +223,64 @@ pub fn apply_all() -> Result<()> {
     }
 }
 
-/// O DNS em uso ainda é o filtro do GuiaLar? (para recuperar sem manifesto)
-pub fn cloudflare_dns_active() -> bool {
-    #[cfg(target_os = "linux")]
-    {
-        linux::cloudflare_dns_active()
-    }
-    #[cfg(target_os = "windows")]
-    {
-        windows::cloudflare_dns_active()
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
-    {
-        false
+/// Algum DNS em uso é o filtro do GuiaLar? (para recuperar sem manifesto). Usa a mesma leitura
+/// do estado e do `plan_apply` (`configured_dns`), para as respostas não divergirem.
+pub fn filter_dns_in_use() -> bool {
+    configured_dns().iter().any(crate::config::is_filter_ip)
+}
+
+/// Desliga a proteção. Cobre manifesto normal, ausente, da beta e corrompido (nunca deixa o
+/// DNS preso no filtro). Devolve a mensagem final; quem chama só a exibe.
+pub fn revert_protection() -> Result<String> {
+    match DnsStateManifest::load() {
+        Ok(Some(manifest)) => {
+            println!("🔄 Restaurando configurações originais de DNS...");
+            revert_dns(&manifest)?;
+            Ok("Configurações de DNS restauradas com sucesso para o estado anterior.".into())
+        }
+        Ok(None) => {
+            // Beta: o manifesto ficava na área do usuário. O processo elevado o valida e o
+            // migra uma vez; nunca mais é gravado ali (ADR-031).
+            if crate::sysutil::is_privileged() {
+                if let Some(msg) = migrate_legacy()? {
+                    return Ok(msg);
+                }
+            }
+            if filter_dns_in_use() {
+                println!("🔄 O DNS ainda usa o filtro, mas não há registro: voltando ao padrão da rede...");
+                revert_dns_fallback()?;
+                return Ok("DNS restaurado para o padrão da rede.".into());
+            }
+            #[cfg(windows)]
+            {
+                // Sem DNS para reverter, mas ainda pode haver políticas do uBlock.
+                if elevate_if_needed("internal-revert")? {
+                    return Ok(
+                        "Nenhum manifesto de proteção ativo encontrado para reverter.".into(),
+                    );
+                }
+                crate::policy::revert_all()?;
+            }
+            Ok("Nenhum manifesto de proteção ativo encontrado para reverter.".into())
+        }
+        // Falha de E/S ao LER (arquivo aberto por outro programa): o registro pode estar
+        // perfeito. Não o apaga nem cai no fallback; avisa e para sem alterar nada.
+        Err(e) if crate::statedir::is_state_io_error(&e) => {
+            eprintln!(
+                "⚠️  {e:#}. Nada foi alterado; feche o programa que mantém o registro aberto e rode o desfazer de novo."
+            );
+            Err(e)
+        }
+        Err(_) => {
+            println!(
+                "⚠️  O registro da proteção está danificado: voltando o DNS ao padrão da rede..."
+            );
+            if let Ok(path) = DnsStateManifest::file_path() {
+                let _ = std::fs::remove_file(path);
+            }
+            revert_dns_fallback()?;
+            Ok("O registro estava danificado. DNS restaurado para o padrão da rede.".into())
+        }
     }
 }
 
@@ -400,15 +460,15 @@ mod apply_step_tests {
     #[test]
     fn registro_velho_com_dns_da_rede_aplica_do_zero() {
         let _s = com_registro("passo-registro-velho");
-        assert!(matches!(passo(&["192.168.0.1"]), ApplyStep::Fresh));
+        assert!(matches!(passo(&["192.168.0.1"]), ApplyStep::Stale));
         assert!(matches!(
             passo(&["192.168.0.1", "2001:db8::1"]),
-            ApplyStep::Fresh
+            ApplyStep::Stale
         ));
         // o stub local do sistema não conta como DNS «de fora» nem como o nosso
         assert!(matches!(
             passo(&["127.0.0.53", "8.8.8.8"]),
-            ApplyStep::Fresh
+            ApplyStep::Stale
         ));
     }
 

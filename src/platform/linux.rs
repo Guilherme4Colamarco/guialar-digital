@@ -10,6 +10,7 @@ use anyhow::{bail, Context, Result};
 use std::net::{Ipv4Addr, Ipv6Addr};
 
 use super::runner::{Cmd, CommandRunner, In, Out, RealRunner};
+use super::transaction::{self, DnsBackend, PointError};
 use crate::config::{current_mode, BackendKind, ConnectionBackup, DnsStateManifest};
 
 /// Detecta qual subsistema de DNS está ativo no ambiente Linux.
@@ -348,42 +349,6 @@ pub(super) fn configured_dns_with(r: &dyn CommandRunner) -> Vec<std::net::IpAddr
     all
 }
 
-/// `true` se o DNS em uso ainda é o filtro do GuiaLar (resolv.conf ou perfil do NM).
-pub fn cloudflare_dns_active() -> bool {
-    cloudflare_dns_active_with(&RealRunner)
-}
-
-fn cloudflare_dns_active_with(r: &dyn CommandRunner) -> bool {
-    let cf = |t: &str| {
-        t.lines()
-            .filter(|l| l.trim_start().starts_with("nameserver"))
-            .any(|l| {
-                l.split_whitespace()
-                    .nth(1)
-                    .and_then(|v| v.parse::<Ipv4Addr>().ok())
-                    .is_some_and(|ip| crate::config::is_filter_ipv4(&ip))
-            })
-    };
-    if r.read_file("/etc/resolv.conf")
-        .map(|t| cf(&t))
-        .unwrap_or(false)
-    {
-        return true;
-    }
-    if r.command_exists("nmcli") {
-        if let Ok(uuids) = get_active_nm_connections(r) {
-            for uuid in uuids {
-                if let Ok(b) = inspect_nm_connection_raw(r, &uuid) {
-                    if b.0.iter().any(crate::config::is_filter_ipv4) {
-                        return true;
-                    }
-                }
-            }
-        }
-    }
-    false
-}
-
 /// UUIDs de todas as conexões do NetworkManager agora (para validar o manifesto antigo).
 fn known_connection_ids_with(r: &dyn CommandRunner) -> Vec<String> {
     if !r.command_exists("nmcli") {
@@ -428,39 +393,8 @@ fn revert_dns_fallback_with(r: &dyn CommandRunner) -> Result<()> {
         return elevate_self(r, "internal-revert");
     }
     let _lock = crate::sysutil::OpLock::acquire()?;
-    match detect_active_backend_with(r) {
-        BackendKind::NetworkManager => {
-            for uuid in get_active_nm_connections(r)? {
-                for fam in ["ipv4", "ipv6"] {
-                    let dns = format!("{fam}.dns");
-                    let ign = format!("{fam}.ignore-auto-dns");
-                    run_privileged_command(
-                        r,
-                        "nmcli",
-                        &["connection", "modify", &uuid, &dns, "", &ign, "no"],
-                    )?;
-                }
-                run_privileged_command(r, "nmcli", &["connection", "up", "uuid", &uuid])?;
-            }
-        }
-        BackendKind::SystemdResolved => revert_systemd_resolved(r)?,
-        BackendKind::OpenResolvRunit => revert_openresolv_runit(r)?,
-        BackendKind::DirectResolvConf | BackendKind::WindowsPowerShell => {
-            // Sem backup do DNS anterior: só tira as linhas do filtro do GuiaLar.
-            let atual = r.read_file("/etc/resolv.conf").unwrap_or_default();
-            let limpo: Vec<&str> = atual
-                .lines()
-                .filter(|l| !l.contains("Gerado pelo GuiaLar"))
-                .filter(|l| {
-                    !(l.trim_start().starts_with("nameserver")
-                        && crate::config::line_has_filter_ip(l))
-                })
-                .collect();
-            write_resolv_conf(r, &(limpo.join("\n") + "\n"))?;
-        }
-    }
-    DnsStateManifest::remove_manifest()?;
-    Ok(())
+    let backend = backend_for(&detect_active_backend_with(r), r)?;
+    transaction::revert_fallback(&*backend, || Ok(()))
 }
 
 /// Troca o filtro com a proteção ligada, mantendo o DNS original do manifesto.
@@ -468,10 +402,7 @@ pub fn switch_mode(manifest: DnsStateManifest) -> Result<()> {
     switch_mode_with(&RealRunner, manifest)
 }
 
-pub(super) fn switch_mode_with(
-    r: &dyn CommandRunner,
-    mut manifest: DnsStateManifest,
-) -> Result<()> {
+pub(super) fn switch_mode_with(r: &dyn CommandRunner, manifest: DnsStateManifest) -> Result<()> {
     if !r.is_root() {
         return elevate_self(
             r,
@@ -479,54 +410,8 @@ pub(super) fn switch_mode_with(
         );
     }
     let _lock = crate::sysutil::OpLock::acquire()?;
-    DnsStateManifest::preflight()?;
-    match manifest.backend {
-        BackendKind::NetworkManager => {
-            let mode = current_mode();
-            let v4 = format!("{} {}", mode.ipv4()[0], mode.ipv4()[1]);
-            let v6 = format!("{} {}", mode.ipv6()[0], mode.ipv6()[1]);
-            for conn in &manifest.connections {
-                let u = &conn.id;
-                run_privileged_command(
-                    r,
-                    "nmcli",
-                    &[
-                        "connection",
-                        "modify",
-                        u,
-                        "ipv4.dns",
-                        &v4,
-                        "ipv4.ignore-auto-dns",
-                        "yes",
-                    ],
-                )?;
-                let _ = run_privileged_command(
-                    r,
-                    "nmcli",
-                    &[
-                        "connection",
-                        "modify",
-                        u,
-                        "ipv6.dns",
-                        &v6,
-                        "ipv6.ignore-auto-dns",
-                        "yes",
-                    ],
-                );
-                run_privileged_command(r, "nmcli", &["connection", "up", "uuid", u])?;
-            }
-        }
-        BackendKind::SystemdResolved => apply_systemd_resolved(r, &mut manifest.clone())?,
-        BackendKind::OpenResolvRunit => apply_openresolv_runit(r, &mut manifest.clone())?,
-        BackendKind::DirectResolvConf => {
-            // `apply_direct_resolv_conf` regravaria o backup: usa uma cópia descartável.
-            apply_direct_resolv_conf(r, &mut manifest.clone())?;
-        }
-        BackendKind::WindowsPowerShell => bail!("Backend Windows chamado em ambiente Linux"),
-    }
-    manifest.mode = current_mode();
-    manifest.save_atomic()?;
-    Ok(())
+    let backend = backend_for(&manifest.backend, r)?;
+    transaction::switch(&*backend, manifest, current_mode(), |_| Ok(()))
 }
 
 /// Aplica a proteção conforme o backend detectado e o modo escolhido.
@@ -542,31 +427,8 @@ pub(super) fn apply_dns_with(r: &dyn CommandRunner) -> Result<()> {
         );
     }
     let _lock = crate::sysutil::OpLock::acquire()?;
-    // se o estado não puder ser guardado com segurança, nada do DNS é alterado (ADR-031)
-    DnsStateManifest::preflight()?;
-    let backend = detect_active_backend_with(r);
-    let mut manifest = DnsStateManifest::new(backend.clone());
-
-    match backend {
-        BackendKind::NetworkManager => {
-            apply_network_manager(r, &mut manifest)?;
-        }
-        BackendKind::SystemdResolved => {
-            apply_systemd_resolved(r, &mut manifest)?;
-        }
-        BackendKind::OpenResolvRunit => {
-            apply_openresolv_runit(r, &mut manifest)?;
-        }
-        BackendKind::DirectResolvConf => {
-            apply_direct_resolv_conf(r, &mut manifest)?;
-        }
-        BackendKind::WindowsPowerShell => {
-            bail!("Backend Windows chamado em ambiente Linux");
-        }
-    }
-
-    manifest.save_atomic()?;
-    Ok(())
+    let backend = backend_for(&detect_active_backend_with(r), r)?;
+    transaction::apply(&*backend, current_mode())
 }
 
 /// Reverte as configurações para o estado original utilizando o manifesto.
@@ -579,45 +441,163 @@ pub(super) fn revert_dns_with(r: &dyn CommandRunner, manifest: &DnsStateManifest
         return elevate_self(r, "internal-revert");
     }
     let _lock = crate::sysutil::OpLock::acquire()?;
-    match manifest.backend {
-        BackendKind::NetworkManager => {
-            revert_network_manager(r, manifest)?;
-        }
-        BackendKind::SystemdResolved => {
-            revert_systemd_resolved(r)?;
-        }
-        BackendKind::OpenResolvRunit => {
-            revert_openresolv_runit(r)?;
-        }
-        BackendKind::DirectResolvConf => {
-            revert_direct_resolv_conf(r, manifest)?;
-        }
-        BackendKind::WindowsPowerShell => {
-            bail!("Backend Windows chamado em ambiente Linux");
-        }
-    }
+    let backend = backend_for(&manifest.backend, r)?;
+    transaction::revert(&*backend, manifest, || Ok(()))
+}
 
-    DnsStateManifest::remove_manifest()?;
-    Ok(())
+/// O adaptador do subsistema de DNS `kind` (a costura de `transaction`).
+fn backend_for<'a>(
+    kind: &BackendKind,
+    r: &'a dyn CommandRunner,
+) -> Result<Box<dyn DnsBackend + 'a>> {
+    Ok(match kind {
+        BackendKind::NetworkManager => Box::new(NmBackend(r)),
+        BackendKind::SystemdResolved => Box::new(ResolvedBackend(r)),
+        BackendKind::OpenResolvRunit => Box::new(ResolvconfBackend(r)),
+        BackendKind::DirectResolvConf => Box::new(DirectBackend(r)),
+        BackendKind::WindowsPowerShell => bail!("Backend Windows chamado em ambiente Linux"),
+    })
 }
 
 // ============================================================================
 // 1. NetworkManager Implementation (via nmcli)
 // ============================================================================
 
-fn apply_network_manager(r: &dyn CommandRunner, manifest: &mut DnsStateManifest) -> Result<()> {
-    let active_uuids = get_active_nm_connections(r)?;
-    if active_uuids.is_empty() {
-        bail!("Nenhuma conexão ativa do NetworkManager (ethernet/wifi) encontrada");
+struct NmBackend<'a>(&'a dyn CommandRunner);
+
+impl DnsBackend for NmBackend<'_> {
+    fn kind(&self) -> BackendKind {
+        BackendKind::NetworkManager
     }
 
-    let ipv4_str = format!("{} {}", current_mode().ipv4()[0], current_mode().ipv4()[1]);
-    let ipv6_str = format!("{} {}", current_mode().ipv6()[0], current_mode().ipv6()[1]);
+    /// Lê o estado de TODAS as conexões ativas antes de alterar qualquer uma.
+    fn inspect(&self, m: &mut DnsStateManifest) -> Result<()> {
+        let uuids = get_active_nm_connections(self.0)?;
+        if uuids.is_empty() {
+            bail!("Nenhuma conexão ativa do NetworkManager (ethernet/wifi) encontrada");
+        }
+        for uuid in &uuids {
+            m.connections.push(inspect_nm_connection(self.0, uuid)?);
+        }
+        Ok(())
+    }
 
-    for uuid in &active_uuids {
-        let backup = inspect_nm_connection(r, uuid)?;
-        manifest.connections.push(backup);
+    fn point_to(
+        &self,
+        m: &DnsStateManifest,
+        mode: crate::config::FilterMode,
+    ) -> Result<(), PointError> {
+        let r = self.0;
+        let v4 = format!("{} {}", mode.ipv4()[0], mode.ipv4()[1]);
+        let v6 = format!("{} {}", mode.ipv6()[0], mode.ipv6()[1]);
+        let mut tocadas: Vec<String> = Vec::new();
+        for conn in &m.connections {
+            let u = &conn.id;
+            // a conexão entra na lista antes do primeiro `modify`: se falhar pela metade, o
+            // desfazer a inclui
+            tocadas.push(u.clone());
+            let r1 = run_privileged_command(
+                r,
+                "nmcli",
+                &[
+                    "connection",
+                    "modify",
+                    u,
+                    "ipv4.dns",
+                    &v4,
+                    "ipv4.ignore-auto-dns",
+                    "yes",
+                ],
+            );
+            if let Err(e) = r1 {
+                return Err(PointError::partial(e, tocadas));
+            }
+            // IPv6 é melhor esforço: uma rede sem IPv6 não impede o filtro IPv4
+            let _ = run_privileged_command(
+                r,
+                "nmcli",
+                &[
+                    "connection",
+                    "modify",
+                    u,
+                    "ipv6.dns",
+                    &v6,
+                    "ipv6.ignore-auto-dns",
+                    "yes",
+                ],
+            );
+            if let Err(e) = run_privileged_command(r, "nmcli", &["connection", "up", "uuid", u]) {
+                return Err(PointError::partial(e, tocadas));
+            }
+        }
+        Ok(())
+    }
 
+    fn restore(&self, m: &DnsStateManifest) -> Result<()> {
+        revert_network_manager(self.0, m)
+    }
+
+    /// Tenta TODAS as conexões ativas e junta as falhas: um erro numa não deixa as outras no
+    /// filtro.
+    fn reset(&self) -> Result<()> {
+        let r = self.0;
+        let mut falhas: Vec<String> = Vec::new();
+        for uuid in get_active_nm_connections(r)? {
+            let feito = (|| -> Result<()> {
+                for fam in ["ipv4", "ipv6"] {
+                    let dns = format!("{fam}.dns");
+                    let ign = format!("{fam}.ignore-auto-dns");
+                    run_privileged_command(
+                        r,
+                        "nmcli",
+                        &["connection", "modify", &uuid, &dns, "", &ign, "no"],
+                    )?;
+                }
+                run_privileged_command(r, "nmcli", &["connection", "up", "uuid", &uuid])
+            })();
+            if let Err(e) = feito {
+                falhas.push(format!("{uuid}: {e:#}"));
+            }
+        }
+        if !falhas.is_empty() {
+            bail!(
+                "Falha ao devolver o DNS automático em {} conexão(ões): {}",
+                falhas.len(),
+                falhas.join(" | ")
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Devolve cada conexão ao que o manifesto guardou. Tenta TODAS e junta as falhas: um erro
+/// numa conexão não deixa as outras presas no filtro.
+fn revert_network_manager(r: &dyn CommandRunner, manifest: &DnsStateManifest) -> Result<()> {
+    let falhas: Vec<String> = manifest
+        .connections
+        .iter()
+        .filter_map(|conn| {
+            restore_nm_connection(r, conn)
+                .err()
+                .map(|e| format!("{}: {e:#}", conn.id))
+        })
+        .collect();
+    if !falhas.is_empty() {
+        bail!(
+            "Falha ao reverter o DNS em {} conexão(ões): {}",
+            falhas.len(),
+            falhas.join(" | ")
+        );
+    }
+    Ok(())
+}
+
+fn restore_nm_connection(r: &dyn CommandRunner, conn: &ConnectionBackup) -> Result<()> {
+    let uuid = &conn.id;
+    // `was_dhcp_*` = a conexão aceitava o DNS da rede (`ignore-auto-dns=no`). Ela pode ter
+    // IPs fixos somados ao do DHCP: restaura os fixos (lista vazia => `""`, como sempre).
+    if conn.was_dhcp_ipv4 {
+        let prev = join_ips(&conn.original_ipv4_dns);
         run_privileged_command(
             r,
             "nmcli",
@@ -626,11 +606,42 @@ fn apply_network_manager(r: &dyn CommandRunner, manifest: &mut DnsStateManifest)
                 "modify",
                 uuid,
                 "ipv4.dns",
-                &ipv4_str,
+                &prev,
+                "ipv4.ignore-auto-dns",
+                "no",
+            ],
+        )?;
+    } else if conn.original_ipv4_dns.is_empty() {
+        // `ignore-auto-dns=yes` sem IP fixo era do usuário: tira o filtro e mantém o `yes`
+        run_privileged_command(
+            r,
+            "nmcli",
+            &[
+                "connection",
+                "modify",
+                uuid,
+                "ipv4.dns",
+                "",
                 "ipv4.ignore-auto-dns",
                 "yes",
             ],
         )?;
+    } else {
+        run_privileged_command(
+            r,
+            "nmcli",
+            &[
+                "connection",
+                "modify",
+                uuid,
+                "ipv4.dns",
+                &join_ips(&conn.original_ipv4_dns),
+            ],
+        )?;
+    }
+
+    if conn.was_dhcp_ipv6 {
+        let prev = join_ips(&conn.original_ipv6_dns);
         let _ = run_privileged_command(
             r,
             "nmcli",
@@ -639,111 +650,40 @@ fn apply_network_manager(r: &dyn CommandRunner, manifest: &mut DnsStateManifest)
                 "modify",
                 uuid,
                 "ipv6.dns",
-                &ipv6_str,
+                &prev,
+                "ipv6.ignore-auto-dns",
+                "no",
+            ],
+        );
+    } else if conn.original_ipv6_dns.is_empty() {
+        let _ = run_privileged_command(
+            r,
+            "nmcli",
+            &[
+                "connection",
+                "modify",
+                uuid,
+                "ipv6.dns",
+                "",
                 "ipv6.ignore-auto-dns",
                 "yes",
             ],
         );
-        run_privileged_command(r, "nmcli", &["connection", "up", "uuid", uuid])?;
+    } else {
+        let _ = run_privileged_command(
+            r,
+            "nmcli",
+            &[
+                "connection",
+                "modify",
+                uuid,
+                "ipv6.dns",
+                &join_ips(&conn.original_ipv6_dns),
+            ],
+        );
     }
 
-    Ok(())
-}
-
-fn revert_network_manager(r: &dyn CommandRunner, manifest: &DnsStateManifest) -> Result<()> {
-    for conn in &manifest.connections {
-        let uuid = &conn.id;
-        // `was_dhcp_*` = a conexão aceitava o DNS da rede (`ignore-auto-dns=no`). Ela pode ter
-        // IPs fixos somados ao do DHCP: restaura os fixos (lista vazia => `""`, como sempre).
-        if conn.was_dhcp_ipv4 {
-            let prev = join_ips(&conn.original_ipv4_dns);
-            run_privileged_command(
-                r,
-                "nmcli",
-                &[
-                    "connection",
-                    "modify",
-                    uuid,
-                    "ipv4.dns",
-                    &prev,
-                    "ipv4.ignore-auto-dns",
-                    "no",
-                ],
-            )?;
-        } else if conn.original_ipv4_dns.is_empty() {
-            // `ignore-auto-dns=yes` sem IP fixo era do usuário: tira o filtro e mantém o `yes`
-            run_privileged_command(
-                r,
-                "nmcli",
-                &[
-                    "connection",
-                    "modify",
-                    uuid,
-                    "ipv4.dns",
-                    "",
-                    "ipv4.ignore-auto-dns",
-                    "yes",
-                ],
-            )?;
-        } else {
-            run_privileged_command(
-                r,
-                "nmcli",
-                &[
-                    "connection",
-                    "modify",
-                    uuid,
-                    "ipv4.dns",
-                    &join_ips(&conn.original_ipv4_dns),
-                ],
-            )?;
-        }
-
-        if conn.was_dhcp_ipv6 {
-            let prev = join_ips(&conn.original_ipv6_dns);
-            let _ = run_privileged_command(
-                r,
-                "nmcli",
-                &[
-                    "connection",
-                    "modify",
-                    uuid,
-                    "ipv6.dns",
-                    &prev,
-                    "ipv6.ignore-auto-dns",
-                    "no",
-                ],
-            );
-        } else if conn.original_ipv6_dns.is_empty() {
-            let _ = run_privileged_command(
-                r,
-                "nmcli",
-                &[
-                    "connection",
-                    "modify",
-                    uuid,
-                    "ipv6.dns",
-                    "",
-                    "ipv6.ignore-auto-dns",
-                    "yes",
-                ],
-            );
-        } else {
-            let _ = run_privileged_command(
-                r,
-                "nmcli",
-                &[
-                    "connection",
-                    "modify",
-                    uuid,
-                    "ipv6.dns",
-                    &join_ips(&conn.original_ipv6_dns),
-                ],
-            );
-        }
-
-        let _ = run_privileged_command(r, "nmcli", &["connection", "up", "uuid", uuid]);
-    }
+    let _ = run_privileged_command(r, "nmcli", &["connection", "up", "uuid", uuid]);
     Ok(())
 }
 
@@ -780,11 +720,6 @@ fn get_active_nm_connections(r: &dyn CommandRunner) -> Result<Vec<String>> {
         }
     }
     Ok(uuids)
-}
-
-fn inspect_nm_connection_raw(r: &dyn CommandRunner, uuid: &str) -> Result<(Vec<Ipv4Addr>, bool)> {
-    let b = inspect_nm_connection_unsanitized(r, uuid)?;
-    Ok((b.original_ipv4_dns, b.was_dhcp_ipv4))
 }
 
 fn inspect_nm_connection(r: &dyn CommandRunner, uuid: &str) -> Result<ConnectionBackup> {
@@ -904,17 +839,41 @@ fn inspect_nm_connection_unsanitized(
 // 2. systemd-resolved Implementation
 // ============================================================================
 
-fn apply_systemd_resolved(r: &dyn CommandRunner, _manifest: &mut DnsStateManifest) -> Result<()> {
+struct ResolvedBackend<'a>(&'a dyn CommandRunner);
+
+impl DnsBackend for ResolvedBackend<'_> {
+    fn kind(&self) -> BackendKind {
+        BackendKind::SystemdResolved
+    }
+    fn inspect(&self, _m: &mut DnsStateManifest) -> Result<()> {
+        Ok(()) // o drop-in é só nosso: não há DNS anterior a guardar
+    }
+    fn point_to(
+        &self,
+        _m: &DnsStateManifest,
+        mode: crate::config::FilterMode,
+    ) -> Result<(), PointError> {
+        apply_systemd_resolved(self.0, mode).map_err(Into::into)
+    }
+    fn restore(&self, _m: &DnsStateManifest) -> Result<()> {
+        revert_systemd_resolved(self.0)
+    }
+    fn reset(&self) -> Result<()> {
+        revert_systemd_resolved(self.0)
+    }
+}
+
+fn apply_systemd_resolved(r: &dyn CommandRunner, mode: crate::config::FilterMode) -> Result<()> {
     if !r.path_exists("/etc/systemd/resolved.conf.d") {
         run_privileged_command(r, "mkdir", &["-p", "/etc/systemd/resolved.conf.d"])?;
     }
 
     let conf_content = format!(
         "[Resolve]\nDNS={} {} {} {}\n",
-        current_mode().ipv4()[0],
-        current_mode().ipv4()[1],
-        current_mode().ipv6()[0],
-        current_mode().ipv6()[1]
+        mode.ipv4()[0],
+        mode.ipv4()[1],
+        mode.ipv6()[0],
+        mode.ipv6()[1]
     );
 
     // Pelo stdin: nenhum arquivo previsível em /tmp.
@@ -928,6 +887,7 @@ fn apply_systemd_resolved(r: &dyn CommandRunner, _manifest: &mut DnsStateManifes
     Ok(())
 }
 
+/// Inócuo se o drop-in não existe (serve para desfazer um `apply` que falhou no meio).
 fn revert_systemd_resolved(r: &dyn CommandRunner) -> Result<()> {
     let dropin_path = "/etc/systemd/resolved.conf.d/99-guialar.conf";
     if r.path_exists(dropin_path) {
@@ -941,13 +901,37 @@ fn revert_systemd_resolved(r: &dyn CommandRunner) -> Result<()> {
 // 3. Runit & Openresolv Implementation (Void Linux / runit services)
 // ============================================================================
 
-fn apply_openresolv_runit(r: &dyn CommandRunner, _manifest: &mut DnsStateManifest) -> Result<()> {
+struct ResolvconfBackend<'a>(&'a dyn CommandRunner);
+
+impl DnsBackend for ResolvconfBackend<'_> {
+    fn kind(&self) -> BackendKind {
+        BackendKind::OpenResolvRunit
+    }
+    fn inspect(&self, _m: &mut DnsStateManifest) -> Result<()> {
+        Ok(()) // a interface «guialar» é só nossa: não há DNS anterior a guardar
+    }
+    fn point_to(
+        &self,
+        _m: &DnsStateManifest,
+        mode: crate::config::FilterMode,
+    ) -> Result<(), PointError> {
+        apply_openresolv_runit(self.0, mode).map_err(Into::into)
+    }
+    fn restore(&self, _m: &DnsStateManifest) -> Result<()> {
+        revert_openresolv_runit(self.0)
+    }
+    fn reset(&self) -> Result<()> {
+        revert_openresolv_runit(self.0)
+    }
+}
+
+fn apply_openresolv_runit(r: &dyn CommandRunner, mode: crate::config::FilterMode) -> Result<()> {
     let conf = format!(
         "nameserver {}\nnameserver {}\nnameserver {}\nnameserver {}\n",
-        current_mode().ipv4()[0],
-        current_mode().ipv4()[1],
-        current_mode().ipv6()[0],
-        current_mode().ipv6()[1]
+        mode.ipv4()[0],
+        mode.ipv4()[1],
+        mode.ipv6()[0],
+        mode.ipv6()[1]
     );
 
     let status = r
@@ -973,18 +957,63 @@ fn revert_openresolv_runit(r: &dyn CommandRunner) -> Result<()> {
 // 4. Direct /etc/resolv.conf Fallback (Atomic Replace)
 // ============================================================================
 
-fn apply_direct_resolv_conf(r: &dyn CommandRunner, manifest: &mut DnsStateManifest) -> Result<()> {
-    if r.path_exists("/etc/resolv.conf") {
-        let current = r.read_file("/etc/resolv.conf").unwrap_or_default();
-        manifest.previous_resolv_conf = Some(current);
+struct DirectBackend<'a>(&'a dyn CommandRunner);
+
+impl DnsBackend for DirectBackend<'_> {
+    fn kind(&self) -> BackendKind {
+        BackendKind::DirectResolvConf
     }
 
-    let content = format!(
-        "# Gerado pelo GuiaLar Digital - Protecao Familiar\nnameserver {}\nnameserver {}\nnameserver {}\nnameserver {}\n",
-        current_mode().ipv4()[0], current_mode().ipv4()[1], current_mode().ipv6()[0], current_mode().ipv6()[1]
-    );
+    fn inspect(&self, m: &mut DnsStateManifest) -> Result<()> {
+        if self.0.path_exists("/etc/resolv.conf") {
+            // se não lê, não há backup: um erro, não um arquivo vazio que o desfazer gravaria
+            let atual = self
+                .0
+                .read_file("/etc/resolv.conf")
+                .context("Não consegui ler /etc/resolv.conf; nada foi alterado")?;
+            m.previous_resolv_conf = Some(atual);
+        }
+        Ok(())
+    }
 
-    write_resolv_conf(r, &content)
+    fn point_to(
+        &self,
+        _m: &DnsStateManifest,
+        mode: crate::config::FilterMode,
+    ) -> Result<(), PointError> {
+        let content = format!(
+            "# Gerado pelo GuiaLar Digital - Protecao Familiar\nnameserver {}\nnameserver {}\nnameserver {}\nnameserver {}\n",
+            mode.ipv4()[0],
+            mode.ipv4()[1],
+            mode.ipv6()[0],
+            mode.ipv6()[1]
+        );
+        write_resolv_conf(self.0, &content).map_err(Into::into)
+    }
+
+    /// Só regrava se o arquivo mudou: assim desfazer um `apply` que falhou antes de gravar
+    /// nada não precisa de privilégio nem escreve à toa.
+    fn restore(&self, m: &DnsStateManifest) -> Result<()> {
+        match &m.previous_resolv_conf {
+            Some(prev) if self.0.read_file("/etc/resolv.conf").as_ref() != Some(prev) => {
+                write_resolv_conf(self.0, prev)
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Sem backup do DNS anterior: só tira as linhas do filtro do GuiaLar.
+    fn reset(&self) -> Result<()> {
+        let atual = self.0.read_file("/etc/resolv.conf").unwrap_or_default();
+        let limpo: Vec<&str> = atual
+            .lines()
+            .filter(|l| !l.contains("Gerado pelo GuiaLar"))
+            .filter(|l| {
+                !(l.trim_start().starts_with("nameserver") && crate::config::line_has_filter_ip(l))
+            })
+            .collect();
+        write_resolv_conf(self.0, &(limpo.join("\n") + "\n"))
+    }
 }
 
 /// Grava `path` via `tee` (com privilégio) com o conteúdo em stdin, sem arquivo temporário.
@@ -1005,13 +1034,6 @@ fn write_privileged_file(r: &dyn CommandRunner, path: &str, content: &str) -> Re
 /// Grava `/etc/resolv.conf` via `tee` com o conteúdo em stdin (sem arquivo temporário).
 fn write_resolv_conf(r: &dyn CommandRunner, content: &str) -> Result<()> {
     write_privileged_file(r, "/etc/resolv.conf", content)
-}
-
-fn revert_direct_resolv_conf(r: &dyn CommandRunner, manifest: &DnsStateManifest) -> Result<()> {
-    if let Some(ref prev) = manifest.previous_resolv_conf {
-        write_resolv_conf(r, prev)?;
-    }
-    Ok(())
 }
 
 // ============================================================================

@@ -71,7 +71,7 @@ pub fn snapshot() -> Snapshot {
     let status = crate::verify::check_status();
     // Filtro do GuiaLar ainda na rede, mas sem registro nosso (manifesto apagado).
     let filter_without_record = matches!(status, crate::verify::ProtectionStatus::Unprotected)
-        && crate::platform::cloudflare_dns_active();
+        && crate::platform::filter_dns_in_use();
     Snapshot {
         mode,
         filter_without_record,
@@ -109,10 +109,10 @@ fn backend_name() -> String {
 /// Ativa o DNS seguro e o bloqueador de anúncios.
 pub fn action_activate() -> Result<String> {
     let mode = crate::config::current_mode();
-    let manifest = DnsStateManifest::load()?;
-    if crate::platform::plan_apply(manifest.as_ref(), mode, &crate::platform::configured_dns())
-        == crate::platform::ApplyPlan::AlreadyActive
-    {
+    if matches!(
+        crate::platform::plan_now()?,
+        crate::platform::ApplyStep::AlreadyActive
+    ) {
         return Ok("A proteção já está ativa. Use \"Desativar\" antes de ativar de novo.".into());
     }
     // Uma única elevação (um só UAC / uma só senha). No Linux não abre o navegador por

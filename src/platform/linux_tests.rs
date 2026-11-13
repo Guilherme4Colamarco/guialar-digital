@@ -22,7 +22,7 @@ fn apply(r: &FakeRunner) -> Result<()> {
     match next_apply_step(|| configured_dns_with(r))? {
         ApplyStep::AlreadyActive => Ok(()),
         ApplyStep::Switch(m) => switch_mode_with(r, m),
-        ApplyStep::Fresh => apply_dns_with(r),
+        ApplyStep::Fresh | ApplyStep::Stale => apply_dns_with(r),
     }
 }
 
@@ -124,6 +124,7 @@ fn nm_apply_usa_o_argv_de_producao_na_ordem() {
             "--active",
         ]),
     ];
+    // primeiro LÊ todas as conexões (IPv4 e, em chamada própria, IPv6)...
     for u in ["uuid-eth", "uuid-wifi"] {
         esperado.push(v(&[
             "nmcli",
@@ -134,7 +135,6 @@ fn nm_apply_usa_o_argv_de_producao_na_ordem() {
             "show",
             u,
         ]));
-        // IPv6: chamada própria, logo depois da do IPv4 (o argv do IPv4 não mudou)
         esperado.push(v(&[
             "nmcli",
             "-t",
@@ -144,6 +144,9 @@ fn nm_apply_usa_o_argv_de_producao_na_ordem() {
             "show",
             u,
         ]));
+    }
+    // ...e só depois troca o DNS de cada uma
+    for u in ["uuid-eth", "uuid-wifi"] {
         esperado.push(v(&[
             "nmcli",
             "connection",
@@ -359,6 +362,186 @@ fn nm_dns_trocado_por_fora_e_reaplicado_sem_perder_o_original() {
     );
     revert(&r).unwrap();
     assert_eq!(r.state(), original);
+}
+
+// ------------------------- transação: falha no meio não deixa DNS trocado sem registro
+
+const WIFI_MODIFY: [&str; 4] = ["nmcli", "connection", "modify", "uuid-wifi"];
+
+#[test]
+fn nm_falha_na_segunda_conexao_desfaz_a_primeira_e_nao_deixa_manifesto() {
+    let s = Sandbox::new("nm-tx-falha");
+    let r = nm_machine();
+    let original = r.state();
+    r.add_exit_argv_once(&WIFI_MODIFY, 1); // o Wi-Fi cai no meio do apply; o desfazer passa
+    let e = format!("{:#}", apply_dns_with(&r).unwrap_err());
+    assert!(e.contains("foi desfeito"), "{e}");
+    assert_eq!(r.state(), original, "a Ethernet voltou ao que era");
+    assert!(!s.manifest_path().exists(), "nada a desfazer depois");
+}
+
+#[test]
+fn nm_falha_na_segunda_conexao_e_no_desfazer_deixa_o_manifesto_para_o_desativar() {
+    let s = Sandbox::new("nm-tx-falha-2");
+    let r = nm_machine();
+    r.add_exit_argv(&WIFI_MODIFY, 1); // falha na ida e no desfazer
+    let e = format!("{:#}", apply_dns_with(&r).unwrap_err());
+    assert!(e.contains("não consegui desfazer"), "{e}");
+    assert!(e.contains("Desativar"), "{e}");
+    let m = manifest();
+    assert_eq!(m.connections.len(), 2, "o estado de antes das duas");
+    assert!(s.manifest_path().exists());
+}
+
+#[test]
+fn nm_apply_que_falha_desfaz_so_as_conexoes_tocadas() {
+    let s = Sandbox::new("nm-tx-so-tocadas");
+    // o Wi-Fi falha; a terceira conexão (depois dele) nunca é tocada nem religada
+    let r = nm_machine().with_nm_conn("uuid-zzz", "802-3-ethernet", "", false);
+    r.add_exit_argv_once(&WIFI_MODIFY, 1);
+    let e = format!("{:#}", apply_dns_with(&r).unwrap_err());
+    assert!(e.contains("foi desfeito"), "{e}");
+    let ultimo_wifi = r
+        .argvs()
+        .iter()
+        .rposition(|a| a.contains(&"uuid-wifi".to_string()))
+        .expect("o Wi-Fi foi tocado");
+    let depois: Vec<_> = r
+        .argvs()
+        .into_iter()
+        .skip(ultimo_wifi + 1)
+        .filter(|a| a.contains(&"uuid-zzz".to_string()))
+        .collect();
+    let antes_do_wifi_falhar = r
+        .argvs()
+        .iter()
+        .filter(|a| a.contains(&"uuid-zzz".to_string()) && a.contains(&"modify".to_string()))
+        .count();
+    assert!(
+        depois.is_empty() && antes_do_wifi_falhar == 0,
+        "a conexão não tocada não pode ser alterada nem religada: {:?}",
+        r.argvs()
+    );
+    assert!(!s.manifest_path().exists());
+}
+
+#[test]
+fn nm_reset_tenta_todas_as_conexoes_e_junta_as_falhas() {
+    let _s = Sandbox::new("nm-reset-junta");
+    let r = nm_machine();
+    apply_dns_with(&r).unwrap();
+    r.add_exit_argv(&["nmcli", "connection", "modify", "uuid-eth"], 1);
+    let e = format!("{:#}", NmBackend(&r).reset().unwrap_err());
+    assert!(e.contains("1 conexão") && e.contains("uuid-eth"), "{e}");
+    // o Wi-Fi foi tratado mesmo com a Ethernet falhando antes
+    assert!(
+        r.argvs()
+            .iter()
+            .any(|a| a.contains(&"uuid-wifi".to_string()) && a.contains(&"up".to_string())),
+        "{:?}",
+        r.argvs()
+    );
+}
+
+#[test]
+fn direct_resolv_conf_que_nao_le_nao_vira_backup_vazio() {
+    let s = Sandbox::new("direct-leitura");
+    // o arquivo existe mas não se lê (o fake devolve `None`)
+    let r = FakeRunner::new().with_path(RESOLV);
+    let mut m = DnsStateManifest::new(BackendKind::DirectResolvConf);
+    let e = format!("{:#}", DirectBackend(&r).inspect(&mut m).unwrap_err());
+    assert!(e.contains("nada foi alterado"), "{e}");
+    assert!(m.previous_resolv_conf.is_none());
+    assert!(!s.manifest_path().exists());
+}
+
+#[test]
+fn nm_falha_ao_ler_uma_conexao_nao_altera_nenhuma() {
+    let s = Sandbox::new("nm-tx-leitura");
+    let r = nm_machine();
+    let original = r.state();
+    // a leitura da SEGUNDA conexão falha: nenhuma pode ter sido alterada antes
+    r.add_fail_argv(&[
+        "nmcli",
+        "-t",
+        "-f",
+        "ipv4.dns,ipv4.ignore-auto-dns",
+        "connection",
+        "show",
+        "uuid-wifi",
+    ]);
+    assert!(apply_dns_with(&r).is_err());
+    assert_eq!(r.state(), original, "DNS intacto");
+    assert!(
+        !r.argvs().iter().any(|a| a.contains(&"modify".to_string())),
+        "nenhum modify antes de ler todas: {:?}",
+        r.argvs()
+    );
+    assert!(!s.manifest_path().exists());
+}
+
+#[test]
+fn nm_trocar_de_modo_grava_o_registro_antes_de_mexer_no_dns() {
+    use std::cell::{Cell, RefCell};
+    use std::rc::Rc;
+    let _s = Sandbox::new("nm-tx-switch-ordem");
+    let armado = Rc::new(Cell::new(false));
+    let vistos: Rc<RefCell<Vec<Option<FilterMode>>>> = Rc::default();
+    let r = nm_machine().with_on_run({
+        let (armado, vistos) = (armado.clone(), vistos.clone());
+        move |argv| {
+            if armado.get() && argv.contains(&"modify".to_string()) {
+                let modo = DnsStateManifest::load().ok().flatten().map(|m| m.mode);
+                vistos.borrow_mut().push(modo);
+            }
+        }
+    });
+    apply(&r).unwrap();
+    crate::config::set_mode(FilterMode::AdsOnly);
+    armado.set(true);
+    apply(&r).unwrap();
+    let vistos = vistos.borrow();
+    assert!(!vistos.is_empty());
+    assert!(
+        vistos.iter().all(|m| *m == Some(FilterMode::AdsOnly)),
+        "o registro já tem o modo novo quando o DNS é trocado: {vistos:?}"
+    );
+}
+
+#[test]
+fn nm_troca_de_modo_que_falha_no_meio_volta_dns_e_registro_ao_modo_anterior() {
+    let _s = Sandbox::new("nm-tx-switch-falha");
+    let r = nm_machine();
+    apply(&r).unwrap();
+    let familia = r.state();
+    crate::config::set_mode(FilterMode::AdsOnly);
+    r.add_exit_argv_once(&WIFI_MODIFY, 1); // a Ethernet já foi para o modo novo
+    let e = format!("{:#}", apply(&r).unwrap_err());
+    assert!(e.contains("voltei ao modo anterior"), "{e}");
+    assert_eq!(r.state(), familia, "o DNS voltou ao filtro familiar");
+    assert_eq!(manifest().mode, FilterMode::Family, "o registro também");
+}
+
+/// O registro não pôde ser apagado depois de o DNS voltar: o desfazer já está feito, então só
+/// avisa (a mesma regra do Windows) em vez de falhar e deixar o usuário achando que continua
+/// protegido.
+#[test]
+fn nm_revert_que_nao_consegue_apagar_o_registro_avisa_e_termina() {
+    use std::os::unix::fs::PermissionsExt;
+    if crate::sysutil::is_root() {
+        return; // como root o apagar nunca é negado
+    }
+    let s = Sandbox::new("nm-tx-registro-preso");
+    let r = nm_machine();
+    let original = r.state();
+    apply(&r).unwrap();
+    let pasta = s.manifest_path().parent().unwrap().to_path_buf();
+    std::fs::set_permissions(&pasta, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let resultado = revert(&r);
+    std::fs::set_permissions(&pasta, std::fs::Permissions::from_mode(0o755)).unwrap();
+    resultado.expect("o desfazer termina mesmo sem poder apagar o registro");
+    assert_eq!(r.state(), original, "o DNS voltou");
+    assert!(s.manifest_path().exists(), "o registro ficou (preso)");
 }
 
 // --------------------------------------------------------- systemd-resolved
@@ -803,7 +986,9 @@ fn sem_manifesto_e_rede_normal_nao_ha_o_que_reverter() {
     let r = nm_machine();
     let original = r.state();
     assert!(!s.manifest_path().exists());
-    assert!(!cloudflare_dns_active_with(&r));
+    assert!(!configured_dns_with(&r)
+        .iter()
+        .any(crate::config::is_filter_ip));
     assert_eq!(r.state(), original);
     assert!(
         r.argvs().iter().all(|a| !a.contains(&"modify".to_string())),
@@ -819,7 +1004,9 @@ fn sem_manifesto_com_filtro_ativo_volta_ao_automatico() {
     apply_dns_with(&r).unwrap();
     DnsStateManifest::remove_manifest().unwrap();
     assert!(
-        cloudflare_dns_active_with(&r),
+        configured_dns_with(&r)
+            .iter()
+            .any(crate::config::is_filter_ip),
         "o filtro ainda está na conexão"
     );
     r.clear_calls();
