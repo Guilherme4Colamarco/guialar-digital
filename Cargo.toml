@@ -1,0 +1,16 @@
+[package]
+name = "guialar"
+version = "0.3.0"
+edition = "2021"
+authors = ["Guilherme Amaral Colamarco Resende de Melo <88679520+Guilherme4Colamarco@users.noreply.github.com>"]
+description = "Proteção de navegação por DNS filtrado (familiar: Cloudflare for Families; só anúncios: AdGuard DNS) e bloqueador de anúncios nos navegadores, para Linux (NetworkManager, systemd-resolved, runit/resolvconf) e Windows"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+clap = { version = "4.5", features = ["derive", "color"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+anyhow = "1.0"
+thiserror = "1.0"
+
+[target.'cfg(windows)'.dependencies]

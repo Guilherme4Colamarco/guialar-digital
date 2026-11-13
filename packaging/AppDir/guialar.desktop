@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=GuiaLar Digital
+Comment=Proteção de navegação por DNS filtrado (familiar ou só anúncios)
+Exec=guialar
+Icon=guialar
+Terminal=false
+Categories=Network;Security;
+StartupWMClass=br.uniube.pi.guialar

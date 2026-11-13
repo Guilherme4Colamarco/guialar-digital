@@ -1,0 +1,7 @@
+# Fixa o Rust para o ensaio e a tag compilarem com o mesmo compilador.
+# 1.99.1 = versão com que fmt/clippy/test passam hoje. Para subir: troque aqui e rode a CI.
+[toolchain]
+channel = "1.99.1"
+profile = "minimal"
+components = ["rustfmt", "clippy"]
+targets = ["x86_64-unknown-linux-musl"]
