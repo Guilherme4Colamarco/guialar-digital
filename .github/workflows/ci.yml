@@ -1,0 +1,200 @@
+# Gate 2 da ADR-023: fmt, clippy, test, build Linux + Windows.
+# Substitui os workflows Ant (build-and-test.yml / quick-check.yml) quando a main for Rust.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+  schedule:
+    # 03:00 America/Sao_Paulo (UTC-3). Job e2e só neste evento e no dispatch.
+    - cron: "0 6 * * *"
+
+permissions:
+  contents: read
+
+# Cancela runs antigos só em PR; push, cron e dispatch nunca cancelam.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  linux-gnu:
+    name: Linux gnu (fmt clippy test build)
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust (rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Formato
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Guarda - testes como usuario comum (nunca root)
+        run: test "$(id -u)" -ne 0
+      # N1 (review ADR-029): cargo test como usuário comum. ubuntu-latest não é root,
+      # então o skip de apply_twice como root não esconde falha neste job. Gate intacto.
+      - name: Testes
+        run: cargo test --locked
+      - name: Build release
+        run: cargo build --locked --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: guialar-linux-gnu
+          path: target/release/guialar
+          if-no-files-found: error
+          retention-days: 5
+
+  linux-musl:
+    name: Linux musl (clippy test)
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust (rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: musl-tools
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Clippy musl
+        run: cargo clippy --locked --all-targets --target x86_64-unknown-linux-musl -- -D warnings
+      - name: Guarda - testes como usuario comum (nunca root)
+        run: test "$(id -u)" -ne 0
+      # N1: mesmo usuário comum do runner; cargo test não é root.
+      - name: Testes musl
+        run: cargo test --locked --target x86_64-unknown-linux-musl
+
+  windows:
+    name: Windows (clippy test build)
+    if: github.event_name != 'schedule'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust (rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Localizar windres (llvm-windres ou mingw)
+        shell: pwsh
+        run: |
+          # build.rs precisa de llvm-windres (ou GUIALAR_WINDRES). Procura no PATH e em locais do runner.
+          if ($env:GUIALAR_WINDRES) { $cands = @($env:GUIALAR_WINDRES) } else { $cands = @('llvm-windres', 'windres') }
+          $cands += @(
+            'C:\Program Files\LLVM\bin\llvm-windres.exe',
+            'C:\msys64\mingw64\bin\windres.exe',
+            'C:\mingw64\bin\windres.exe',
+            'C:\Strawberry\c\bin\windres.exe')
+          $found = $null
+          foreach ($c in $cands) {
+            $cmd = Get-Command $c -ErrorAction SilentlyContinue
+            if ($cmd) { $found = $cmd.Source; break }
+          }
+          if (-not $found) {
+            Write-Error "llvm-windres/windres nao encontrado (build.rs precisa dele para os recursos do Windows). Procurado: $($cands -join ', '). Defina GUIALAR_WINDRES."
+            exit 1
+          }
+          Write-Host "windres: $found"
+          "GUIALAR_WINDRES=$found" >> $env:GITHUB_ENV
+      - name: Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Testes
+        run: cargo test --locked
+      - name: Build release
+        run: cargo build --locked --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: guialar-windows
+          path: target/release/guialar.exe
+          if-no-files-found: error
+          retention-days: 5
+
+  # ADR-029 camada 4. Não roda em PR/push (não entra no gate). Informativo:
+  # continue-on-error se a rede do runner oscilar (sonda DNS).
+  # Contrato gl-qa: scripts/e2e.sh <bin> e scripts/e2e.ps1 -Bin <exe>
+  # exit 0 = 9/9 PASS; 1 = algum FAIL; 2 = uso inválido / shell não elevado.
+  e2e:
+    name: e2e (${{ matrix.name }})
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-resolvconf
+            os: ubuntu-latest
+          - name: windows
+            os: windows-latest
+    runs-on: ${{ matrix.os }}
+    env:
+      GUIALAR_NO_INTEGRATION: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust (rust-toolchain.toml)
+        shell: bash
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          if [ "$RUNNER_OS" = "Linux" ]; then rustup component add llvm-tools-preview; fi
+
+      - name: E2E Linux (container privilegiado, resolv.conf direto)
+        if: runner.os == 'Linux'
+        run: |
+          test -f scripts/e2e.sh
+          docker run --privileged --rm \
+            -v "$PWD":/src -w /src \
+            -e CARGO_TERM_COLOR=always \
+            -e GUIALAR_NO_INTEGRATION=1 \
+            rust:1-bookworm \
+            bash -lc 'set -euo pipefail
+              apt-get update
+              apt-get install -y --no-install-recommends bind9-dnsutils ca-certificates libc-bin coreutils
+              printf "nameserver 1.1.1.1\nnameserver 1.0.0.1\n" > /etc/resolv.conf
+              rustup show active-toolchain || rustup toolchain install
+              cargo build --locked --release
+              bash scripts/e2e.sh /src/target/release/guialar'
+
+      - name: Localizar windres (llvm-windres ou mingw)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # build.rs precisa de llvm-windres (ou GUIALAR_WINDRES). Procura no PATH e em locais do runner.
+          if ($env:GUIALAR_WINDRES) { $cands = @($env:GUIALAR_WINDRES) } else { $cands = @('llvm-windres', 'windres') }
+          $cands += @(
+            'C:\Program Files\LLVM\bin\llvm-windres.exe',
+            'C:\msys64\mingw64\bin\windres.exe',
+            'C:\mingw64\bin\windres.exe',
+            'C:\Strawberry\c\bin\windres.exe')
+          $found = $null
+          foreach ($c in $cands) {
+            $cmd = Get-Command $c -ErrorAction SilentlyContinue
+            if ($cmd) { $found = $cmd.Source; break }
+          }
+          if (-not $found) {
+            Write-Error "llvm-windres/windres nao encontrado (build.rs precisa dele para os recursos do Windows). Procurado: $($cands -join ', '). Defina GUIALAR_WINDRES."
+            exit 1
+          }
+          Write-Host "windres: $found"
+          "GUIALAR_WINDRES=$found" >> $env:GITHUB_ENV
+      - name: Build release Windows
+        if: runner.os == 'Windows'
+        run: cargo build --locked --release
+
+      - name: E2E Windows (runner admin)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $exe = Join-Path $env:GITHUB_WORKSPACE 'target\release\guialar.exe'
+          if (-not (Test-Path -LiteralPath 'scripts/e2e.ps1')) {
+            throw 'scripts/e2e.ps1 ausente (gl-qa)'
+          }
+          & 'scripts/e2e.ps1' -Bin $exe
+          exit $LASTEXITCODE
+
+      - name: Cobertura cargo llvm-cov (informativo, sem mínimo)
+        if: runner.os == 'Linux'
+        continue-on-error: true
+        run: |
+          cargo install cargo-llvm-cov --locked --quiet
+          cargo llvm-cov --locked --summary-only

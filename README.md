@@ -1,864 +1,92 @@
-# GuiaLar Digital
+# GuiaLar Digital v0.3.0
 
-[![Build and Test](https://github.com/Guilherme4Colamarco/guialar-digital/actions/workflows/build-and-test.yml/badge.svg)](https://github.com/Guilherme4Colamarco/guialar-digital/actions/workflows/build-and-test.yml)
-[![Quick Check](https://github.com/Guilherme4Colamarco/guialar-digital/actions/workflows/quick-check.yml/badge.svg)](https://github.com/Guilherme4Colamarco/guialar-digital/actions/workflows/quick-check.yml)
+Proteção de navegação por **DNS filtrado**, com duas opções:
 
-**Assistente para configuração de DNS seguro e adblockers (Linux + Windows)**
+| Modo | O que bloqueia | DNS usado |
+|------|----------------|-----------|
+| **Proteção familiar** (padrão) | Malware e conteúdo adulto | Cloudflare for Families (`1.1.1.3` / `1.0.0.3`) |
+| **Só bloquear anúncios** | Anúncios e rastreadores | AdGuard DNS Padrão (`94.140.14.14` / `94.140.15.15`) |
 
-Projeto desenvolvido como parte da disciplina Projetos Integrados I
-**Curso:** Inteligência Artificial e Ciência de Dados — Uniube
-**Aluno:** Guilherme Amaral Colamarco Resende de Melo
+O modo familiar também cuida do bloqueador de anúncios nos navegadores. **No Windows**, o programa o instala por política: o **uBlock Origin Lite** no Chrome, no Edge e no Brave, e o **uBlock Origin** no Firefox; ele aparece quando o navegador é reaberto. **No Linux**, o botão **Proteger este computador** só muda o DNS: o bloqueador é um passo à parte (`guialar setup` ou `guialar browser`), que abre a página da extensão na loja de cada navegador (uBlock Origin Lite no Chrome, Chromium, Brave e Edge; uBlock Origin no Firefox). O modo "só anúncios" não mexe nos navegadores.
 
----
+Desativar a proteção devolve o DNS que estava antes. Se o registro da proteção (`state.json`, veja onde fica em «Desfazer e remover») for apagado ou estragar, o programa não sabe mais o que havia antes: o DNS volta ao **automático da rede**, e um DNS fixo que você tinha configurado à mão precisa ser colocado de novo.
 
-## 🎯 Correções do Review Linux (PR #1)
+> **Limites do filtro por DNS.** Ele bloqueia por **domínio**: não pega anúncio servido pelo mesmo domínio do site, nem navegador ou app com DNS próprio (DoH), nem tráfego que sai por uma VPN. Se a rede já tem outro bloqueador (um Pi-hole, por exemplo), o bloqueio pode vir dele e não do GuiaLar; por isso o programa só diz "Protegido" quando o DNS configurado é o do modo escolhido e o teste de bloqueio responde.
 
-**✅ TODAS as correções críticas e médias foram implementadas!**
+> **Limites do bloqueador nos navegadores (Windows).** O Chromium não é detectado nem configurado (só Chrome, Edge, Brave e Firefox). Um **Firefox instalado só para o seu usuário** (em `%LOCALAPPDATA%`) não recebe a política: instale o uBlock Origin pela [página do Firefox](https://addons.mozilla.org/pt-BR/firefox/addon/ublock-origin/). Se uma política da sua organização já usa o mesmo valor de política num navegador, o programa não o altera e avisa («gerenciado pela organização»). O programa grava a política, mas a extensão só aparece quando o navegador é reaberto.
 
-### CRÍTICO — DNS:
-1. ✅ systemd-resolved: Drop-in `/etc/systemd/resolved.conf.d/99-guialar.conf` (não trunca arquivo principal)
-2. ✅ NetworkManager: Backup REAL em `~/.guialar/backups/`
-3. ✅ resolv.conf: Verifica symlink stub, inclui IPv6, implementa Netplan
-4. ✅ obterConexaoAtiva: Filtra VPN/docker, prioriza ethernet/wifi
+Reescrita em Rust com interface nativa: **GTK 4 / Libadwaita** no Linux (carregado em tempo de execução) e **Win32 / Fluent (Mica)** no Windows. Há também uma seção informativa de **navegadores recomendados** (Brave, Helium, Zen Browser + uBlock Origin, Mullvad Browser, LibreWolf); o programa só mostra os links oficiais e não instala nada.
 
-### MÉDIO — Navegadores / CI:
-5. ✅ Detecção navegadores: .desktop, Flatpak, Snap, Brave Origin
-6. ✅ verificar() e reverter(): Implementação real com busca de backups
-7. ✅ CI report: Status real de cada job (não imprime "todos passaram" cegamente)
-8. ✅ Smoke test: Via stub (resolvectl query / dig @127.0.0.53), não direto contra 1.1.1.3
+## Instalação
 
----
+Baixe os arquivos da [página de Releases](https://github.com/Guilherme4Colamarco/guialar-digital/releases). Os nomes seguem a versão: `guialar-<versão>-x86_64.AppImage` (Linux) e `guialar-<versão>-windows.exe` (Windows). O arquivo `SHA256SUMS` da mesma página permite conferir o download.
 
-## 📋 Sobre o Projeto
+### Linux (AppImage)
+```bash
+chmod +x guialar-*-x86_64.AppImage
+./guialar-*-x86_64.AppImage
+```
+No primeiro uso, o programa cria a entrada no menu de aplicativos. Pede senha de administrador (polkit ou `sudo`) só ao ativar ou desativar.
 
-O GuiaLar Digital é uma aplicação **desktop Java** (não web) que automatiza proteções básicas de privacidade e segurança em **Linux** e **Windows**.
+### Windows
+Baixe o `guialar-<versão>-windows.exe` e execute (arquivo único, não precisa instalar). O Windows pede confirmação de administrador (UAC) ao ativar, desativar ou configurar os navegadores. O executável ainda **não é assinado**: o SmartScreen pode mostrar "editor desconhecido".
 
-### Escopo do Projeto:
+## Uso
 
-**Linux (MVP completo):**
-- ✅ Debian, Fedora, Arch Linux e **NixOS** (com fluxo especial quando `/etc` é gerenciado pelo Nix)
-- ✅ DNS via **NetworkManager** (prioridade quando o NM está ativo, inclusive Wi‑Fi no Ubuntu), systemd-resolved, Netplan ou resolv.conf
-- ✅ Interface e manifesto em **`~/.guialar/`**; só a escrita de DNS usa **pkexec** (polkit), não é preciso `sudo java …` para abrir a GUI
+### Interface gráfica
+Execute sem argumentos:
+- O estado é **Desprotegido**, **Protegido**, **Parcial** ou **Trabalhando**; os botões mudam conforme o estado (uma ação principal e uma secundária).
+- Desprotegido: escolha o modo (familiar ou só anúncios) e clique em **Proteger este computador**. A janela mostra o DNS de agora e o novo, e pede confirmação antes de mudar.
+- **Ctrl+R** verifica o estado. **Desativar proteção** também pede confirmação.
+- **Detalhes técnicos** (recolhível) mostra IPs, caminho do estado e o botão **Copiar detalhes**.
 
-**Windows:**
-- ✅ Detecção de SO, elevação UAC, DNS atual, navegadores (Edge/Chrome/Firefox/Brave)
-- ✅ Diagnóstico **sem admin**
-- ✅ Aplicação de DNS via PowerShell `Set-DnsClientServerAddress` (UAC só na escrita)
-- ✅ Manifesto em `%LOCALAPPDATA%\GuiaLar\` para Desfazer
-- ✅ Degradação graciosa: sem admin/GPO → status **não aplicado**, sem crash
+### Linha de comando
+```bash
+guialar status                 # estado e filtro ativo
+guialar apply                  # filtro familiar (padrão)
+guialar apply --mode ads       # só anúncios (troca de modo mantém o DNS original)
+guialar setup [--mode ads]     # tudo de uma vez (filtro + navegadores no modo familiar)
+guialar revert                 # volta ao DNS de antes
+guialar browser [--install-all]  # bloqueador de anúncios nos navegadores
+guialar --help
+```
 
-> Na interface gráfica, o estado da proteção e as três ações principais são
-> apresentados em linguagem direta. Informações como IPv6, permissões e detalhes
-> do diagnóstico ficam no painel **Ver detalhes técnicos**.
+### Desfazer e remover
+- **Desativar proteção** (janela) ou `guialar revert` devolve o DNS. No Windows, também tira o bloqueador de anúncios que o programa instalou nos navegadores. No Linux, **não** remove a extensão que você instalou na loja do navegador.
+- Para **remover o programa**: no Linux, apague o AppImage, o atalho `~/.local/share/applications/guialar-digital.desktop` e o ícone `~/.local/share/icons/hicolor/256x256/apps/br.uniube.pi.guialar.png`. No Windows, apague o `.exe` (nada é instalado).
+- Desative a proteção **antes** de apagar o programa, para o DNS voltar ao que era.
 
-**FORA DO ESCOPO (por enquanto):**
-- ❌ macOS
-- ❌ Android/iOS
+### Onde o programa guarda o registro e como apagá-lo
+O registro que permite desfazer (`state.json`, só com endereços de DNS e nomes de conexão) fica numa pasta **do sistema**, gravada apenas pelo programa com permissão de administrador; o seu usuário só a lê:
+- **Linux:** `/var/lib/guialar/state.json`. A trava que impede duas operações ao mesmo tempo fica em `/run/guialar/op.lock` (some ao reiniciar). Para apagar o registro: `sudo rm -rf /var/lib/guialar`.
+- **Windows:** `%ProgramData%\GuiaLar\state.json` (e `op.lock` na mesma pasta), com acesso de escrita só para administradores. Para apagar, como administrador: `rmdir /s /q "%ProgramData%\GuiaLar"`.
 
-### Funcionalidades do MVP Linux:
+Apagar o registro **não desfaz o DNS**: faça isso depois de desativar a proteção (ou, sem o registro, rode `guialar revert`, que volta o DNS ao automático da rede). Quem usou a versão beta tinha o registro na pasta pessoal (`~/.config/guialar` no Linux, `%LOCALAPPDATA%\GuiaLar` no Windows): ao desativar, o programa lê esse registro antigo uma vez, confere se ainda faz sentido e o apaga; se estiver estranho, ignora e volta o DNS ao automático.
 
-1. **Mudar DNS do sistema** para Cloudflare 1.1.1.1 for Families
-   - **IPv4:** 1.1.1.3 (primário) / 1.0.0.3 (secundário)
-   - **IPv6:** 2606:4700:4700::1113 / 2606:4700:4700::1003
-   - Bloqueia malware e conteúdo adulto (18+)
+## Requisitos
 
-2. **Detectar navegadores instalados** e identificar base Firefox ou Chromium
+Funciona nas distribuições Linux comuns (Ubuntu, Fedora, Mint…) e no Windows 10/11. Em detalhe:
 
-3. **Instalar adblocker** automaticamente:
-   - uBlock Origin para navegadores base Firefox
-   - uBlock Origin Lite para navegadores base Chromium
+| Plataforma | Requisitos |
+|------------|------------|
+| Linux | NetworkManager, systemd-resolved ou runit/resolvconf. GTK 4 + Libadwaita para a janela (sem eles, usa a linha de comando). glibc ≥ 2.34 |
+| Windows 10/11 | PowerShell 5.1+ |
 
-### Princípios de Segurança e Privacidade:
-
-- ✅ **Plano de ações transparente:** sempre lista o que será feito ANTES de executar
-- ✅ **Autorização explícita:** solicita confirmação via polkit/pkexec
-- ✅ **Backup automático:** faz backup antes de modificar configurações
-- ✅ **Sem coleta de dados:** nenhum histórico de navegação é coletado
-- ✅ **Reversível:** instruções claras de como reverter mudanças
-
----
-
-## 🚀 Como Executar
-
-### Pré-requisitos
-
-- **Java 17** ou superior
-- **Apache Ant 1.10+** (sistema de build)
-- **Sistema operacional:** Linux (Debian/Fedora/Arch) ou Windows 10/11
-- **Privilégios:** só na hora de **aplicar/desfazer** DNS (pkexec no Linux; UAC no Windows). Diagnóstico e GUI rodam como usuário normal.
-
-### Instalação e Compilação
-
-1. **Clone o repositório:**
-   ```bash
-   git clone <url-do-repositorio>
-   cd workspace
-   ```
-
-2. **Compile o projeto com Ant:**
-   ```bash
-   ant jar
-   ```
-
-   Ou para limpar e recompilar tudo:
-   ```bash
-   ant rebuild
-   ```
-
-3. **Execute a aplicação:**
-   ```bash
-   java -jar build/jar/guialar-digital.jar --gui
-   ```
-
-   Ou use o Ant diretamente:
-   ```bash
-   ant run
-   ```
-
-   > **Nota:** O diagnóstico e os guias de navegador não precisam de administrador.
-   > O GuiaLar pede autorização apenas quando você escolhe ativar a proteção da rede.
-
-### Comandos Ant Disponíveis
+## Compilação (desenvolvedores)
 
 ```bash
-ant help            # Mostra ajuda sobre os comandos
-ant clean           # Remove arquivos compilados
-ant compile         # Compila o código-fonte
-ant jar             # Cria o JAR executável (padrão)
-ant test-windows    # Testes do adapter Windows (PowerShell mockado; roda no Linux)
-ant test-linux      # Testes Linux (nmcli/pkexec/NixOS mockados)
-ant test            # Windows + Linux
-ant dist            # Distribuição completa
-ant dist-windows    # Pacote para copiar ao PC Windows do laboratório
-ant run             # CLI (Linux: pkexec só ao aplicar DNS)
-ant run-gui         # Interface gráfica (Swing)
-ant run-diagnostico # Diagnóstico somente leitura
-ant rebuild         # Limpa e reconstrói tudo
+cargo build --release                                   # Linux
+cargo build --release --target x86_64-pc-windows-gnu    # Windows (cross-compile)
+cargo test && cargo clippy --all-targets -- -D warnings && cargo fmt --check
 ```
+O binário Linux usa glibc (necessário para carregar GTK em tempo de execução); o AppImage é montado a partir dele. A compilação cruzada para Windows precisa do `llvm-windres` (ou de outro `windres`, indicado em `GUIALAR_WINDRES`): sem ele, o build falha ao compilar os recursos do `.exe`.
 
-### Windows — smoke test em PC de laboratório (sem admin)
+## Licença
 
-Objetivo: abrir o app numa máquina trancada da universidade, ver o diagnóstico e
-confirmar que falhas de DNS (UAC/GPO) aparecem como **não aplicado** sem travar.
+Licença dupla: [MIT](LICENSE-MIT) ou [Apache-2.0](LICENSE-APACHE), à sua escolha.
 
-**1. No seu Linux (ou CI), gere o pacote:**
+## Autor
 
-```bash
-ant dist-windows
-# Artefatos em dist/windows/:
-#   guialar-digital.jar
-#   run-windows.bat
-#   smoke-diagnostico-windows.bat
-#   LEIA-ME-WINDOWS.txt
-```
+Guilherme Amaral Colamarco Resende de Melo — <88679520+Guilherme4Colamarco@users.noreply.github.com>
 
-**2. Copie a pasta `dist/windows/` para o PC Windows** (pendrive / download).
-
-**3. No lab (conta de aluno, sem admin):**
-
-```bat
-REM Precisa de Java 17+ no PATH (JDK da universidade ou portátil)
-smoke-diagnostico-windows.bat
-
-REM ou:
-java -jar guialar-digital.jar --cli --diagnostico
-```
-
-O que esperar:
-
-| Ação | Conta limitada | Com admin + UAC OK |
-|------|----------------|--------------------|
-| Abrir GUI / diagnóstico | OK | OK |
-| Ver OS, arch, DNS atual*, navegadores | OK (DNS=best-effort) | OK |
-| Aplicar DNS | **não aplicado** + motivo, sistema intacto | aplicado + manifesto |
-| Guias uBlock / Shields / DoH | OK | OK |
-
-\*Se `Get-DnsClientServerAddress` estiver bloqueado por GPO, o app informa
-**leitura bloqueada** e segue com o restante.
-
-**Flags CLI úteis no Windows:**
-
-```bat
-java -jar guialar-digital.jar --cli --diagnostico
-java -jar guialar-digital.jar --cli --aplicar-dns
-java -jar guialar-digital.jar --cli --desfazer
-java -jar guialar-digital.jar --cli --abrir-guias
-java -jar guialar-digital.jar --gui
-```
-
-Manifesto / desfazer: `%LOCALAPPDATA%\GuiaLar\dns-manifest.properties`
-
-No Linux sem interface gráfica (ex.: Ubuntu Server), o desfazer também funciona pela CLI,
-como usuário normal (pede a senha via pkexec): `java -jar guialar-digital.jar --cli --desfazer`.
-Manifesto em `~/.guialar/`.
-
-> Em rede de campus filtrada o app **ainda abre**. Só afirmamos filtro ativo se
-> o DNS GuiaLar estiver **aplicado** (nunca quando a escrita falhou).
-
-### Interface Gráfica (GUI)
-
-Além da CLI, o GuiaLar Digital possui uma **interface gráfica** (Java Swing, sem
-dependências externas). Ela exibe o sistema detectado, os navegadores, o plano de
-ações e um painel de log da execução em tempo real.
-
-```bash
-# Compila e abre a interface gráfica
-ant run-gui
-
-# Ou diretamente pelo JAR (usuário normal; pkexec só ao ativar a proteção):
-java -jar build/jar/guialar-digital.jar --gui
-```
-
-Seleção de modo ao executar o JAR:
-
-- `--gui` força a interface gráfica.
-- `--cli` força o modo linha de comando.
-- Sem flags: usa a GUI quando há ambiente gráfico disponível e cai para a CLI em
-  ambientes headless (servidores, CI, containers).
-
----
-
-## 🧪 Como Testar
-
-### Teste Completo no Linux
-
-#### 1. Compilar e Executar
-
-```bash
-# Compilar
-ant jar
-
-# Executar (usuário normal; pkexec na etapa de DNS)
-java -jar build/jar/guialar-digital.jar
-```
-
-O programa irá:
-1. Detectar sua distribuição Linux
-2. Detectar navegadores instalados
-3. Exibir um **plano de ações** detalhado
-4. Solicitar sua autorização
-5. Executar as configurações
-
-#### 2. Verificar DNS Configurado
-
-**Debian/Ubuntu:**
-```bash
-# Verificar DNS
-systemd-resolve --status | grep "DNS Servers"
-# ou
-resolvectl status
-# ou
-cat /etc/resolv.conf
-
-# Teste com dig
-dig @1.1.1.3 example.com
-```
-
-**Fedora:**
-```bash
-# Verificar DNS
-nmcli device show | grep DNS
-
-# Teste com dig
-dig @1.1.1.3 example.com
-```
-
-**Arch Linux:**
-```bash
-# Verificar DNS
-resolvectl status
-
-# Teste com dig
-dig @1.1.1.3 example.com
-```
-
-#### 3. Verificação Automática (Smoke Test Integrado)
-
-**O GuiaLar Digital executa verificação automática pós-DNS VIA STUB DO SISTEMA!**
-
-Após configurar o DNS, o programa automaticamente testa **via stub local** (não diretamente contra 1.1.1.3):
-- ✅ Usa `resolvectl query` (prova que o sistema usa o DNS configurado)
-- ✅ Fallback `dig @127.0.0.53` (stub do systemd-resolved)
-- ✅ Fallback Java `InetAddress` (resolver nativo)
-- ✅ Testa `malware.testcategory.com` (IPv4 e IPv6) — deve bloquear
-- ✅ Testa `nudity.testcategory.com` (IPv4 e IPv6) — deve bloquear
-- ✅ Testa `example.com` (IPv4 e IPv6) — deve permitir
-- ✅ Exibe relatório detalhado de sucesso/falha
-
-**Resultado esperado no programa:**
-
-```
-🧪 ETAPA 4: Verificação DNS (Smoke Test)...
-─────────────────────────────────────────────────────────────────
-
-🔍 Verificando DNS Cloudflare Families...
-─────────────────────────────────────────────────────────────────
-
-  Testando malware.testcategory.com (IPv4)... ✅ Bloqueado (0.0.0.0)
-  Testando malware.testcategory.com (IPv6)... ✅ Bloqueado (::)
-  Testando nudity.testcategory.com (IPv4)... ✅ Bloqueado (0.0.0.0)
-  Testando nudity.testcategory.com (IPv6)... ✅ Bloqueado (::)
-  Testando example.com (IPv4)... ✅ Permitido (93.184.215.14)
-  Testando example.com (IPv6)... ✅ Permitido (2606:2800:21f:cb07:6820:80da:af6b:8b2c)
-
-─────────────────────────────────────────────────────────────────
-RESUMO DA VERIFICAÇÃO:
-─────────────────────────────────────────────────────────────────
-
-Total de testes: 6
-Sucesso: 6
-Falhas: 0
-
-✅ TODOS OS TESTES PASSARAM!
-   O DNS Cloudflare Families está funcionando corretamente.
-```
-
-#### Teste Manual (Linha de Comando)
-
-**IPv4:**
-```bash
-# Teste 1: Bloqueio de malware (deve retornar 0.0.0.0)
-dig @1.1.1.3 malware.testcategory.com +short
-
-# Teste 2: Bloqueio de conteúdo adulto/nudez (deve retornar 0.0.0.0)
-dig @1.1.1.3 nudity.testcategory.com +short
-
-# Teste 3: Site normal (deve funcionar)
-dig @1.1.1.3 example.com +short
-```
-
-**IPv6:**
-```bash
-# Teste 1: Bloqueio de malware (deve retornar ::)
-dig @2606:4700:4700::1113 malware.testcategory.com AAAA +short
-
-# Teste 2: Bloqueio de nudez (deve retornar ::)
-dig @2606:4700:4700::1113 nudity.testcategory.com AAAA +short
-
-# Teste 3: Site normal (deve funcionar)
-dig @2606:4700:4700::1113 example.com AAAA +short
-```
-
-**Alternativa com resolvectl (systemd-resolved):**
-```bash
-resolvectl query malware.testcategory.com
-resolvectl query nudity.testcategory.com
-resolvectl query example.com
-```
-
-**Resultado esperado:**
-
-```bash
-# IPv4 - Malware e nudez BLOQUEADOS
-$ dig @1.1.1.3 malware.testcategory.com +short
-0.0.0.0
-
-$ dig @1.1.1.3 nudity.testcategory.com +short
-0.0.0.0
-
-# IPv6 - Malware e nudez BLOQUEADOS
-$ dig @2606:4700:4700::1113 malware.testcategory.com AAAA +short
-::
-
-# IPv4/IPv6 - Site normal PERMITIDO
-$ dig @1.1.1.3 example.com +short
-93.184.215.14
-
-$ dig @2606:4700:4700::1113 example.com AAAA +short
-2606:2800:21f:cb07:6820:80da:af6b:8b2c
-```
-
-**Teste no navegador:**
-
-```bash
-# Deve mostrar página de bloqueio ou erro de conexão
-curl -I http://malware.testcategory.com
-curl -I http://nudity.testcategory.com
-
-# Deve funcionar normalmente
-curl -I http://example.com
-```
-
-**✅ Checklist de Verificação:**
-- ✅ `malware.testcategory.com` → 0.0.0.0 (IPv4) ou :: (IPv6)
-- ✅ `nudity.testcategory.com` → 0.0.0.0 (IPv4) ou :: (IPv6)
-- ✅ `example.com` → IP válido funcionando
-- ✅ Smoke test automático passou no programa
-
-#### 4. Instalar Navegadores para Teste (Opcional)
-
-```bash
-# Debian/Ubuntu:
-sudo apt install firefox chromium-browser
-
-# Fedora:
-sudo dnf install firefox chromium
-
-# Arch:
-sudo pacman -S firefox chromium
-```
-
----
-
-## 📁 Estrutura do Projeto
-
-### Arquitetura: Core Comum + Adaptadores por OS
-
-O projeto segue uma **arquitetura limpa** com interfaces comuns e implementações específicas por sistema operacional.
-
-**MVP:** Apenas Linux implementado
-**Futuro:** Interfaces definidas para Mac, Windows e Android (sem código funcional)
-
-```
-src/main/java/br/uniube/pi/guialar/
-├── GuiaLarApplication.java              # Classe principal
-├── dominio/                             # Core comum (interfaces e modelos)
-│   ├── sistema/
-│   │   ├── TipoSistema.java            # Enum: LINUX, WINDOWS, MAC...
-│   │   └── SistemaOperacional.java     # Interface base OS
-│   ├── adaptadores/                     # ⭐ Interfaces por OS
-│   │   ├── DnsChanger.java             # Interface troca DNS
-│   │   ├── BrowserDetector.java        # Interface detecção browsers
-│   │   └── ExtensionInstaller.java     # Interface instalação extensões
-│   ├── distro/
-│   │   ├── TipoDistro.java             # Enum: DEBIAN, FEDORA, ARCH
-│   │   └── InfoDistro.java             # Informações da distribuição
-│   ├── dns/
-│   │   ├── ConfiguracaoDns.java        # Modelo de configuração DNS
-│   │   └── ServidorDns.java            # Servidores DNS (Cloudflare Families)
-│   ├── navegador/
-│   │   ├── TipoNavegador.java          # Enum: FIREFOX, CHROMIUM
-│   │   ├── Navegador.java              # Modelo de navegador detectado
-│   │   └── ExtensaoAdblocker.java      # uBlock Origin / uBlock Origin Lite
-│   ├── verificacao/
-│   │   └── ResultadoVerificacao.java   # Resultado smoke tests
-│   └── autorizacao/
-│       └── PlanoAcao.java              # Plano de ações transparente
-├── aplicacao/                           # Implementações
-│   ├── adaptadores/                     # ⭐ Implementações por OS
-│   │   └── linux/                      # ✅ MVP: ÚNICO OS IMPLEMENTADO
-│   │       ├── LinuxDnsChanger.java    # NetworkManager/systemd-resolved
-│   │       ├── LinuxBrowserDetector.java # PATH/.desktop/perfis
-│   │       └── LinuxExtensionInstaller.java # policies.json
-│   │   ├── macos/                       # 🔧 Futuro: apenas design
-│   │   ├── windows/                     # 🔧 Futuro: apenas design
-│   │   └── android/                     # 🔧 Futuro: apenas design
-│   ├── deteccao/
-│   │   ├── DetectorSistemaService.java # Detecta Linux/Windows/Mac
-│   │   ├── DetectorDistroService.java  # Detecta Debian/Fedora/Arch
-│   │   └── DetectorNavegadorService.java # Detecta Firefox/Chromium
-│   ├── dns/
-│   │   ├── ConfiguradorDnsService.java # Troca DNS Linux
-│   │   └── ConfiguradorDnsWindowsService.java # Esboço Windows
-│   ├── extensao/
-│   │   └── InstaladorExtensaoService.java # Instala uBlock Origin/Lite
-│   ├── verificacao/
-│   │   └── VerificacaoDnsService.java  # Smoke tests pós-DNS
-│   └── autorizacao/
-│       └── AutorizadorService.java     # Sistema autorização
-└── cli/
-    └── GuiaLarCli.java                  # Interface linha de comando
-```
-
----
-
-## 🏗️ Arquitetura Multi-OS (Design Futuro)
-
-### Interfaces Definidas (Core Comum)
-
-| Interface | Responsabilidade | Implementações |
-|-----------|-----------------|----------------|
-| `SistemaOperacional` | Detectar OS | Linux ✅, Mac 🔧, Windows 🔧, Android 🔧 |
-| `DnsChanger` | Trocar DNS | LinuxDnsChanger ✅ |
-| `BrowserDetector` | Detectar browsers | LinuxBrowserDetector ✅ |
-| `ExtensionInstaller` | Instalar extensões | LinuxExtensionInstaller ✅ |
-
-### Diferenças Técnicas por OS (Documentadas)
-
-#### ✅ Linux (MVP - Implementado)
-- **Elevação:** GUI/CLI como usuário; escrita de DNS e desfazer via **pkexec**; manifesto em `~/.guialar/dns-manifest.properties`
-- **Ordem de backends:** NetworkManager ativo (Wi‑Fi e ethernet) → Netplan (se NM inativo) → systemd-resolved → resolv.conf
-- **DNS:** NetworkManager (nmcli), systemd-resolved (resolvectl), Netplan, resolv.conf
-  - **NetworkManager**: Conexão ativa, `ignore-auto-dns`, IPv4+IPv6, backup em `~/.guialar/backups/`
-  - **systemd-resolved**: Drop-in `/etc/systemd/resolved.conf.d/99-guialar.conf` (desfazer remove esse arquivo e reinicia o serviço)
-  - **Netplan**: YAML em `/etc/netplan/99-guialar-dns.yaml` (Ubuntu Server)
-  - **NixOS**: Se NM ativo e sem DNS global conflitante, usa NM; senão mostra trecho `networking.nameservers` para `configuration.nix` (status **aguardando você aplicar** até o smoke test passar)
-  - **resolv.conf**: Verifica symlink stub antes de editar, inclui IPv6
-  - **Conexão ativa**: Filtra VPN/docker, prioriza ethernet > wifi
-- **Browsers:** PATH `/usr/bin/`, `.desktop` files, perfis `~/.mozilla/`, `~/.config/`
-  - **Detecção**: which, perfis, .desktop, Flatpak, Snap
-  - **Brave Origin**: `~/.config/BraveSoftware/Brave-Origin`
-- **Extensões:** `policies.json` (Firefox), managed policies (Chromium)
-- **Distros:** Debian, Ubuntu, Fedora, Arch, NixOS
-- **Verificação**: Via stub (resolvectl query / dig @127.0.0.53)
-- **Reversão**: Busca backup mais recente e restaura automaticamente
-
-#### 🔧 macOS (Futuro - Interface apenas)
-- **DNS:** `networksetup`, `scutil` (**≠** NetworkManager/systemd-resolved!)
-- **Browsers:** `/Applications/*.app/`, Homebrew `/opt/homebrew/Caskroom/`
-- **Perfis:** `~/Library/Application Support/Firefox/`, `~/Library/Application Support/Google/Chrome/`
-- **Extensões:** Similar a Linux mas caminhos diferentes
-
-#### ✅ Windows (smoke test implementado)
-- **DNS:** PowerShell `Set-DnsClientServerAddress` / `Get-DnsClientServerAddress` (**≠** nmcli!)
-- **Elevação:** UAC somente na escrita; leitura/diagnóstico sem admin
-- **Manifesto:** `%LOCALAPPDATA%\GuiaLar\dns-manifest.properties`
-- **Browsers:** `C:\Program Files\`, `Program Files (x86)`, `%LOCALAPPDATA%`, App Paths (registry)
-- **Abrir links:** `Start-Process` / `cmd start` (equivalente a `xdg-open`)
-- **Guias:** Edge/Chrome → uBlock Origin Lite + DoH; Firefox → uBlock Origin; Brave → Shields + DNS seguro
-
-#### 🔧 Android (Futuro - Interface apenas)
-- **DNS:** Private DNS over TLS (sem root, **≠** desktop)
-  - Não muda DNS do sistema como desktop
-  - Usuário configura manualmente em Settings
-- **Browsers:** `pm list packages` (sem acesso a perfis sem root)
-- **Extensões:** Instalação manual via store (Play Store, F-Droid)
-- **Limitações severas:** Sem root = sem controle total
-
----
-
-## 🎯 Arquitetura - Módulos Linux (MVP)
-
-### 1. Detecção de Distribuição
-Identifica se o sistema é Debian, Fedora ou Arch Linux através de:
-- `/etc/os-release`
-- `/etc/debian_version`, `/etc/fedora-release`, `/etc/arch-release`
-
-### 2. Troca de DNS do Sistema
-Configura DNS seguro (Cloudflare 1.1.1.1 for Families) de acordo com a distro:
-- **Debian/Ubuntu:** NetworkManager ou `/etc/resolv.conf` + resolvconf
-- **Fedora:** NetworkManager (nmcli)
-- **Arch:** systemd-resolved ou NetworkManager
-
-### 3. Detecção de Navegador
-Identifica navegadores instalados e sua base:
-- **Base Firefox:** Firefox, Firefox ESR, Librewolf, Waterfox
-- **Base Chromium:** Chromium, Google Chrome, Brave, Edge, Vivaldi, Opera
-
-### 4. Instalação de Extensões
-Instala adblocker apropriado:
-- **Firefox:** uBlock Origin (addon oficial)
-- **Chromium:** uBlock Origin Lite (Manifest V3)
-
----
-
-## 🛠️ Tecnologias Utilizadas
-
-- **Java 17** - Linguagem de programação
-- **Apache Ant** - Sistema de build (build.xml)
-- **Arquitetura modular** - Separação clara entre domínio, aplicação e interface
-
----
-
-## 📋 Compatibilidade e Matriz de Testes
-
-### Distribuições Linux Suportadas
-
-| Distribuição | Família | Status | Detecção | DNS | Navegadores | Extensões | Testado |
-|--------------|---------|--------|----------|-----|-------------|-----------|---------|
-| **Debian 11+** | Debian | ✅ Completo | ✅ | ✅ | ✅ | ✅ | ✅ |
-| **Ubuntu 20.04+** | Debian | ✅ Completo | ✅ | ✅ | ✅ | ✅ | ✅ |
-| **Big Linux** | Debian (baseado Ubuntu) | ✅ Completo | ✅ | ✅ | ✅ | ✅ | 🔧 A testar |
-| **Kali Linux** | Debian | ✅ Completo | ✅ | ✅ | ✅ | ✅ | 🔧 A testar |
-| **Fedora 38+** | Fedora | ✅ Completo | ✅ | ✅ | ✅ | ✅ | 🔧 A testar |
-| **Arch Linux** | Arch | ✅ Completo | ✅ | ✅ | ✅ | ✅ | 🔧 A testar |
-| **EndeavourOS** | Arch | ✅ Completo | ✅ | ✅ | ✅ | ✅ | 🔧 A testar |
-| **CachyOS** | Arch | ✅ Completo | ✅ | ✅ | ✅ | ✅ | 🔧 A testar |
-
-**Nota sobre distribuições:**
-- **Big Linux:** Baseado em Ubuntu, distribuição nacional brasileira - alvo prioritário público geral
-- **Kali Linux:** Baseado em Debian, caso extremo de segurança - não é proxy do Arch
-- **EndeavourOS/CachyOS:** Família Arch, alternativas populares ao Arch vanilla
-
-### Outras Plataformas
-
-| Sistema Operacional | Status | Notas |
-|---------------------|--------|-------|
-| **Windows 10/11**   | 🔧 Esboço | Instruções PowerShell manuais |
-| **macOS**           | ❌ Fora do escopo | Não planejado |
-| **Android/iOS**     | ❌ Fora do escopo | Não planejado |
-
-### Gerenciadores de Rede Suportados (Linux)
-
-- ✅ **NetworkManager** (nmcli) - Padrão Fedora, Ubuntu Desktop, Arch (instalável)
-- ✅ **systemd-resolved** (resolvectl) - Padrão Ubuntu moderno, Arch
-- ✅ **Netplan** - Ubuntu Server/Cloud moderno
-- ✅ **/etc/resolv.conf** (fallback manual) - Qualquer distro
-
----
-
-## 🧪 Matriz de Testes
-
-### Ambientes de Teste Recomendados
-
-O GuiaLar Digital foi projetado para ser testado em diferentes ambientes, cada um com suas vantagens:
-
-#### 1. Docker (Smoke Tests Rápidos)
-
-**Bom para:**
-- ✅ Smoke test do JAR Java
-- ✅ Detecção de pacotes instalados
-- ✅ Detecção de navegadores
-- ✅ Verificação de compilação
-
-**Limitações:**
-- ⚠️ Sem systemd completo por padrão
-- ⚠️ NetworkManager/systemd-resolved não funcionam completamente
-- ⚠️ Configuração DNS limitada
-
-**Exemplo Dockerfile:**
-```dockerfile
-FROM debian:12
-RUN apt-get update && apt-get install -y \
-    openjdk-17-jdk \
-    ant \
-    dnsutils \
-    firefox-esr \
-    chromium
-COPY . /app
-WORKDIR /app
-RUN ant jar
-CMD ["java", "-jar", "build/jar/guialar-digital.jar"]
-```
-
-#### 2. VM com systemd (QEMU/libvirt/VirtualBox)
-
-**Bom para:**
-- ✅ Testes completos de troca de DNS
-- ✅ NetworkManager funcional
-- ✅ systemd-resolved funcional
-- ✅ Ambiente mais fiel ao uso real
-- ✅ Testes de navegadores com interface gráfica
-
-**Recomendado para:**
-- Testes finais antes de release
-- Validação em distribuições específicas (Big Linux, EndeavourOS, etc.)
-- Testes de integração completa
-
-**Distribuições para teste prioritário:**
-1. **Ubuntu 24.04 LTS** (base comum)
-2. **Big Linux** (público brasileiro, baseado Ubuntu)
-3. **Fedora 40** (família RHEL)
-4. **EndeavourOS** ou **CachyOS** (família Arch user-friendly)
-5. **Kali Linux** (caso extremo de segurança)
-
-#### 3. Container com systemd
-
-**Exemplo docker-compose.yml:**
-```yaml
-version: '3'
-services:
-  debian-systemd:
-    image: debian:12
-    privileged: true
-    volumes:
-      - /sys/fs/cgroup:/sys/fs/cgroup:ro
-      - .:/app
-    command: /lib/systemd/systemd
-```
-
-**Bom para:**
-- ✅ systemd-resolved testável
-- ✅ Mais leve que VM
-- ✅ Automação de testes
-
-**Limitações:**
-- ⚠️ Requer modo privilegiado
-- ⚠️ NetworkManager pode ter limitações
-
-### Estratégia de Testes Sugerida
-
-```
-Fase 1: Desenvolvimento (Docker)
-├─ Smoke test Java/JAR
-├─ Detecção de distro
-└─ Detecção de navegadores
-
-Fase 2: Integração (VM ou container systemd)
-├─ Troca de DNS completa
-├─ NetworkManager
-├─ systemd-resolved
-└─ Netplan (Ubuntu)
-
-Fase 3: Validação (VM com GUI)
-├─ Big Linux (público brasileiro)
-├─ EndeavourOS/CachyOS (Arch-family)
-├─ Fedora (RHEL-family)
-└─ Kali (caso extremo)
-
-Fase 4: Testes de Campo
-└─ Usuários reais nas distros-alvo
-```
-
-### Comandos de Teste Rápido
-
-```bash
-# Fase 1: Docker smoke test
-docker build -t guialar-test .
-docker run guialar-test
-
-# Fase 2: VM ou container systemd
-# (criar VM com distro-alvo via virt-manager/VirtualBox)
-java -jar build/jar/guialar-digital.jar
-
-# Fase 3: Validação
-dig @1.1.1.3 malware.testcategory.com  # deve retornar 0.0.0.0
-dig @1.1.1.3 nudity.testcategory.com   # deve retornar 0.0.0.0
-```
-
----
-
-## 📝 Nota sobre Branding Futuro
-
-O projeto está atualmente nomeado **GuiaLar Digital**. Existe uma consideração futura de alinhamento ao ecossistema **Big Linux** (distribuição brasileira baseada em Ubuntu) com possíveis nomes como "Big Family" ou "Big Parental".
-
-**Status:** Apenas em consideração - nenhuma mudança de nome está planejada no momento.
-
----
-
----
-
-## ⚠️ ATENÇÃO: DNS-over-HTTPS (DoH) nos Navegadores
-
-### Problema Crítico
-
-**Se o navegador tem DNS Seguro/DoH habilitado, ele IGNORA completamente o DNS do sistema!**
-
-Isso significa que mesmo com o DNS do sistema configurado para Cloudflare Families, o navegador pode usar seu próprio DNS (geralmente o genérico do Cloudflare 1.1.1.1) que **NÃO bloqueia malware nem conteúdo adulto**.
-
-### Solução: Configure DoH para Cloudflare Families
-
-**Endpoint correto:** `https://family.cloudflare-dns.com/dns-query`
-
-**❌ NÃO USE:**
-- `https://dns.cloudflare.com/dns-query` (genérico, não bloqueia)
-- `https://cloudflare-dns.com/dns-query` (genérico, não bloqueia)
-
-**✅ USE:**
-- `https://family.cloudflare-dns.com/dns-query` (bloqueia malware + adulto)
-
-### Como Configurar
-
-#### Firefox
-1. Digite `about:preferences#general` na barra de endereços
-2. Role até "Configurações de Rede" e clique em "Configurações"
-3. Habilite "DNS sobre HTTPS"
-4. Selecione "Personalizado"
-5. Cole: `https://family.cloudflare-dns.com/dns-query`
-6. Clique em OK
-
-#### Chrome / Chromium / Edge / Brave
-1. Vá em Configurações → Privacidade e segurança → Segurança
-2. Role até "Usar DNS seguro"
-3. Habilite e selecione "Personalizado"
-4. Cole: `https://family.cloudflare-dns.com/dns-query`
-5. Salve as configurações
-
----
-
-## 🔒 Segurança e Privacidade
-
-### Fluxo de Autorização Obrigatório
-
-O GuiaLar Digital **NUNCA** executa mudanças silenciosamente:
-
-1. ✅ **Exibe plano de ações:** lista clara do que será feito
-2. ✅ **Solicita confirmação:** usuário deve autorizar explicitamente
-3. ✅ **Eleva privilégios:** usa sudo/polkit conforme necessário
-4. ✅ **Faz backup:** salva configurações antes de modificar
-5. ✅ **Mostra como reverter:** instruções claras de reversão
-
-### Proteções Implementadas
-
-- **Sem coleta de dados:** O programa não envia informações para servidores externos
-- **Código aberto:** Todas as regras e operações são transparentes e auditáveis
-- **DNS seguro:** Cloudflare 1.1.1.1 for Families (1.1.1.3 / 1.0.0.3)
-  - Bloqueia malware
-  - Bloqueia conteúdo adulto (18+)
-  - Não coleta histórico de navegação
-- **Adblocker:** uBlock Origin / uBlock Origin Lite
-  - Proteção contra rastreadores
-  - Bloqueio de anúncios invasivos
-
-### Limitações Conhecidas e Contornos
-
-⚠️ **IMPORTANTE:** O DNS do sistema pode ser ignorado por:
-
-#### 1. VPN Ativa
-Conexões VPN podem usar DNS próprio e sobrescrever as configurações do sistema.
-
-#### 2. Docker
-Containers podem ter configuração DNS separada.
-
-#### 3. DNS-over-HTTPS (DoH) nos Navegadores ⚠️ **CRÍTICO**
-
-**Problema:** Se o navegador usa DNS seguro/DoH, ele **ignora completamente** o DNS do sistema, furando o filtro.
-
-**Solução:** Configure DoH do navegador para usar **Cloudflare Families via DoH:**
-
-**Firefox:**
-1. Vá em `about:preferences#general`
-2. Role até "Configurações de Rede" → Configurações
-3. Habilite "DNS sobre HTTPS"
-4. Escolha "Personalizado" e insira:
-   ```
-   https://family.cloudflare-dns.com/dns-query
-   ```
-   ⚠️ **NÃO use** `https://cloudflare-dns.com/dns-query` (genérico 1.1.1.1)
-
-**Chrome/Chromium/Edge/Brave:**
-1. Vá em Configurações → Privacidade e segurança → Segurança
-2. Habilite "Usar DNS seguro"
-3. Escolha "Personalizado" e insira:
-   ```
-   https://family.cloudflare-dns.com/dns-query
-   ```
-   ⚠️ **NÃO use** `https://dns.cloudflare.com/dns-query` (genérico 1.1.1.1)
-
-**Por que isso é importante:**
-- DoH genérico do Cloudflare (1.1.1.1) **NÃO bloqueia** malware nem conteúdo adulto
-- Families DoH (`family.cloudflare-dns.com`) mantém a proteção mesmo com DoH ativo
-
-**Recomendação:** Sempre configure DoH do navegador para `family.cloudflare-dns.com/dns-query` para proteção completa.
-
----
-
-## 📝 Escopo do Projeto
-
-### MVP COMPLETO (Linux):
-- ✅ Suporte a Debian, Fedora e Arch Linux
-- ✅ Detecção automática de distribuição e gerenciador de rede
-- ✅ Configuração de DNS (IPv4 + IPv6) para Cloudflare Families
-- ✅ Backup automático antes de modificar configurações
-- ✅ Detecção de navegadores Firefox e Chromium (incluindo variantes)
-- ✅ Instalação de uBlock Origin (Firefox) e uBlock Origin Lite (Chromium)
-- ✅ Plano de ações transparente + autorização explícita
-- ✅ Smoke tests (dig / testcategory.com)
-- ✅ Instruções de reversão
-
-### ESBOÇO INICIAL (Windows):
-- 🔧 Interface para detecção de Windows
-- 🔧 Estrutura para PowerShell (Set-DnsClientServerAddress)
-- 🔧 Notas sobre DoH no Edge/Chrome
-- 🔧 Implementação mínima (não bloqueia MVP Linux)
-
-### FORA DO ESCOPO (por decisão do projeto):
-- ❌ macOS
-- ❌ Android/iOS
-- ❌ Interface gráfica (GUI) - apenas CLI
-- ❌ Controle parental invasivo
-- ❌ Coleta de histórico de navegação
-- ❌ Outras distribuições Linux além da "trindade sagrada"
-
----
-
-## 🤝 Contribuindo
-
-Este é um projeto acadêmico. Sugestões e melhorias são bem-vindas através de issues e pull requests.
-
----
-
-## 📄 Licença
-
-Projeto acadêmico desenvolvido para Projetos Integrados I - Uniube (2026/2)
-
+Projeto acadêmico: **Projetos Integrados I** (GuiaLar Digital).
