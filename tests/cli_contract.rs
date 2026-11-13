@@ -5,6 +5,10 @@ use std::process::Command;
 fn bin() -> Command {
     let mut c = Command::new(env!("CARGO_BIN_EXE_guialar"));
     c.env("GUIALAR_NO_INTEGRATION", "1");
+    // Nenhum teste de contrato pode abrir a janela. No Linux tirar o DISPLAY basta; no Windows
+    // `gui_available()` é sempre verdadeiro, e sem isto `default_command_is_status` e
+    // `gui_without_display_fails_cleanly` ficavam esperando a janela para sempre (CI travada).
+    c.env("GUIALAR_NO_GUI", "1");
     c
 }
 
