@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.1 — 2026-11-13
+
+### Windows
+- O `.exe` da 0.3.0 não abria em Windows sem o pacote Visual C++ instalado (erro «VCRUNTIME140.dll não encontrado»). Agora a biblioteca do C vai embutida no `.exe`, e a CI recusa publicar um `.exe` que dependa dela.
+- Nenhuma mudança de comportamento. O AppImage do Linux é o mesmo código da 0.3.0.
+
 ## 0.3.0 — 2026-11-13
 
 Primeira versão pública em Rust. Substitui o Java na `main`. O Java permanece na branch `legacy` e na tag `java-final` (a tag será criada na publicação).
