@@ -977,6 +977,10 @@ impl DnsBackend for DirectBackend<'_> {
                 .read_file("/etc/resolv.conf")
                 .context("Não consegui ler /etc/resolv.conf; nada foi alterado")?;
             m.previous_resolv_conf = Some(atual);
+        } else {
+            // Sem arquivo não há o que restaurar: o desfazer (restore com None) não faria nada
+            // e o filtro ficaria sem registro. Recusa antes de alterar qualquer coisa.
+            bail!("/etc/resolv.conf ausente; nada foi alterado");
         }
         Ok(())
     }

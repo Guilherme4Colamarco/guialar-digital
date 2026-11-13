@@ -1620,3 +1620,23 @@ fn nm_inspect_ipv4_com_nmcli_saindo_1_falha_e_nada_e_trocado() {
     );
     assert!(!s.manifest_path().exists(), "sem registro");
 }
+
+#[test]
+fn direto_sem_resolv_conf_recusa_antes_de_alterar() {
+    let s = Sandbox::new("direct-b3");
+    let r = FakeRunner::new(); // nenhum /etc/resolv.conf
+    let e = format!(
+        "{:#}",
+        DirectBackend(&r)
+            .inspect(&mut DnsStateManifest::new(BackendKind::DirectResolvConf))
+            .unwrap_err()
+    );
+    assert!(
+        e.contains("/etc/resolv.conf ausente") && e.contains("nada foi alterado"),
+        "{e}"
+    );
+    let antes = r.state();
+    assert!(r.argvs().is_empty(), "nada executado: {:?}", r.argvs());
+    assert_eq!(r.state(), antes);
+    assert!(!s.manifest_path().exists());
+}
