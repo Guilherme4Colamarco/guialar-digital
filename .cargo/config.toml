@@ -1,0 +1,4 @@
+# Windows MSVC: liga o CRT estatico para o .exe nao depender de VCRUNTIME140.dll
+# nem de api-ms-win-crt-* (Windows limpo nao tem o redistribuivel). Nao afeta gnu/linux.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

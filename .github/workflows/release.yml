@@ -131,6 +131,9 @@ jobs:
         run: |
           mkdir -p dist
           cp target/release/guialar.exe "dist/guialar-${VERSION}-windows.exe"
+      - name: Guarda - exe sem CRT dinamico (VCRUNTIME/MSVCP/api-ms-win-crt)
+        shell: bash
+        run: bash scripts/check-pe-imports.sh "dist/guialar-${{ needs.meta.outputs.version }}-windows.exe"
       - uses: actions/upload-artifact@v4
         with:
           name: windows-exe
