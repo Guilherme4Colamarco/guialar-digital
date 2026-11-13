@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GuiaLar Digital: proteção de navegação por DNS filtrado</title>
+<meta name="description" content="Programa livre para Linux e Windows que ativa um DNS filtrado contra malware e conteúdo adulto, ou só contra anúncios, e desfaz tudo com um clique.">
+<meta name="referrer" content="no-referrer">
+<style>
+:root{--bg:#121417;--card:#1c1f24;--txt:#e8eaed;--mut:#a7adb5;--acc:#2bb5a0;--brd:#2c3036}
+@media (prefers-color-scheme:light){:root{--bg:#f6f7f9;--card:#fff;--txt:#1b1d21;--mut:#555b63;--acc:#0e8a77;--brd:#dde1e6}}
+*{box-sizing:border-box}body{margin:0;font:16px/1.6 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;background:var(--bg);color:var(--txt)}
+main{max-width:860px;margin:0 auto;padding:40px 20px 64px}
+header{display:flex;gap:16px;align-items:center}
+h1{margin:0;font-size:2rem}h2{margin-top:44px;font-size:1.35rem}
+.sub{margin:4px 0 0;color:var(--mut)}
+a{color:var(--acc)}
+.btns{display:flex;flex-wrap:wrap;gap:12px;margin:28px 0 8px}
+.btn{display:inline-block;padding:12px 18px;border-radius:10px;background:var(--acc);color:#fff;text-decoration:none;font-weight:600}
+.btn.sec{background:transparent;color:var(--acc);border:1px solid var(--acc)}
+.small{font-size:.9rem;color:var(--mut)}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:16px}
+.card{background:var(--card);border:1px solid var(--brd);border-radius:12px;padding:18px}
+.card h3{margin:0 0 6px;font-size:1.05rem}
+code,pre{font-family:ui-monospace,"Cascadia Code",Menlo,monospace;font-size:.9em}
+pre{background:var(--card);border:1px solid var(--brd);border-radius:10px;padding:14px;overflow:auto}
+table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:8px;border-bottom:1px solid var(--brd);vertical-align:top}
+.note{border-left:4px solid var(--acc);padding:8px 14px;background:var(--card);border-radius:0 10px 10px 0}
+footer{margin-top:56px;color:var(--mut);font-size:.9rem}
+</style>
+</head>
+<body>
+<main>
+<header>
+<svg width="56" height="56" viewBox="0 0 64 64" aria-hidden="true"><path d="M32 4 8 13v17c0 15 10 26 24 30 14-4 24-15 24-30V13Z" fill="#0e7c6b"/><path d="m21 32 8 8 15-16" fill="none" stroke="#fff" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+<div><h1>GuiaLar Digital</h1><p class="sub">Segurança familiar e proteção de navegação, para Linux e Windows.</p></div>
+</header>
+
+<p>O GuiaLar troca o DNS do computador por um <strong>DNS filtrado</strong>, que bloqueia sites perigosos e adultos, ou só anúncios e rastreadores. Ele mostra o que vai mudar antes de mudar e <strong>desfaz tudo</strong> com um clique. Não coleta histórico e não envia nada para o desenvolvedor.</p>
+
+<div class="btns">
+<a class="btn" href="https://github.com/Guilherme4Colamarco/guialar-digital/releases/latest">Baixar a versão mais recente</a>
+<a class="btn sec" href="https://github.com/Guilherme4Colamarco/guialar-digital">Código-fonte</a>
+</div>
+<p class="small">AppImage para Linux e <code>.exe</code> para Windows. Arquivo único, nada para instalar. Confira o download pelo arquivo <code>SHA256SUMS</code> da mesma página.</p>
+
+<h2>Dois modos</h2>
+<table>
+<tr><th>Modo</th><th>O que bloqueia</th><th>DNS usado</th></tr>
+<tr><td><strong>Proteção familiar</strong> (padrão)</td><td>Malware e conteúdo adulto</td><td>Cloudflare for Families (<code>1.1.1.3</code> / <code>1.0.0.3</code>)</td></tr>
+<tr><td><strong>Só bloquear anúncios</strong></td><td>Anúncios e rastreadores</td><td>AdGuard DNS Padrão (<code>94.140.14.14</code> / <code>94.140.15.15</code>)</td></tr>
+</table>
+<p>No modo familiar, o Windows também recebe um bloqueador de anúncios nos navegadores: uBlock Origin Lite no Chrome, no Edge e no Brave, e uBlock Origin no Firefox. No Linux, esse passo abre a página da extensão na loja de cada navegador.</p>
+
+<h2>Como usar</h2>
+<div class="grid">
+<div class="card"><h3>1. Abra</h3>No Linux: <code>chmod +x guialar-*.AppImage</code> e execute. No Windows: execute o <code>.exe</code>.</div>
+<div class="card"><h3>2. Escolha e proteja</h3>Escolha o modo e clique em <strong>Proteger este computador</strong>. A janela mostra o DNS de agora e o novo, e pede confirmação.</div>
+<div class="card"><h3>3. Confira ou desfaça</h3><strong>Verificar</strong> testa se o bloqueio está respondendo. <strong>Desativar proteção</strong> devolve o DNS que você tinha antes.</div>
+</div>
+<p>Para ativar ou desativar, o sistema pede a senha de administrador (polkit ou <code>sudo</code> no Linux, UAC no Windows). Também dá para usar pelo terminal:</p>
+<pre>guialar status            # estado e filtro ativo
+guialar apply             # proteção familiar
+guialar apply --mode ads  # só anúncios
+guialar revert            # volta ao DNS de antes</pre>
+
+<h2>Transparente e reversível</h2>
+<div class="grid">
+<div class="card"><h3>Sem coleta</h3>Sem telemetria e sem histórico de navegação. O único registro guardado (<code>state.json</code>) tem os endereços de DNS e os nomes das conexões, para poder desfazer.</div>
+<div class="card"><h3>Você vê o que muda</h3>Antes de qualquer mudança, a janela mostra o DNS atual e o novo. «Protegido» só aparece quando o DNS é o do modo escolhido e o teste de bloqueio responde.</div>
+<div class="card"><h3>Código aberto</h3>Licença MIT ou Apache-2.0. As decisões de projeto estão documentadas no repositório (pasta <code>docs/adr</code>).</div>
+</div>
+
+<h2>Limites, sem letra miúda</h2>
+<ul>
+<li>O filtro age por <strong>domínio</strong>. Ele não pega anúncio servido pelo mesmo domínio do site, nem navegador ou app com DNS próprio (DoH), nem tráfego que sai por VPN.</li>
+<li>No Windows, o <code>.exe</code> ainda <strong>não é assinado</strong>, então o SmartScreen pode mostrar «editor desconhecido».</li>
+<li>Um Firefox instalado só para o seu usuário não recebe a política do bloqueador. Instale o uBlock Origin pela <a href="https://addons.mozilla.org/pt-BR/firefox/addon/ublock-origin/">página do Firefox</a>.</li>
+<li><strong>Desative a proteção antes de apagar o programa</strong>, para o DNS voltar ao que era.</li>
+</ul>
+
+<h2>Requisitos</h2>
+<p><strong>Linux:</strong> NetworkManager, systemd-resolved ou runit/resolvconf; GTK 4 e Libadwaita para a janela (sem eles, funciona pelo terminal); glibc 2.34 ou mais nova. <strong>Windows:</strong> 10 ou 11, com PowerShell 5.1 ou mais novo.</p>
+
+<p class="note">Vindo da versão beta? O AppImage antigo podia deixar uma pasta <code>/tmp/appimage_extracted_*</code>. Para apagar: <code>sudo rm -rf /tmp/appimage_extracted_*</code>.</p>
+
+<footer>
+GuiaLar Digital, projeto acadêmico de <strong>Projetos Integrados I</strong>, por Guilherme Amaral Colamarco Resende de Melo. Esta página não usa cookies, scripts nem rastreadores.
+</footer>
+</main>
+</body>
+</html>
