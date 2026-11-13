@@ -1,8 +1,10 @@
 # Changelog
 
-## 0.3.0 — a definir (data da tag)
+## 0.3.0 — 2026-11-13
 
 Primeira versão pública em Rust. Substitui o Java na `main`. O Java permanece na branch `legacy` e na tag `java-final` (a tag será criada na publicação).
+
+> **Vindo da beta?** O AppImage antigo da beta extraía uma cópia como root em `/tmp/appimage_extracted_<código>`. A 0.3.0 não faz mais isso, mas a sobra antiga pode continuar lá até reiniciar. Para apagar agora: `sudo rm -rf /tmp/appimage_extracted_*`.
 
 ### Proteção
 - Dois modos de filtro DNS: **Proteção familiar** (Cloudflare for Families `1.1.1.3` / `1.0.0.3`) e **Só bloquear anúncios** (AdGuard DNS Padrão `94.140.14.14` / `94.140.15.15`).
