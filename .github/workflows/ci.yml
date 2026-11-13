@@ -107,6 +107,9 @@ jobs:
         run: cargo test --locked
       - name: Build release
         run: cargo build --locked --release
+      - name: Guarda - exe sem CRT dinamico (VCRUNTIME/MSVCP/api-ms-win-crt)
+        shell: bash
+        run: bash scripts/check-pe-imports.sh target/release/guialar.exe
       - uses: actions/upload-artifact@v4
         with:
           name: guialar-windows
@@ -184,6 +187,10 @@ jobs:
       - name: Build release Windows
         if: runner.os == 'Windows'
         run: cargo build --locked --release
+      - name: Guarda - exe sem CRT dinamico (VCRUNTIME/MSVCP/api-ms-win-crt)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: bash scripts/check-pe-imports.sh target/release/guialar.exe
 
       - name: E2E Windows (runner admin)
         if: runner.os == 'Windows'
