@@ -1,5 +1,10 @@
 # Changelog
 
+## Não lançado
+
+### Windows
+- Segurança: `reg`, `powershell`, `ipconfig`, `cmd` e `clip` passam a ser chamados pelo caminho completo da pasta do sistema (lida pela API, não por variável de ambiente). Antes eram chamados só pelo nome, e o Windows procura primeiro na pasta do próprio programa: um `reg.exe` deixado ao lado do `guialar.exe` era executado pelo processo elevado. Medido na 0.3.1 numa VM Windows 11 com `setup --mode family`. A correção ainda não foi executada no Windows de verdade (só compila e passa no lint para o alvo Windows).
+
 ## 0.3.1 — 2026-11-13
 
 ### Windows

@@ -495,6 +495,11 @@ extern "system" {
 
 #[link(name = "kernel32")]
 extern "system" {
+    pub fn GetSystemDirectoryW(buffer: *mut u16, size: u32) -> u32;
+}
+
+#[link(name = "kernel32")]
+extern "system" {
     pub fn CreateDirectoryW(path: *const u16, sa: *const SECURITY_ATTRIBUTES) -> i32;
     pub fn LocalFree(h: *mut c_void) -> *mut c_void;
 }

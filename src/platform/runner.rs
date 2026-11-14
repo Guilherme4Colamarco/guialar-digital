@@ -170,6 +170,11 @@ pub struct RealRunner;
 
 impl CommandRunner for RealRunner {
     fn run(&self, cmd: &Cmd) -> io::Result<Outcome> {
+        // Windows: `powershell` e `ipconfig` pelo caminho completo da pasta do sistema, para
+        // o processo elevado não rodar um homônimo deixado na pasta do programa.
+        #[cfg(windows)]
+        let mut c = Command::new(crate::sysutil::system_tool(&cmd.program));
+        #[cfg(not(windows))]
         let mut c = Command::new(&cmd.program);
         c.args(&cmd.args);
         #[cfg(windows)]

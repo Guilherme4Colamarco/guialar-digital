@@ -52,7 +52,9 @@ pub fn detect_browsers() -> Vec<BrowserInfo> {
 pub fn open_extension_page(url: &str) -> std::io::Result<()> {
     #[cfg(target_os = "windows")]
     {
-        Command::new("cmd").args(["/C", "start", url]).spawn()?;
+        Command::new(crate::sysutil::system_tool("cmd"))
+            .args(["/C", "start", url])
+            .spawn()?;
     }
 
     #[cfg(target_os = "linux")]
