@@ -41,9 +41,9 @@ pub fn plan_apply(
     }
 }
 
-/// Primeiro passo de todo `apply`: olha o manifesto e decide. É a ÚNICA decisão: a linha de
-/// comando, a janela e o processo elevado a consultam (`next_apply_step`) e só diferem no que
-/// mostram.
+/// Primeiro passo de todo «proteger»: olha o manifesto e decide. É a ÚNICA decisão; quem a
+/// executa é `crate::protection::protect`, usado pela linha de comando, pela janela e pelo
+/// processo elevado.
 pub enum ApplyStep {
     /// Já protegido com o DNS do modo: nada a fazer.
     AlreadyActive,
@@ -79,88 +79,10 @@ pub fn next_apply_step(configured: impl FnOnce() -> Vec<std::net::IpAddr>) -> Re
     Ok(ApplyStep::Switch(m))
 }
 
-/// O que um `apply` faria agora (lê o manifesto e o DNS; não altera nada).
-pub fn plan_now() -> Result<ApplyStep> {
-    next_apply_step(configured_dns)
-}
-
-fn notice_already_active() {
-    println!("ℹ️  A proteção já está ativa. Use 'guialar revert' antes de aplicar de novo.");
-}
-
-pub fn apply_dns() -> Result<()> {
-    let _guard = crate::sysutil::guard_operation()?;
-    // Idempotente: um segundo `apply` regravaria o manifesto com o DNS já da Cloudflare
-    // como "original" e o `revert` nunca restauraria o DNS verdadeiro.
-    match plan_now()? {
-        ApplyStep::AlreadyActive => {
-            notice_already_active();
-            return Ok(());
-        }
-        ApplyStep::Switch(m) => return switch_mode(m), // mantém o DNS original do manifesto
-        ApplyStep::Fresh | ApplyStep::Stale => {}
-    }
-    #[cfg(target_os = "linux")]
-    {
-        linux::apply_dns()
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        windows::apply_dns()
-    }
-
-    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
-    {
-        anyhow::bail!("Sistema operacional não suportado nativamente pelo GuiaLar");
-    }
-}
-
-pub fn revert_dns(manifest: &DnsStateManifest) -> Result<()> {
-    let _guard = crate::sysutil::guard_operation()?;
-    #[cfg(target_os = "linux")]
-    {
-        linux::revert_dns(manifest)
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        windows::revert_dns(manifest)
-    }
-
-    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
-    {
-        let _ = manifest;
-        anyhow::bail!("Sistema operacional não suportado nativamente pelo GuiaLar");
-    }
-}
-
 /// Windows: reabre como administrador (UAC) para `subcomando`. `true` = já executado lá.
 #[cfg(target_os = "windows")]
 pub fn elevate_if_needed(subcomando: &str) -> Result<bool> {
     windows::elevate_if_needed(subcomando)
-}
-
-/// Windows: DNS + políticas dos navegadores numa **única** elevação (um só UAC).
-/// Linux: só o DNS (o bloqueador é um passo separado, "Proteger navegadores").
-pub fn apply_all() -> Result<()> {
-    let _guard = crate::sysutil::guard_operation()?;
-    match plan_now()? {
-        ApplyStep::AlreadyActive => {
-            notice_already_active();
-            return Ok(());
-        }
-        ApplyStep::Switch(m) => return switch_mode(m),
-        ApplyStep::Fresh | ApplyStep::Stale => {}
-    }
-    #[cfg(target_os = "windows")]
-    {
-        windows::apply_all()
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        apply_dns()
-    }
 }
 
 /// Algum DNS em uso é o filtro do GuiaLar? (para recuperar sem manifesto). Usa a mesma leitura
@@ -169,86 +91,89 @@ pub fn filter_dns_in_use() -> bool {
     configured_dns().iter().any(crate::config::is_filter_ip)
 }
 
-/// Desliga a proteção. Cobre manifesto normal, ausente e corrompido (nunca deixa o
-/// DNS preso no filtro). Devolve a mensagem final; quem chama só a exibe.
-pub fn revert_protection() -> Result<String> {
-    match DnsStateManifest::load() {
-        Ok(Some(manifest)) => {
-            println!("🔄 Restaurando configurações originais de DNS...");
-            revert_dns(&manifest)?;
-            Ok("Configurações de DNS restauradas com sucesso para o estado anterior.".into())
-        }
-        Ok(None) => {
-            if filter_dns_in_use() {
-                println!("🔄 O DNS ainda usa o filtro, mas não há registro: voltando ao padrão da rede...");
-                revert_dns_fallback()?;
-                return Ok("DNS restaurado para o padrão da rede.".into());
-            }
-            #[cfg(windows)]
-            {
-                // Sem DNS para reverter, mas ainda pode haver políticas do uBlock.
-                if elevate_if_needed("internal-revert")? {
-                    return Ok(
-                        "Nenhum manifesto de proteção ativo encontrado para reverter.".into(),
-                    );
-                }
-                crate::policy::revert_all()?;
-            }
-            Ok("Nenhum manifesto de proteção ativo encontrado para reverter.".into())
-        }
-        // Falha de E/S ao LER (arquivo aberto por outro programa): o registro pode estar
-        // perfeito. Não o apaga nem cai no fallback; avisa e para sem alterar nada.
-        Err(e) if crate::statedir::is_state_io_error(&e) => {
-            eprintln!(
-                "⚠️  {e:#}. Nada foi alterado; feche o programa que mantém o registro aberto e rode o desfazer de novo."
-            );
-            Err(e)
-        }
-        Err(_) => {
-            println!(
-                "⚠️  O registro da proteção está danificado: voltando o DNS ao padrão da rede..."
-            );
-            if let Ok(path) = DnsStateManifest::file_path() {
-                let _ = std::fs::remove_file(path);
-            }
-            revert_dns_fallback()?;
-            Ok("O registro estava danificado. DNS restaurado para o padrão da rede.".into())
-        }
-    }
-}
+/// O sistema de verdade por trás das operações de proteção (`crate::protection`). É o único
+/// lugar que escolhe o backend por SO; cada método eleva sozinho quando precisa.
+pub struct System;
 
-/// Reversão de emergência: sem manifesto utilizável, volta o DNS ao automático.
-pub fn revert_dns_fallback() -> Result<()> {
-    let _guard = crate::sysutil::guard_operation()?;
-    #[cfg(target_os = "linux")]
-    {
+#[cfg(target_os = "linux")]
+impl crate::protection::Engine for System {
+    fn configured_dns(&self) -> Vec<std::net::IpAddr> {
+        configured_dns()
+    }
+    /// No Linux o bloqueador dos navegadores é um passo à parte (abre a loja), fora da elevação.
+    fn apply(&self, _with_browsers: bool) -> Result<()> {
+        linux::apply_dns()
+    }
+    fn switch(&self, record: DnsStateManifest) -> Result<()> {
+        linux::switch_mode(record)
+    }
+    fn revert(&self, record: &DnsStateManifest) -> Result<()> {
+        linux::revert_dns(record)
+    }
+    fn revert_without_record(&self) -> Result<()> {
         linux::revert_dns_fallback()
     }
-    #[cfg(target_os = "windows")]
-    {
-        windows::revert_dns_fallback()
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
-    {
-        anyhow::bail!("Sistema operacional não suportado nativamente pelo GuiaLar");
+    fn revert_browsers_only(&self) -> Result<()> {
+        Ok(())
     }
 }
 
-/// Troca o filtro com a proteção ligada, sem perder o DNS original.
-fn switch_mode(manifest: DnsStateManifest) -> Result<()> {
-    #[cfg(target_os = "linux")]
-    {
-        linux::switch_mode(manifest)
+#[cfg(target_os = "windows")]
+impl crate::protection::Engine for System {
+    fn configured_dns(&self) -> Vec<std::net::IpAddr> {
+        configured_dns()
     }
-    #[cfg(target_os = "windows")]
-    {
-        windows::switch_mode(manifest)
+    /// `with_browsers`: DNS e políticas dos navegadores numa única elevação (um só UAC).
+    fn apply(&self, with_browsers: bool) -> Result<()> {
+        if with_browsers {
+            windows::apply_all()
+        } else {
+            windows::apply_dns()
+        }
     }
-    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
-    {
-        let _ = manifest;
-        anyhow::bail!("Sistema operacional não suportado nativamente pelo GuiaLar");
+    fn switch(&self, record: DnsStateManifest) -> Result<()> {
+        windows::switch_mode(record)
     }
+    fn revert(&self, record: &DnsStateManifest) -> Result<()> {
+        windows::revert_dns(record)
+    }
+    fn revert_without_record(&self) -> Result<()> {
+        windows::revert_dns_fallback()
+    }
+    /// Sem DNS para reverter, ainda pode haver políticas do bloqueador.
+    fn revert_browsers_only(&self) -> Result<()> {
+        if windows::elevate_if_needed("internal-revert")? {
+            return Ok(());
+        }
+        crate::policy::revert_all()
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+impl crate::protection::Engine for System {
+    fn configured_dns(&self) -> Vec<std::net::IpAddr> {
+        Vec::new()
+    }
+    fn apply(&self, _with_browsers: bool) -> Result<()> {
+        unsupported()
+    }
+    fn switch(&self, _record: DnsStateManifest) -> Result<()> {
+        unsupported()
+    }
+    fn revert(&self, _record: &DnsStateManifest) -> Result<()> {
+        unsupported()
+    }
+    fn revert_without_record(&self) -> Result<()> {
+        unsupported()
+    }
+    fn revert_browsers_only(&self) -> Result<()> {
+        unsupported()
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+fn unsupported() -> Result<()> {
+    anyhow::bail!("Sistema operacional não suportado nativamente pelo GuiaLar")
 }
 
 /// DNS efetivamente configurados na máquina (IPv4 e IPv6, inclusive stubs locais; quem

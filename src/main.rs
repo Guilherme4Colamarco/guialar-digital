@@ -9,6 +9,7 @@ mod config;
 mod integration;
 mod platform;
 mod policy;
+mod protection;
 mod safefs;
 mod statedir;
 mod sysutil;
@@ -267,65 +268,62 @@ fn handle_apply() -> anyhow::Result<()> {
 
 /// `with_browsers`: no Windows faz DNS + navegadores com um único UAC.
 fn apply_flow(with_browsers: bool) -> anyhow::Result<()> {
-    let _guard = sysutil::guard_operation()?;
-    // a decisão é a da plataforma (a mesma que o processo elevado vai tomar)
-    match platform::plan_now()? {
-        platform::ApplyStep::AlreadyActive => {
-            println!(
-                "ℹ️  A proteção já está ativa. Use 'guialar revert' antes de aplicar de novo."
-            );
-            return Ok(());
+    use protection::Protected;
+    let mode = config::current_mode();
+    let outcome = protection::protect(mode, with_browsers, |plano| {
+        match plano {
+            Protected::AlreadyActive => return,
+            Protected::SwitchedMode { .. } => {
+                println!("🔁 Trocando o filtro para: {}", mode.label());
+            }
+            Protected::Reapplied => {
+                println!("🔁 O DNS deste computador não é o do GuiaLar: reaplicando o filtro...");
+            }
+            Protected::ReplacedStaleRecord => {
+                println!("ℹ️  O registro anterior não corresponde ao DNS em uso (a proteção estava desligada): aplicando do zero.");
+            }
+            Protected::Fresh => {}
         }
-        platform::ApplyStep::Switch(m) if m.mode != config::current_mode() => {
-            println!(
-                "🔁 Trocando o filtro para: {}",
-                config::current_mode().label()
-            );
-        }
-        platform::ApplyStep::Switch(_) => {
-            println!("🔁 O DNS deste computador não é o do GuiaLar: reaplicando o filtro...");
-        }
-        platform::ApplyStep::Stale => {
-            println!("ℹ️  O registro anterior não corresponde ao DNS em uso (a proteção estava desligada): aplicando do zero.");
-        }
-        platform::ApplyStep::Fresh => {}
+        println!("⚙️  Aplicando \"{}\" no sistema...", mode.label());
+    })?;
+    if outcome == Protected::AlreadyActive {
+        println!("ℹ️  A proteção já está ativa. Use 'guialar revert' antes de aplicar de novo.");
+        return Ok(());
     }
-    println!(
-        "⚙️  Aplicando \"{}\" no sistema...",
-        config::current_mode().label()
-    );
-    if with_browsers {
-        platform::apply_all()?;
-    } else {
-        platform::apply_dns()?;
-    }
-    println!("✅ {} ativada com sucesso!", config::current_mode().label());
-    println!("🔍 Validando conexão com smoke test...");
-
+    println!("🔍 Conferindo se o filtro está respondendo...");
+    // «Ativada» só depois de conferida: DNS gravado sem filtro respondendo não é sucesso.
     match verify::check_status() {
         ProtectionStatus::Protected => {
-            println!("🎉 Conexão validada: A rede já está navegando com o filtro ativo.");
+            println!("✅ {} ativada e conferida: a rede já navega com o filtro.", mode.label());
+            Ok(())
         }
-        ProtectionStatus::PartiallyConfigured(msg) => {
-            eprintln!("⚠️  Aviso pós-aplicação: {}", msg);
-        }
-        ProtectionStatus::Unprotected => {
-            eprintln!("⚠️  O DNS foi gravado, mas a verificação direta ainda reporta estado não protegido.");
-        }
+        ProtectionStatus::PartiallyConfigured(msg) => anyhow::bail!(
+            "o DNS do filtro foi gravado, mas a proteção não está completa: {msg}"
+        ),
+        ProtectionStatus::Unprotected => anyhow::bail!(
+            "o DNS do filtro foi gravado, mas a verificação ainda mostra este computador sem proteção. Rode 'guialar status' para ver o motivo"
+        ),
     }
-
-    Ok(())
 }
 
 fn handle_revert() -> anyhow::Result<()> {
-    let _guard = sysutil::guard_operation()?;
-    let msg = platform::revert_protection()?;
-    let icone = if msg.starts_with("Nenhum") {
-        "ℹ️ "
-    } else {
-        "✅"
+    use protection::Unprotected;
+    println!("🔄 Desfazendo a proteção...");
+    let linha = match protection::unprotect()? {
+        Unprotected::Restored => {
+            "✅ Configurações de DNS restauradas com sucesso para o estado anterior."
+        }
+        Unprotected::NothingToUndo => {
+            "ℹ️  Nenhum manifesto de proteção ativo encontrado para reverter."
+        }
+        Unprotected::ResetWithoutRecord => {
+            "✅ O DNS ainda usava o filtro, mas não havia registro: DNS restaurado para o padrão da rede."
+        }
+        Unprotected::ResetCorruptRecord => {
+            "✅ O registro estava danificado. DNS restaurado para o padrão da rede."
+        }
     };
-    println!("{icone} {msg}");
+    println!("{linha}");
     Ok(())
 }
 
@@ -381,19 +379,19 @@ fn open_store_pages(install_all: bool) -> anyhow::Result<()> {
 fn handle_internal_setup() -> anyhow::Result<()> {
     sysutil::require_privileged()?;
     let _lock = sysutil::OpLock::acquire()?;
-    platform::apply_all()
+    protection::protect(config::current_mode(), true, |_| {}).map(|_| ())
 }
 
 fn handle_internal_apply() -> anyhow::Result<()> {
     sysutil::require_privileged()?;
     let _lock = sysutil::OpLock::acquire()?;
-    platform::apply_dns()
+    protection::protect(config::current_mode(), false, |_| {}).map(|_| ())
 }
 
 fn handle_internal_revert() -> anyhow::Result<()> {
     sysutil::require_privileged()?;
     let _lock = sysutil::OpLock::acquire()?;
-    platform::revert_protection().map(|_| ())
+    protection::unprotect().map(|_| ())
 }
 
 #[cfg(test)]

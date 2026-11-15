@@ -4,6 +4,10 @@
 
 > **Ainda na beta (`beta-06af688`)?** Desative a proteção com a 0.3.x **antes** de atualizar. A 0.4.0 não lê mais o registro que a beta guardava na pasta pessoal: sem ele, o desfazer devolve o DNS ao automático da rede, e um DNS fixo que você tinha configurado precisa ser colocado de novo.
 
+### Mudou
+- `guialar apply` e `guialar setup` só dizem «ativada» depois de conferir que o filtro responde, e saem com código 1 quando o DNS foi gravado mas a proteção não ficou completa. Antes imprimiam «ativada com sucesso» e saíam com 0 mesmo assim.
+- Proteger, trocar de modo e desfazer passam por um módulo só (`src/protection.rs`), usado pela linha de comando, pelas janelas e pelo processo elevado. O resultado é um tipo, não um texto: a janela deixou de reler o registro por conta própria para saber se estava danificado.
+
 ### Removido
 - Migração do registro da beta (pasta pessoal), como previsto na ADR-031. Com ela saem a leitura sem seguir links na área do usuário no Linux e a identificação do usuário por trás do `sudo`/`pkexec`, que só a migração usava. O processo elevado não lê mais nada que um usuário comum controle no Linux.
 - Prefixo de elevação por comando (`sudo`/`pkexec` na frente de cada `nmcli`, `tee`...): desde que o programa passou a se reexecutar elevado uma única vez, o prefixo era sempre vazio.
