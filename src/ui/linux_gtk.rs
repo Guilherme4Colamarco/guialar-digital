@@ -701,7 +701,7 @@ mod imp {
         // A página de estado tem rolagem interna e altura mínima quase zero: com «Detalhes
         // técnicos» aberto numa tela baixa ela encolhia, cortava o escudo e escondia o título.
         // Com altura mínima, quem rola é a janela inteira.
-        (a.gtk_widget_set_size_request)(status, -1, 290);
+        (a.gtk_widget_set_size_request)(status, -1, 228);
         (a.gtk_box_append)(content, status);
 
         let b_on = button("Proteger este computador", None, on_activate_btn);
