@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.4.0 — não lançado
+## 0.4.0 — 2026-11-15
 
 > **Ainda na beta (`beta-06af688`)?** Desative a proteção com a 0.3.x **antes** de atualizar. A 0.4.0 não lê mais o registro que a beta guardava na pasta pessoal: sem ele, o desfazer devolve o DNS ao automático da rede, e um DNS fixo que você tinha configurado precisa ser colocado de novo.
 
