@@ -18,23 +18,49 @@ O que **não** foi medido: pela sessão SSH da VM o polkit negou a troca de perf
 
 ## Opções
 
-### A. DNS global do NetworkManager (recomendada)
-Gravar `/etc/NetworkManager/conf.d/90-guialar.conf` com uma seção `[global-dns-domain-*]` e os servidores do modo, e recarregar o NetworkManager. O DNS global vale para todas as conexões, as de agora e as futuras, e se sobrepõe ao DNS de cada perfil.
-- A favor: fecha a brecha na origem; o desfazer é apagar um arquivo e recarregar; o registro deixa de precisar do DNS original de cada perfil; cobre também gsm, bluetooth e bridge, que hoje ficam de fora.
-- Contra: muda o desenho do backend (e do registro) do NetworkManager; o DNS entregue por uma VPN também é sobreposto (para um filtro familiar isso é desejável, mas quebra nomes internos de VPN de trabalho); precisa ser medido em cada combinação (NetworkManager com e sem systemd-resolved).
+### A. DNS global do NetworkManager (`global-dns-domain-*`) — medida, **não serve**
+Gravar `/etc/NetworkManager/conf.d/*.conf` com `[global-dns-domain-*]` e recarregar.
+
+Medido na VM Fedora 43 (NetworkManager 1.54.3 com o plugin `systemd-resolved`):
+
+| Configuração | Efeito |
+|---|---|
+| Só `[global-dns-domain-*]`, com `reload` e com reinício do serviço | O NetworkManager lê o arquivo (`global-dns-config` no log), mas o link continua em `10.0.2.3` e a sonda abre |
+| Com a seção `[global-dns]` explícita e reinício | O link fica **sem DNS nenhum** e nada resolve |
+
+Não fecha a brecha num caso e derruba a resolução no outro. Descartada para sistemas com systemd-resolved; sem resolved não foi medida.
+
+### A2. DNS global do systemd-resolved com `Domains=~.` — medida, **funciona** (recomendada)
+Gravar um drop-in em `/etc/systemd/resolved.conf.d/` com `DNS=<servidores do modo>` e `Domains=~.`, e reiniciar o `systemd-resolved`. O domínio de roteamento `~.` faz toda consulta ir para o DNS global, qualquer que seja o DNS do link.
+
+Medido na mesma VM:
+
+| Momento | DNS do link | DNS global | Sonda | `example.com` |
+|---|---|---|---|---|
+| Antes | `10.0.2.3` | vazio | abre | resolve |
+| Com o drop-in | `10.0.2.3` | `1.1.1.3 1.0.0.3` + IPv6 | `0.0.0.0` | resolve |
+| Com um perfil novo ativo | `10.0.2.3` | o mesmo | `0.0.0.0` em 5 de 5 | resolve |
+
+- A favor: fecha a brecha onde o Fedora e o Ubuntu de fato resolvem nomes; o programa já tem um backend de systemd-resolved que grava um drop-in; o desfazer é apagar um arquivo; não depende de perfil, então cobre Wi-Fi novo, hotspot, gsm e bridge.
+- Contra: em máquinas com NetworkManager **e** systemd-resolved o backend escolhido passa a ser o do resolved, não o do NetworkManager, o que muda a detecção, o registro e a leitura do estado (hoje «Protegido» exige que o DNS do link seja o do filtro; aqui o link continua com o DNS da rede). Nomes internos de uma VPN de trabalho deixam de resolver. Quem já está protegido pelo backend do NetworkManager precisa de um caminho de troca.
+- Não coberto: NetworkManager **sem** systemd-resolved (o NetworkManager escreve o `resolv.conf`). Ali a brecha continua e precisa de outra medição.
 
 ### B. Script no dispatcher do NetworkManager
 Instalar um script em `/etc/NetworkManager/dispatcher.d/` que reaplica o DNS do filtro a cada conexão que sobe.
-- A favor: mantém o desenho atual por perfil.
-- Contra: um script do root rodando a cada evento de rede é mais superfície e mais um arquivo para desfazer; há uma janela entre a conexão subir e o script rodar.
+- A favor: mantém o desenho atual por perfil; serve também sem systemd-resolved.
+- Contra: um script do root rodando a cada evento de rede é mais superfície e mais um arquivo para desfazer; há uma janela entre a conexão subir e o script rodar. Não medido.
 
 ### C. Só avisar
 Manter o comportamento e avisar quando o estado sair de «Protegido».
-- A favor: nenhuma mudança no que roda como root.
-- Contra: o programa não tem processo residente; avisar exige criar um (serviço de usuário ou do sistema). E a brecha continua aberta até alguém agir.
+- Contra: o programa não tem processo residente; avisar exige criar um. E a brecha continua aberta até alguém agir.
 
-## Recomendação
-Opção A, com a B descartada e a C como complemento futuro. Antes de implementar: medir na VM Fedora (NetworkManager com systemd-resolved) e numa distribuição sem resolved que `global-dns-domain-*` de fato se sobrepõe ao DNS do perfil e do DHCP, em IPv4 e IPv6.
+## Recomendação (revista depois das medições)
+A opção A, que era a recomendada, caiu na medição. Recomendo a **A2** para sistemas com systemd-resolved, mantendo o backend por perfil só onde não há resolved, com a brecha documentada nesse caso até haver medição.
+
+Antes de implementar, decidir:
+1. Em máquinas com NetworkManager e systemd-resolved, o backend passa a ser o do resolved para todos, ou só para quem proteger de novo?
+2. O que «Protegido» passa a exigir quando o filtro é global e o DNS do link continua o da rede.
+3. Como tratar a VPN de trabalho (aceitar a quebra de nomes internos, ou uma exceção configurável).
 
 ## Junto com esta correção
 - Chamar `nmcli connection modify|show` sempre com a palavra `uuid` antes do identificador (achado S6): sem ela, um perfil cujo **nome** é igual ao UUID de outro poderia ser o escolhido.
