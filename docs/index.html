@@ -84,6 +84,16 @@ code{background:color-mix(in srgb,var(--acc) 12%,transparent);padding:.1em .4em;
 .hero .lead{font-size:clamp(1.05rem,1.6vw,1.22rem);color:#c4d8d3;max-width:34em}
 .cta{display:flex;flex-wrap:wrap;gap:14px;margin:30px 0 14px}
 .hint{font-size:.92rem;color:#9fc0b9;min-height:1.6em}
+.soft{color:#bfeee4;text-underline-offset:3px}
+.soft:hover{color:#fff}
+.btn.dl{padding:13px 22px;min-width:270px}
+@media (max-width:520px){.btn.dl{width:100%}}
+.btn .t{display:flex;flex-direction:column;line-height:1.25;text-align:left}
+.btn .s{font-size:.74rem;font-weight:500;opacity:.78}
+.btn.dl.rec{box-shadow:0 14px 40px -8px rgba(47,208,181,.9);outline:2px solid rgba(255,255,255,.35);outline-offset:3px}
+.btn.dl.other{background:rgba(255,255,255,.06);color:#e9f1ef;border:1px solid rgba(255,255,255,.25);box-shadow:none}
+.btn.dl.other::after{display:none}
+.btn.dl.other:hover{background:rgba(255,255,255,.14);border-color:#5ff0d6;box-shadow:0 14px 34px -14px rgba(95,240,214,.7)}
 .line{display:block;overflow:hidden;padding-bottom:.08em}
 .line>span{display:block}
 .js .line>span{animation:rise .9s var(--ease) backwards}
@@ -304,7 +314,7 @@ footer{background:var(--ink);color:#8fa9a3;font-size:.9rem;padding:28px 0 40px;t
       <a href="#modos">Modos</a>
       <a href="#usar">Como usar</a>
       <a href="#duvidas">Dúvidas</a>
-      <a class="mini" href="https://github.com/Guilherme4Colamarco/guialar-digital/releases/latest">Baixar</a>
+      <a class="mini" href="#baixar">Baixar</a>
     </nav>
   </div>
 </div>
@@ -320,14 +330,18 @@ footer{background:var(--ink);color:#8fa9a3;font-size:.9rem;padding:28px 0 40px;t
         <span class="line"><span>sem os <em>sites perigosos</em>.</span></span>
       </h1>
       <p class="lead">O GuiaLar liga um filtro no computador que barra sites com vírus e conteúdo adulto antes de eles abrirem. Um clique para ligar. Um clique para desfazer.</p>
-      <div class="cta">
-        <a class="btn pri" href="https://github.com/Guilherme4Colamarco/guialar-digital/releases/latest">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v13m0 0-5-5m5 5 5-5M4 21h16"/></svg>
-          Baixar grátis
+<div class="cta">
+        <a class="btn pri dl" data-os="windows" href="https://github.com/Guilherme4Colamarco/guialar-digital/releases/download/v0.4.1/guialar-0.4.1-windows.exe" download>
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v13m0 0-5-5m5 5 5-5M4 21h16"/></svg>
+          <span class="t">Instalar no Windows<span class="s">Windows 10 e 11 · arquivo .exe · 1,6 MB</span></span>
         </a>
-        <a class="btn sec" href="#entenda">Ver como funciona</a>
+        <a class="btn pri dl" data-os="linux" href="https://github.com/Guilherme4Colamarco/guialar-digital/releases/download/v0.4.1/guialar-0.4.1-x86_64.AppImage" download>
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v13m0 0-5-5m5 5 5-5M4 21h16"/></svg>
+          <span class="t">Instalar no Linux<span class="s">arquivo .AppImage · 1,5 MB</span></span>
+        </a>
       </div>
-      <p class="hint" id="oshint">Arquivo único. Não precisa instalar nem criar conta.</p>
+      <p class="hint" id="oshint">Grátis, um arquivo só, sem cadastro. O download começa na hora.</p>
+      <p class="hint"><a class="soft" href="#entenda">Ver como funciona ↓</a> &nbsp;·&nbsp; <a class="soft" href="#duvidas">Perguntas comuns</a></p>
     </div>
 
     <div class="stage" id="stage" role="img" aria-label="Animação: sites comuns passam pelo escudo do GuiaLar e chegam à sua casa; sites com vírus e conteúdo adulto são barrados.">
@@ -524,14 +538,21 @@ guialar revert            # volta ao DNS de antes</pre>
   </div>
 </section>
 
-<section class="final">
+<section class="final" id="baixar">
   <div class="wrap">
     <h2 class="rv">Pronto para deixar a navegação de casa mais tranquila?</h2>
     <p class="rv" style="--i:1">Baixe, abra e clique em «Proteger este computador». Se não gostar, um clique desfaz.</p>
-    <div class="cta rv" style="--i:2">
-      <a class="btn pri" href="https://github.com/Guilherme4Colamarco/guialar-digital/releases/latest">Baixar a versão mais recente</a>
-      <a class="btn sec" href="https://github.com/Guilherme4Colamarco/guialar-digital">Ver o código-fonte</a>
+<div class="cta rv" style="--i:2">
+      <a class="btn pri dl" data-os="windows" href="https://github.com/Guilherme4Colamarco/guialar-digital/releases/download/v0.4.1/guialar-0.4.1-windows.exe" download>
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v13m0 0-5-5m5 5 5-5M4 21h16"/></svg>
+          <span class="t">Instalar no Windows<span class="s">Windows 10 e 11 · arquivo .exe · 1,6 MB</span></span>
+        </a>
+        <a class="btn pri dl" data-os="linux" href="https://github.com/Guilherme4Colamarco/guialar-digital/releases/download/v0.4.1/guialar-0.4.1-x86_64.AppImage" download>
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v13m0 0-5-5m5 5 5-5M4 21h16"/></svg>
+          <span class="t">Instalar no Linux<span class="s">arquivo .AppImage · 1,5 MB</span></span>
+        </a>
     </div>
+    <p class="hint rv" style="--i:3;color:#9fc0b9;margin-top:6px">Versão 0.4.1 · <a class="soft" href="https://github.com/Guilherme4Colamarco/guialar-digital/releases/tag/v0.4.1">conferir o arquivo (SHA256) e as notas</a> · <a class="soft" href="https://github.com/Guilherme4Colamarco/guialar-digital">código-fonte</a></p>
   </div>
 </section>
 </main>
@@ -554,9 +575,12 @@ guialar revert            # volta ao DNS de antes</pre>
 
   /* dica conforme o sistema de quem visita */
   var ua=navigator.userAgent||"", hint=$("#oshint");
-  if(/Android|iPhone|iPad|iPod/i.test(ua)) hint.textContent="O GuiaLar é para computador. Abra esta página no seu Linux ou Windows para baixar.";
-  else if(/Windows/i.test(ua)) hint.textContent="Você está no Windows: na página que abrir, baixe o arquivo que termina em -windows.exe.";
-  else if(/Linux|X11/i.test(ua)) hint.textContent="Você está no Linux: na página que abrir, baixe o arquivo que termina em .AppImage.";
+  var mine=/Android|iPhone|iPad|iPod/i.test(ua)?"mobile":/Windows/i.test(ua)?"windows":/Linux|X11/i.test(ua)?"linux":"";
+  if(mine==="mobile") hint.textContent="O GuiaLar é para computador (Windows ou Linux). Abra esta página no computador para baixar.";
+  else if(mine==="windows") hint.textContent="Você está no Windows. Se aparecer o aviso azul «editor desconhecido», é normal: veja as perguntas comuns. Depois de baixar, dê dois cliques no arquivo.";
+  else if(mine==="linux") hint.textContent="Você está no Linux. Depois de baixar, permita executar o arquivo (botão direito, Propriedades, Permissões) ou rode chmod +x nele.";
+  /* o botão do seu sistema fica em destaque; o outro continua à vista */
+  if(mine==="windows"||mine==="linux") $$(".dl").forEach(function(b){b.classList.add(b.getAttribute("data-os")===mine?"rec":"other")});
 
   /* aparecer ao rolar */
   var rv=$$(".rv");
