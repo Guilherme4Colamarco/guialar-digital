@@ -66,6 +66,20 @@ pub fn system_tool(name: &str) -> PathBuf {
     system_tool_in(&system_dir(), name)
 }
 
+/// Pastas onde um navegador pode estar instalado: `Program Files`, `Program Files (x86)` e,
+/// se `per_user`, a `LocalAppData` de quem roda. Vêm da API, não de variáveis de ambiente.
+#[cfg(windows)]
+pub fn install_dirs(per_user: bool) -> Vec<PathBuf> {
+    use crate::win32::{
+        known_folder, FOLDERID_LOCAL_APP_DATA, FOLDERID_PROGRAM_FILES, FOLDERID_PROGRAM_FILES_X86,
+    };
+    let mut ids = vec![&FOLDERID_PROGRAM_FILES, &FOLDERID_PROGRAM_FILES_X86];
+    if per_user {
+        ids.push(&FOLDERID_LOCAL_APP_DATA);
+    }
+    ids.into_iter().filter_map(known_folder).collect()
+}
+
 /// UID efetivo lido de `/proc/self/status` (sem dependência de libc).
 pub fn effective_uid(status_text: &str) -> Option<u32> {
     status_text

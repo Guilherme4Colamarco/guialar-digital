@@ -4,6 +4,8 @@
 
 ### Windows
 - Segurança: `reg`, `powershell`, `ipconfig`, `cmd` e `clip` passam a ser chamados pelo caminho completo da pasta do sistema (lida pela API, não por variável de ambiente). Antes eram chamados só pelo nome, e o Windows procura primeiro na pasta do próprio programa: um `reg.exe` deixado ao lado do `guialar.exe` era executado pelo processo elevado. Medido na 0.3.1 numa VM Windows 11 com `setup --mode family`. A correção ainda não foi executada no Windows de verdade (só compila e passa no lint para o alvo Windows).
+- Segurança: o `.exe` passa a buscar DLLs só na pasta do sistema (`/DEPENDENTLOADFLAG:0x800` no link e `SetDefaultDllDirectories` no início do programa). Antes, uma `dwmapi.dll` ou `UxTheme.dll` deixada ao lado do `guialar.exe` seria carregada pelo processo elevado. A CI recusa um `.exe` sem essa marca.
+- Segurança: `Program Files` e `LocalAppData` passam a vir da API do Windows (`SHGetKnownFolderPath`), não de variáveis de ambiente que quem chama o processo elevado controla.
 
 ## 0.3.1 — 2026-11-13
 

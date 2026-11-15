@@ -10,6 +10,12 @@ fn main() {
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
     }
+    // MSVC: as DLLs importadas pelo .exe (dwmapi, uxtheme...) são procuradas só na pasta do
+    // sistema (LOAD_LIBRARY_SEARCH_SYSTEM32), não na pasta do programa. O link do GNU não tem
+    // opção equivalente; o .exe publicado é o MSVC.
+    if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+        println!("cargo:rustc-link-arg-bins=/DEPENDENTLOADFLAG:0x800");
+    }
     let out = PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("guialar_res.o");
     let windres = std::env::var("GUIALAR_WINDRES").unwrap_or_else(|_| "llvm-windres".into());
     let status = Command::new(&windres)

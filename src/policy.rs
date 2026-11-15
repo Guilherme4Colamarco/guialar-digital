@@ -256,10 +256,9 @@ mod win {
     use std::process::Command;
 
     fn find_exe(relative: &str) -> Option<PathBuf> {
-        ["ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"]
-            .iter()
-            .filter_map(std::env::var_os)
-            .map(|d| PathBuf::from(d).join(relative))
+        crate::sysutil::install_dirs(true)
+            .into_iter()
+            .map(|d| d.join(relative))
             .find(|p| p.is_file())
     }
 
@@ -267,10 +266,9 @@ mod win {
     /// Uma instalação por usuário (`%LOCALAPPDATA%`) fica fora: o caminho é de uma conta comum
     /// e uma junção ali faria o administrador gravar ou apagar arquivos alheios (ADR-030).
     fn find_firefox() -> Option<PathBuf> {
-        ["ProgramFiles", "ProgramFiles(x86)"]
-            .iter()
-            .filter_map(std::env::var_os)
-            .map(|d| PathBuf::from(d).join(r"Mozilla Firefox\firefox.exe"))
+        crate::sysutil::install_dirs(false)
+            .into_iter()
+            .map(|d| d.join(r"Mozilla Firefox\firefox.exe"))
             .find(|p| p.is_file())
     }
 
