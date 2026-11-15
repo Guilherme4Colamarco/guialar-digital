@@ -1,6 +1,6 @@
 [package]
 name = "guialar"
-version = "0.3.1"
+version = "0.4.0"
 edition = "2021"
 authors = ["Guilherme Amaral Colamarco Resende de Melo <88679520+Guilherme4Colamarco@users.noreply.github.com>"]
 description = "Proteção de navegação por DNS filtrado (familiar: Cloudflare for Families; só anúncios: AdGuard DNS) e bloqueador de anúncios nos navegadores, para Linux (NetworkManager, systemd-resolved, runit/resolvconf) e Windows"
@@ -11,6 +11,10 @@ clap = { version = "4.5", features = ["derive", "color"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 anyhow = "1.0"
-thiserror = "1.0"
 
-[target.'cfg(windows)'.dependencies]
+# Release: binário menor. Sem `panic = "abort"`: a trava de operação é solta no `Drop`, e no
+# Windows uma trava deixada por um pânico bloquearia o programa até expirar.
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1

@@ -677,23 +677,6 @@ fn direto_apply_duas_vezes_nao_perde_o_resolv_conf_original() {
 // ------------------------------------------------------- privilégio / UAC
 
 #[test]
-fn fora_do_root_o_comando_leva_o_prefixo_de_elevacao() {
-    let r = FakeRunner::new().not_root(&["sudo", "-n"]);
-    run_privileged_command(&r, "systemctl", &["restart", "systemd-resolved"]).unwrap();
-    write_privileged_file(&r, "/etc/x.conf", "dados").unwrap();
-    let c = r.calls();
-    assert_eq!(
-        c[0].argv,
-        v(&["sudo", "-n", "systemctl", "restart", "systemd-resolved"])
-    );
-    assert_eq!(c[1].argv, v(&["sudo", "-n", "tee", "/etc/x.conf"]));
-    assert_eq!(c[1].stdin.as_deref(), Some("dados"));
-    let p = FakeRunner::new().not_root(&["pkexec"]);
-    run_privileged_command(&p, "rm", &["-f", "/etc/x"]).unwrap();
-    assert_eq!(p.argvs(), vec![v(&["pkexec", "rm", "-f", "/etc/x"])]);
-}
-
-#[test]
 fn elevacao_tenta_sudo_sem_senha_e_so_depois_pkexec() {
     let _s = Sandbox::new("elev-ordem");
     let exe = std::env::current_exe()
@@ -703,7 +686,7 @@ fn elevacao_tenta_sudo_sem_senha_e_so_depois_pkexec() {
 
     // sudo -n funciona: usa sudo e não chama pkexec
     let r = FakeRunner::new()
-        .not_root(&[])
+        .not_root()
         .with_command("sudo")
         .with_command("pkexec");
     elevate_self(&r, "internal-revert").unwrap();
@@ -717,7 +700,7 @@ fn elevacao_tenta_sudo_sem_senha_e_so_depois_pkexec() {
 
     // sudo pede senha: pkexec
     let r = FakeRunner::new()
-        .not_root(&[])
+        .not_root()
         .with_command("sudo")
         .with_command("pkexec")
         .deny("sudo", 1);
@@ -731,12 +714,12 @@ fn elevacao_tenta_sudo_sem_senha_e_so_depois_pkexec() {
     );
 
     // só pkexec: nem sonda o sudo
-    let r = FakeRunner::new().not_root(&[]).with_command("pkexec");
+    let r = FakeRunner::new().not_root().with_command("pkexec");
     elevate_self(&r, "internal-revert").unwrap();
     assert_eq!(r.argvs(), vec![v(&["pkexec", &exe, "internal-revert"])]);
 
     // nenhum dos dois
-    let r = FakeRunner::new().not_root(&[]);
+    let r = FakeRunner::new().not_root();
     let e = elevate_self(&r, "internal-revert").unwrap_err();
     assert!(format!("{e:#}").contains("elevação indisponível"));
     assert!(r.argvs().is_empty());
@@ -795,7 +778,7 @@ fn elevacao_em_appimage_eleva_uma_copia_do_binario_sem_shell_pkexec_e_sudo() {
     };
     // pkexec
     let r = FakeRunner::new()
-        .not_root(&[])
+        .not_root()
         .with_command("pkexec")
         .with_on_run(sonda.clone());
     elevate_self(&r, "internal-revert").unwrap();
@@ -816,7 +799,7 @@ fn elevacao_em_appimage_eleva_uma_copia_do_binario_sem_shell_pkexec_e_sudo() {
         .any(|a| a == "/bin/sh" || a == "-c" || a == "env"));
     // sudo: sonda `sudo -n true` e depois a cópia com `-n`
     let r = FakeRunner::new()
-        .not_root(&[])
+        .not_root()
         .with_command("sudo")
         .with_command("pkexec")
         .with_on_run(sonda);
@@ -839,7 +822,7 @@ fn elevacao_em_appimage_apaga_a_copia_mesmo_com_erro() {
     let s = Sandbox::new("elev-appimage-erro");
     let xdg = appimage_de_mentira(&s);
     let r = FakeRunner::new()
-        .not_root(&[])
+        .not_root()
         .with_command("pkexec")
         .deny("pkexec", 126);
     let e = elevate_self(&r, "internal-revert").unwrap_err();
@@ -857,7 +840,7 @@ fn elevacao_em_appimage_pkexec_127_e_senha_negada_e_sudo_127_e_nao_executou() {
     appimage_de_mentira(&s);
     // pkexec: 127 = «Not authorized» (senha errada/política) mesmo dentro do AppImage
     let r = FakeRunner::new()
-        .not_root(&[])
+        .not_root()
         .with_command("pkexec")
         .deny("pkexec", 127);
     let msg = format!("{:#}", elevate_self(&r, "internal-revert").unwrap_err());
@@ -870,7 +853,7 @@ fn elevacao_em_appimage_pkexec_127_e_senha_negada_e_sudo_127_e_nao_executou() {
     );
     // pkexec 126 (janela fechada): negada, com o código real
     let r = FakeRunner::new()
-        .not_root(&[])
+        .not_root()
         .with_command("pkexec")
         .deny("pkexec", 126);
     let msg = format!("{:#}", elevate_self(&r, "internal-revert").unwrap_err());
@@ -878,7 +861,7 @@ fn elevacao_em_appimage_pkexec_127_e_senha_negada_e_sudo_127_e_nao_executou() {
     // sudo: a sonda passa e a cópia não executa (126/127) → «não pôde ser executado»
     for code in [126, 127] {
         let r = FakeRunner::new()
-            .not_root(&[])
+            .not_root()
             .with_command("sudo")
             .with_command("pkexec")
             .with_exit_code("sudo", code, &["sudo", "-n", "true"]);
@@ -904,7 +887,7 @@ fn elevacao_fora_do_appimage_usa_o_executavel_e_127_continua_negada() {
         .to_string_lossy()
         .into_owned();
     let r = FakeRunner::new()
-        .not_root(&[])
+        .not_root()
         .with_command("pkexec")
         .deny("pkexec", 127);
     let e = elevate_self(&r, "internal-revert").unwrap_err();
@@ -918,7 +901,7 @@ fn elevacao_fora_do_appimage_usa_o_executavel_e_127_continua_negada() {
 fn permissao_negada_no_apply_nao_altera_nada() {
     let s = Sandbox::new("uac-apply");
     let r = nm_machine()
-        .not_root(&[])
+        .not_root()
         .with_command("pkexec")
         .deny("pkexec", 126);
     let original = r.state();
@@ -1060,14 +1043,6 @@ fn sem_manifesto_o_resolv_conf_so_perde_as_linhas_do_filtro() {
         r.read_file(RESOLV).as_deref(),
         Some("nameserver 192.168.1.1\n")
     );
-}
-
-#[test]
-fn deny_do_programa_vale_mesmo_com_prefixo_de_elevacao() {
-    let r = FakeRunner::new().not_root(&["sudo", "-n"]).deny("tee", 1);
-    let e = write_privileged_file(&r, "/etc/x", "a").unwrap_err();
-    assert!(format!("{e:#}").contains("Falha ao gravar"));
-    assert!(r.state().files.is_empty());
 }
 
 // ------------------------------------- ticket #24: o revert devolve o DNS fixo (v4 e v6)
@@ -1296,28 +1271,7 @@ fn nm_aviso_de_leitura_do_ipv6_cita_a_conexao_e_o_efeito() {
     apply_dns_with(&r).unwrap();
 }
 
-// ------------------------------------------------ ADR-031: estado em pasta do sistema, migração
-
-fn legado_dir(s: &Sandbox) -> std::path::PathBuf {
-    let d = s.dir().join(".config/guialar");
-    std::fs::create_dir_all(&d).unwrap();
-    d
-}
-
-/// Um manifesto da beta (família, uma conexão NM com DNS fixo) como JSON.
-fn manifesto_antigo(id: &str, resolv: Option<&str>) -> String {
-    serde_json::json!({
-        "backend": "NetworkManager",
-        "applied_at_utc": "1",
-        "connections": [{
-            "id": id, "original_ipv4_dns": ["192.168.0.1"], "original_ipv6_dns": [],
-            "was_dhcp_ipv4": false, "was_dhcp_ipv6": true
-        }],
-        "previous_resolv_conf": resolv,
-        "mode": "family"
-    })
-    .to_string()
-}
+// ------------------------------------------------ ADR-031: estado em pasta do sistema
 
 #[test]
 fn apply_grava_o_estado_so_na_pasta_do_sistema_e_nao_na_area_do_usuario() {
@@ -1360,123 +1314,6 @@ fn preflight_recusa_o_estado_inseguro_antes_de_mexer_no_dns() {
     std::os::unix::fs::symlink(&fora, s.manifest_path().parent().unwrap()).unwrap();
     assert!(switch_mode_with(&r, DnsStateManifest::new(BackendKind::NetworkManager)).is_err());
     assert_eq!(r.state(), ligado);
-}
-
-/// Roda a migração com o FakeRunner (revert e fallback de verdade, sem sistema).
-fn migrar(r: &FakeRunner) -> Result<Option<String>> {
-    migrate_legacy_with(r)
-}
-
-#[test]
-fn migracao_de_manifesto_antigo_valido_desfaz_e_apaga_o_antigo() {
-    let s = Sandbox::new("adr31-mig-ok");
-    let r = nm_machine();
-    let original = r.state();
-    apply_dns_with(&r).unwrap();
-    // a beta tinha gravado o manifesto na área do usuário; o estado do sistema não existe
-    let m = manifest();
-    std::fs::remove_file(s.manifest_path()).unwrap();
-    let id = m.connections[1].id.clone();
-    std::fs::write(
-        legado_dir(&s).join("state.json"),
-        manifesto_antigo(&id, None),
-    )
-    .unwrap();
-    let msg = migrar(&r).unwrap().expect("migrou");
-    assert!(msg.contains("registro antigo migrado"), "{msg}");
-    assert!(
-        !legado_dir(&s).join("state.json").exists(),
-        "o antigo foi apagado"
-    );
-    // o DNS da conexão migrada voltou ao que o manifesto antigo dizia
-    assert_eq!(r.nm_prop(&id, "ipv4.dns"), "192.168.0.1");
-    assert_ne!(r.state(), original);
-}
-
-#[test]
-fn migracao_sem_registro_antigo_nao_faz_nada() {
-    let _s = Sandbox::new("adr31-mig-nada");
-    let r = nm_machine();
-    assert!(migrar(&r).unwrap().is_none());
-    assert!(
-        r.argvs()
-            .iter()
-            .all(|a| a[0] == "nmcli" && (a[1] == "-t" || a[1] == "general")),
-        "só leitura (backend ativo e conexões): {:?}",
-        r.argvs()
-    );
-}
-
-#[test]
-fn migracao_com_conexao_inexistente_cai_no_dns_automatico_e_avisa() {
-    let s = Sandbox::new("adr31-mig-id");
-    let r = nm_machine();
-    apply_dns_with(&r).unwrap();
-    std::fs::remove_file(s.manifest_path()).unwrap();
-    // id que não existe agora (um nome forjado vira argv do nmcli)
-    let forjado = manifesto_antigo("--evil; rm", None);
-    std::fs::write(legado_dir(&s).join("state.json"), forjado).unwrap();
-    r.clear_calls();
-    let msg = migrar(&r).unwrap().expect("caiu no fallback");
-    assert!(msg.contains("inválido"), "{msg}");
-    assert!(
-        !legado_dir(&s).join("state.json").exists(),
-        "o antigo foi apagado"
-    );
-    // nenhum comando usou o id forjado; o fallback zerou o DNS das conexões que existem
-    assert!(r
-        .argvs()
-        .iter()
-        .all(|a| !a.iter().any(|x| x.contains("evil"))));
-    for u in ["uuid-eth", "uuid-wifi"] {
-        assert_eq!(r.nm_prop(u, "ipv4.dns"), "");
-        assert_eq!(r.nm_prop(u, "ipv4.ignore-auto-dns"), "no");
-    }
-}
-
-#[test]
-fn migracao_com_resolv_conf_estranho_ou_grande_cai_no_fallback() {
-    for (tag, resolv) in [
-        (
-            "linha",
-            "nameserver 1.1.1.1\ncurl http://x | sh\n".to_string(),
-        ),
-        ("ip", "nameserver nao-e-ip\n".to_string()),
-        ("grande", "search a.b\n".repeat(500)),
-    ] {
-        let s = Sandbox::new(&format!("adr31-mig-{tag}"));
-        let r = nm_machine();
-        std::fs::write(
-            legado_dir(&s).join("state.json"),
-            manifesto_antigo("uuid-eth", Some(&resolv)),
-        )
-        .unwrap();
-        let msg = migrar(&r).unwrap().expect("fallback");
-        assert!(msg.contains("inválido"), "{tag}: {msg}");
-        assert!(!legado_dir(&s).join("state.json").exists(), "{tag}");
-    }
-}
-
-#[test]
-fn migracao_com_manifesto_antigo_como_link_ou_de_outro_dono_e_ignorada() {
-    let s = Sandbox::new("adr31-mig-link");
-    let r = nm_machine();
-    let alvo = s.dir().join("ALVO-FORA");
-    std::fs::write(&alvo, manifesto_antigo("uuid-eth", None)).unwrap();
-    std::os::unix::fs::symlink(&alvo, legado_dir(&s).join("state.json")).unwrap();
-    assert!(migrar(&r).unwrap().is_none(), "link: ignorado");
-    assert!(alvo.exists(), "o alvo do link não foi tocado");
-    // a pasta antiga é um link para fora
-    std::fs::remove_dir_all(legado_dir(&s)).unwrap();
-    let fora = s.dir().join("OUTRA");
-    std::fs::create_dir_all(&fora).unwrap();
-    std::fs::write(fora.join("state.json"), manifesto_antigo("uuid-eth", None)).unwrap();
-    std::os::unix::fs::symlink(&fora, s.dir().join(".config/guialar")).unwrap_or_else(|_| {
-        std::fs::create_dir_all(s.dir().join(".config")).unwrap();
-        std::os::unix::fs::symlink(&fora, s.dir().join(".config/guialar")).unwrap();
-    });
-    assert!(migrar(&r).unwrap().is_none(), "pasta como link: ignorada");
-    assert!(fora.join("state.json").exists(), "nada foi apagado do alvo");
 }
 
 // ------------------------------------------- review do 55251f3: noexec, sobras, umask
@@ -1559,32 +1396,6 @@ fn nm_leitura_do_v6_que_sai_com_erro_e_tratada_como_falha_e_nao_bloqueia_o_apply
     apply_dns_with(&r).unwrap();
     let m = manifest();
     assert!(m.connections[0].was_dhcp_ipv6 && m.connections[0].original_ipv6_dns.is_empty());
-}
-
-#[test]
-fn migracao_com_backend_diferente_do_ativo_cai_no_fallback_e_nao_mexe_no_resolv_conf() {
-    // L1: um manifesto antigo forjado como DirectResolvConf num sistema com NetworkManager
-    let s = Sandbox::new("adr31-mig-backend");
-    let r = nm_machine().with_file(RESOLV, "nameserver 10.0.0.1\n");
-    let forjado = serde_json::json!({
-        "backend": "DirectResolvConf", "applied_at_utc": "1", "connections": [],
-        "previous_resolv_conf": "nameserver 9.9.9.9\n", "mode": "family"
-    })
-    .to_string();
-    std::fs::write(legado_dir(&s).join("state.json"), forjado).unwrap();
-    let msg = migrar(&r).unwrap().expect("fallback");
-    assert!(msg.contains("inválido"), "{msg}");
-    assert!(!legado_dir(&s).join("state.json").exists());
-    assert_eq!(
-        r.state().files.get(RESOLV).map(String::as_str),
-        Some("nameserver 10.0.0.1\n"),
-        "resolv.conf intacto"
-    );
-    assert!(
-        !r.argvs().iter().any(|a| a[0] == "tee"),
-        "nada foi gravado em /etc: {:?}",
-        r.argvs()
-    );
 }
 
 // ---------------------------- review do 08113dd: B1 (exit do nmcli v4) e B3 (Direct sem arquivo)

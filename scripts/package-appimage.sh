@@ -11,7 +11,7 @@ if [[ -z "${NAME:-}" ]]; then
   if [[ -z "$VER" && -f "$ROOT/Cargo.toml" ]]; then
     VER="$(sed -n 's/^version = "\([^"]*\)"/\1/p' "$ROOT/Cargo.toml" | head -1)"
   fi
-  NAME="guialar-${VER:-0.3.0}-x86_64.AppImage"
+  NAME="guialar-${VER:-0.4.0}-x86_64.AppImage"
 fi
 STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT

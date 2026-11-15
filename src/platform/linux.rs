@@ -349,40 +349,6 @@ pub(super) fn configured_dns_with(r: &dyn CommandRunner) -> Vec<std::net::IpAddr
     all
 }
 
-/// UUIDs de todas as conexões do NetworkManager agora (para validar o manifesto antigo).
-fn known_connection_ids_with(r: &dyn CommandRunner) -> Vec<String> {
-    if !r.command_exists("nmcli") {
-        return Vec::new();
-    }
-    r.run(&Cmd::output(
-        "nmcli",
-        &["-t", "-f", "UUID", "connection", "show"],
-    ))
-    .ok()
-    .map(|o| {
-        String::from_utf8_lossy(&o.stdout)
-            .lines()
-            .map(|l| l.trim().to_string())
-            .filter(|l| !l.is_empty())
-            .collect()
-    })
-    .unwrap_or_default()
-}
-
-/// Migração do manifesto antigo da beta (ADR-031); ver `platform::migrate_legacy`.
-pub fn migrate_legacy() -> Result<Option<String>> {
-    migrate_legacy_with(&RealRunner)
-}
-
-pub(super) fn migrate_legacy_with(r: &dyn CommandRunner) -> Result<Option<String>> {
-    super::migrate_legacy_generic(
-        detect_active_backend_with(r),
-        &known_connection_ids_with(r),
-        |m| revert_dns_with(r, m),
-        || revert_dns_fallback_with(r),
-    )
-}
-
 /// Reversão de emergência: sem manifesto (corrompido/apagado) volta o DNS ao automático.
 pub fn revert_dns_fallback() -> Result<()> {
     revert_dns_fallback_with(&RealRunner)
@@ -1058,9 +1024,10 @@ fn is_service_active_runit(r: &dyn CommandRunner, service_name: &str) -> bool {
     false
 }
 
-/// Comando já prefixado com a elevação adequada (nenhuma se já é root).
-fn privileged(r: &dyn CommandRunner, program: &str, args: &[&str]) -> Cmd {
-    Cmd::status(program, args).prefixed(&r.privilege_prefix())
+/// Comando que só o processo elevado executa: quem chega aqui já passou pelo portão
+/// `is_root` das operações (o resto reexecuta o programa com `elevate_self`).
+fn privileged(_r: &dyn CommandRunner, program: &str, args: &[&str]) -> Cmd {
+    Cmd::status(program, args)
 }
 
 fn run_privileged_command(r: &dyn CommandRunner, program: &str, args: &[&str]) -> Result<()> {

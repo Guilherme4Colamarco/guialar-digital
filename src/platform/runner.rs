@@ -93,17 +93,6 @@ impl Cmd {
         self
     }
 
-    /// Prefixa o comando com a elevação (`sudo`, `pkexec`...). Vazio = já é root.
-    pub fn prefixed(mut self, prefix: &[&str]) -> Self {
-        if let Some((tool, rest)) = prefix.split_first() {
-            let mut args: Vec<OsString> = rest.iter().map(|a| (*a).into()).collect();
-            args.push(std::mem::replace(&mut self.program, (*tool).into()).into());
-            args.append(&mut self.args);
-            self.args = args;
-        }
-        self
-    }
-
     /// `[programa, args...]`, para comparar em testes.
     #[cfg(test)]
     pub fn argv(&self) -> Vec<String> {
@@ -156,12 +145,6 @@ pub trait CommandRunner {
     #[cfg(unix)]
     fn is_root(&self) -> bool {
         crate::sysutil::is_root()
-    }
-
-    /// Prefixo de elevação para comandos privilegiados.
-    #[cfg(unix)]
-    fn privilege_prefix(&self) -> Vec<&'static str> {
-        crate::sysutil::current_privilege_prefix()
     }
 }
 
@@ -228,14 +211,6 @@ pub mod fake;
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn prefixed_poe_a_elevacao_antes_do_programa() {
-        let c = Cmd::status("nmcli", &["connection", "up"]).prefixed(&["sudo", "-n"]);
-        assert_eq!(c.argv(), ["sudo", "-n", "nmcli", "connection", "up"]);
-        let c = Cmd::status("tee", &["/etc/resolv.conf"]).prefixed(&[]);
-        assert_eq!(c.argv(), ["tee", "/etc/resolv.conf"]);
-    }
 
     #[test]
     fn construtores_espelham_status_e_output() {

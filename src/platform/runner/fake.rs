@@ -43,7 +43,6 @@ struct State {
     exit_argv: Vec<(Vec<String>, i32)>,
     exit_once: Vec<(Vec<String>, i32)>,
     on_run: Option<Hook>,
-    prefix: Vec<&'static str>,
     root: bool,
 }
 
@@ -132,13 +131,9 @@ impl FakeRunner {
         self
     }
 
-    /// O processo não é root e usa este prefixo (ex.: `["sudo", "-n"]`).
-    pub fn not_root(self, prefix: &[&'static str]) -> Self {
-        {
-            let mut s = self.st.borrow_mut();
-            s.root = false;
-            s.prefix = prefix.to_vec();
-        }
+    /// O processo não é root: as operações passam pela elevação (`elevate_self`).
+    pub fn not_root(self) -> Self {
+        self.st.borrow_mut().root = false;
         self
     }
 
@@ -250,13 +245,6 @@ impl FakeRunner {
                 }
                 Ok(ok(out))
             }
-            ["nmcli", "-t", "-f", "UUID", "connection", "show"] => {
-                let mut out = String::new();
-                for u in s.nm.keys() {
-                    out += &format!("{u}\n");
-                }
-                Ok(ok(out))
-            }
             ["nmcli", "-t", "-f", "ipv4.dns,ipv4.ignore-auto-dns", "connection", "show", u] => {
                 let p = s.nm.get(*u).ok_or_else(|| io::Error::other("conexão?"))?;
                 Ok(ok(format!(
@@ -351,26 +339,14 @@ impl CommandRunner for FakeRunner {
             argv: argv.clone(),
             stdin: stdin.clone(),
         });
-        // Tira o prefixo de elevação (só se o argv começa mesmo com ele).
-        let prefix: Vec<String> = self
-            .st
-            .borrow()
-            .prefix
-            .iter()
-            .map(|p| p.to_string())
-            .collect();
-        let real = if !prefix.is_empty() && argv.len() > prefix.len() && argv.starts_with(&prefix) {
-            &argv[prefix.len()..]
-        } else {
-            &argv[..]
-        };
-        // `deny` casa com o programa de verdade ou com a ferramenta de elevação.
+        let real = &argv[..];
+        // `deny` casa com o programa (inclusive `sudo`/`pkexec` na elevação).
         let denied = self
             .st
             .borrow()
             .deny
             .iter()
-            .find(|(p, _)| *p == real[0] || *p == argv[0])
+            .find(|(p, _)| *p == real[0])
             .map(|(_, c)| *c);
         if self
             .st
@@ -443,10 +419,5 @@ impl CommandRunner for FakeRunner {
     #[cfg(unix)]
     fn is_root(&self) -> bool {
         self.st.borrow().root
-    }
-
-    #[cfg(unix)]
-    fn privilege_prefix(&self) -> Vec<&'static str> {
-        self.st.borrow().prefix.clone()
     }
 }

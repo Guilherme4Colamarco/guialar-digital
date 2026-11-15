@@ -1,6 +1,4 @@
-//! Utilitários de sistema compartilhados: elevação, home efetivo e PATH.
-#![cfg_attr(not(unix), allow(dead_code))]
-#![cfg_attr(unix, allow(dead_code))]
+//! Utilitários de sistema compartilhados: elevação, trava de operação e PATH.
 
 use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
@@ -28,6 +26,7 @@ pub fn command_exists(command: &str) -> bool {
 /// Caminho de uma ferramenta do Windows dentro da pasta do sistema `sysdir`
 /// (`reg` -> `<sysdir>\reg.exe`). O PowerShell fica em `WindowsPowerShell\v1.0`.
 /// Um `name` que já traz pasta volta como veio.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub fn system_tool_in(sysdir: &Path, name: &str) -> PathBuf {
     if name.contains(['\\', '/', ':']) {
         return PathBuf::from(name);
@@ -81,6 +80,7 @@ pub fn install_dirs(per_user: bool) -> Vec<PathBuf> {
 }
 
 /// UID efetivo lido de `/proc/self/status` (sem dependência de libc).
+#[cfg_attr(not(unix), allow(dead_code))]
 pub fn effective_uid(status_text: &str) -> Option<u32> {
     status_text
         .lines()
@@ -91,6 +91,7 @@ pub fn effective_uid(status_text: &str) -> Option<u32> {
         .ok()
 }
 
+#[cfg_attr(not(unix), allow(dead_code))]
 pub fn is_root() -> bool {
     std::fs::read_to_string("/proc/self/status")
         .ok()
@@ -118,6 +119,7 @@ pub fn current_ids() -> Option<(u32, u32)> {
 /// `APPIMAGE` é herdado por todo processo filho de outro AppImage (um terminal de editor, por
 /// exemplo), então só vale quando o executável está **dentro** do `APPDIR` que o runtime
 /// exporta junto. Puro: recebe o ambiente.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub fn running_appimage_from(
     appimage: Option<&std::ffi::OsStr>,
     appdir: Option<&std::ffi::OsStr>,
@@ -138,6 +140,7 @@ pub fn running_appimage_from(
 }
 
 /// [`running_appimage_from`] com o ambiente e o executável deste processo.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub fn running_appimage() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     running_appimage_from(
@@ -147,132 +150,11 @@ pub fn running_appimage() -> Option<PathBuf> {
     )
 }
 
-/// Prefixo de elevação: vazio se já é root; `pkexec` com sessão gráfica; senão `sudo`.
-pub fn privilege_prefix(
-    root: bool,
-    graphical: bool,
-    has_pkexec: bool,
-    has_sudo: bool,
-) -> Vec<&'static str> {
-    if root {
-        Vec::new()
-    } else if graphical && has_pkexec {
-        vec!["pkexec"]
-    } else if has_sudo {
-        vec!["sudo"]
-    } else {
-        vec!["pkexec"]
-    }
-}
-
-pub fn current_privilege_prefix() -> Vec<&'static str> {
-    let graphical =
-        std::env::var_os("DISPLAY").is_some() || std::env::var_os("WAYLAND_DISPLAY").is_some();
-    privilege_prefix(
-        is_root(),
-        graphical,
-        command_exists("pkexec"),
-        command_exists("sudo"),
-    )
-}
-
-/// Home do usuário em `passwd_text` (formato `/etc/passwd`).
-pub fn home_from_passwd(passwd_text: &str, user: &str) -> Option<PathBuf> {
-    passwd_text
-        .lines()
-        .map(|l| l.split(':').collect::<Vec<_>>())
-        .find(|f| f.len() >= 6 && f[0] == user)
-        .map(|f| PathBuf::from(f[5]))
-}
-
-/// Entrada de `/etc/passwd`: (usuário, uid, gid, home).
-pub type PasswdEntry = (String, u32, u32, PathBuf);
-
-fn parse_passwd_line(l: &str) -> Option<PasswdEntry> {
-    let f: Vec<&str> = l.split(':').collect();
-    if f.len() < 6 {
-        return None;
-    }
-    Some((
-        f[0].to_string(),
-        f[2].parse().ok()?,
-        f[3].parse().ok()?,
-        PathBuf::from(f[5]),
-    ))
-}
-
-pub fn passwd_by_name(passwd: &str, user: &str) -> Option<PasswdEntry> {
-    passwd
-        .lines()
-        .filter_map(parse_passwd_line)
-        .find(|e| e.0 == user)
-}
-
-pub fn passwd_by_uid(passwd: &str, uid: u32) -> Option<PasswdEntry> {
-    passwd
-        .lines()
-        .filter_map(parse_passwd_line)
-        .find(|e| e.1 == uid)
-}
-
-/// Usuário real por trás de `sudo`/`pkexec` (nunca root). Puro: recebe o ambiente.
-pub fn caller_from_env(
-    sudo_uid: Option<&str>,
-    sudo_gid: Option<&str>,
-    sudo_user: Option<&str>,
-    pkexec_uid: Option<&str>,
-    passwd: &str,
-) -> Option<PasswdEntry> {
-    let entry = if let Some(uid) = pkexec_uid.and_then(|v| v.parse::<u32>().ok()) {
-        passwd_by_uid(passwd, uid)
-    } else if let Some(uid) = sudo_uid.and_then(|v| v.parse::<u32>().ok()) {
-        let mut e = passwd_by_uid(passwd, uid)?;
-        if let Some(g) = sudo_gid.and_then(|v| v.parse::<u32>().ok()) {
-            e.2 = g;
-        }
-        Some(e)
-    } else {
-        sudo_user.and_then(|u| passwd_by_name(passwd, u))
-    }?;
-    (entry.1 != 0).then_some(entry)
-}
-
-/// Usuário que chamou `sudo`/`pkexec`, lido do ambiente do processo (só quando root).
-pub fn caller() -> Option<PasswdEntry> {
-    if !is_root() {
-        return None;
-    }
-    let passwd = std::fs::read_to_string("/etc/passwd").ok()?;
-    let get = |k: &str| std::env::var(k).ok();
-    caller_from_env(
-        get("SUDO_UID").as_deref(),
-        get("SUDO_GID").as_deref(),
-        get("SUDO_USER").as_deref(),
-        get("PKEXEC_UID").as_deref(),
-        &passwd,
-    )
-}
-
-/// Home efetivo para o manifesto: sob `sudo`/`pkexec`, o do usuário que chamou (não `/root`).
-pub fn effective_home() -> Option<PathBuf> {
-    if let Some(c) = caller() {
-        return Some(c.3);
-    }
-    std::env::var_os("HOME").map(PathBuf::from)
-}
-
-/// Devolve a posse de `path` ao usuário real quando rodando como root via sudo/pkexec.
-#[cfg(unix)]
-pub fn give_to_caller(path: &Path) {
-    if let Some((_, uid, gid, _)) = caller() {
-        let _ = std::os::unix::fs::chown(path, Some(uid), Some(gid));
-    }
-}
-
 /// Codifica um script para `powershell -EncodedCommand` (UTF-16LE em base64).
 ///
 /// Evita qualquer perda de aspas na linha de comando do Windows (causa do erro
 /// `'ALIAS=' is not recognized` visto na versão Java).
+#[cfg_attr(not(windows), allow(dead_code))]
 pub fn encode_powershell(script: &str) -> String {
     const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let bytes: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
@@ -296,6 +178,7 @@ pub fn encode_powershell(script: &str) -> String {
 }
 
 /// Alias de interface seguro para interpolar em string PowerShell de aspas simples.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub fn is_safe_ps_alias(value: &str) -> bool {
     !value.is_empty()
         && value.chars().count() <= 128
@@ -600,21 +483,6 @@ mod tests {
     }
 
     #[test]
-    fn elevacao_escolhe_ferramenta_certa() {
-        assert!(privilege_prefix(true, true, true, true).is_empty());
-        assert_eq!(privilege_prefix(false, true, true, true), ["pkexec"]);
-        assert_eq!(privilege_prefix(false, false, true, true), ["sudo"]);
-        assert_eq!(privilege_prefix(false, false, true, false), ["pkexec"]);
-    }
-
-    #[test]
-    fn home_do_passwd() {
-        let p = "root:x:0:0::/root:/bin/sh\nqa:x:1000:1000::/home/qa:/bin/sh\n";
-        assert_eq!(home_from_passwd(p, "qa"), Some(PathBuf::from("/home/qa")));
-        assert_eq!(home_from_passwd(p, "zz"), None);
-    }
-
-    #[test]
     fn command_exists_acha_e_nao_acha() {
         assert!(command_exists(if cfg!(windows) { "cmd" } else { "sh" }));
         assert!(!command_exists("comando-que-nao-existe-xyz"));
@@ -792,21 +660,6 @@ mod tests {
         );
         drop(l);
         std::fs::remove_dir_all(&d).ok();
-    }
-
-    #[test]
-    fn usuario_real_por_sudo_e_pkexec() {
-        let p = "root:x:0:0::/root:/bin/sh\nqa:x:1000:1001::/home/qa:/bin/sh\n";
-        let e = caller_from_env(Some("1000"), Some("1001"), Some("qa"), None, p).unwrap();
-        assert_eq!((e.1, e.2, e.3), (1000, 1001, PathBuf::from("/home/qa")));
-        let e = caller_from_env(None, None, None, Some("1000"), p).unwrap();
-        assert_eq!((e.0.as_str(), e.2), ("qa", 1001));
-        let e = caller_from_env(None, None, Some("qa"), None, p).unwrap();
-        assert_eq!(e.1, 1000);
-        // root nunca é "o chamador"
-        assert!(caller_from_env(Some("0"), Some("0"), Some("root"), None, p).is_none());
-        assert!(caller_from_env(None, None, None, None, p).is_none());
-        assert!(caller_from_env(None, None, None, Some("4242"), p).is_none());
     }
 
     #[test]
