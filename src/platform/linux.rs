@@ -18,7 +18,30 @@ pub fn detect_active_backend() -> BackendKind {
     detect_active_backend_with(&RealRunner)
 }
 
+/// O systemd-resolved é quem resolve os nomes: está rodando e o `resolv.conf` aponta para o
+/// stub local dele. Só rodar não basta (pode estar ativo sem ser usado).
+fn resolved_is_the_resolver(r: &dyn CommandRunner) -> bool {
+    r.path_exists("/run/systemd/resolve")
+        && r.read_file("/etc/resolv.conf").is_some_and(|t| {
+            t.lines()
+                .any(|l| l.split_whitespace().collect::<Vec<_>>() == ["nameserver", "127.0.0.53"])
+        })
+}
+
+fn network_manager_is_active(r: &dyn CommandRunner) -> bool {
+    (r.path_exists("/run/NetworkManager") || is_service_active_runit(r, "NetworkManager"))
+        && r.run(&Cmd::output("nmcli", &["general", "status"]))
+            .is_ok_and(|o| o.success())
+}
+
 fn detect_active_backend_with(r: &dyn CommandRunner) -> BackendKind {
+    // 0. ADR-032: com o systemd-resolved resolvendo, o filtro é global (drop-in com
+    //    `Domains=~.`), mesmo havendo NetworkManager. Gravar em cada perfil ativo deixava
+    //    sem filtro qualquer conexão criada depois (Wi-Fi novo, hotspot).
+    if resolved_is_the_resolver(r) {
+        return BackendKind::SystemdResolved;
+    }
+
     // 1. Checa NetworkManager ativo (/run/NetworkManager existe ou `nmcli general status` responde)
     if r.path_exists("/run/NetworkManager") || is_service_active_runit(r, "NetworkManager") {
         if let Ok(output) = r.run(&Cmd::output("nmcli", &["general", "status"])) {
@@ -321,7 +344,47 @@ pub fn configured_dns() -> Vec<std::net::IpAddr> {
     configured_dns_with(&RealRunner)
 }
 
+/// DNS que de fato respondem quando o systemd-resolved tem o domínio de roteamento `~.` no
+/// escopo global: os servidores globais, mais os de qualquer link que também declare `~.`
+/// (uma VPN, por exemplo, que então concorre com o filtro). `None` se o global não tem `~.`
+/// ou não tem servidores: aí vale a leitura comum.
+pub(super) fn resolved_routed_dns(
+    dns_out: &str,
+    domain_out: &str,
+) -> Option<Vec<std::net::IpAddr>> {
+    let routes_all = |scope: &str| {
+        domain_out.lines().any(|l| {
+            l.split_once(':')
+                .is_some_and(|(k, v)| k.trim() == scope && v.split_whitespace().any(|d| d == "~."))
+        })
+    };
+    if !routes_all("Global") {
+        return None;
+    }
+    let mut out: Vec<std::net::IpAddr> = Vec::new();
+    for line in dns_out.lines() {
+        let Some((scope, _)) = line.split_once(':') else {
+            continue;
+        };
+        if routes_all(scope.trim()) {
+            for ip in parse_dns_ips(line) {
+                if !out.contains(&ip) {
+                    out.push(ip);
+                }
+            }
+        }
+    }
+    (!out.is_empty()).then_some(out)
+}
+
 pub(super) fn configured_dns_with(r: &dyn CommandRunner) -> Vec<std::net::IpAddr> {
+    if r.command_exists("resolvectl") && resolved_is_the_resolver(r) {
+        let dns = command_text(r, "resolvectl", &["dns"]);
+        let domains = command_text(r, "resolvectl", &["domain"]);
+        if let Some(routed) = resolved_routed_dns(&dns, &domains) {
+            return routed;
+        }
+    }
     let mut all = Vec::new();
     let mut add = |text: String| {
         for ip in parse_dns_ips(&text) {
@@ -359,8 +422,21 @@ fn revert_dns_fallback_with(r: &dyn CommandRunner) -> Result<()> {
         return elevate_self(r, "internal-revert");
     }
     let _lock = crate::sysutil::OpLock::acquire()?;
-    let backend = backend_for(&detect_active_backend_with(r), r)?;
-    transaction::revert_fallback(&*backend, || Ok(()))
+    let kind = detect_active_backend_with(r);
+    let backend = backend_for(&kind, r)?;
+    transaction::revert_fallback(&*backend, || Ok(()))?;
+    // Até a 0.4.0, em máquina com NetworkManager o filtro era gravado em cada perfil. Sem
+    // registro, o drop-in do resolved já saiu acima; se ainda há DNS do filtro em uso, ele
+    // está nos perfis.
+    if kind == BackendKind::SystemdResolved
+        && network_manager_is_active(r)
+        && configured_dns_with(r)
+            .iter()
+            .any(crate::config::is_filter_ip)
+    {
+        transaction::revert_fallback(&NmBackend(r), || Ok(()))?;
+    }
+    Ok(())
 }
 
 /// Troca o filtro com a proteção ligada, mantendo o DNS original do manifesto.
@@ -840,7 +916,9 @@ fn apply_systemd_resolved(r: &dyn CommandRunner, mode: crate::config::FilterMode
     }
 
     let conf_content = format!(
-        "[Resolve]\nDNS={} {} {} {}\n",
+        // `Domains=~.`: toda consulta vai para o DNS global, qualquer que seja o DNS do link
+        // (o da rede, de um perfil novo do NetworkManager, de um hotspot). ADR-032.
+        "[Resolve]\nDNS={} {} {} {}\nDomains=~.\n",
         mode.ipv4()[0],
         mode.ipv4()[1],
         mode.ipv6()[0],

@@ -4,6 +4,10 @@
 
 > **Ainda na beta (`beta-06af688`)?** Desative a proteção com a 0.3.x **antes** de atualizar. A 0.4.0 não lê mais o registro que a beta guardava na pasta pessoal: sem ele, o desfazer devolve o DNS ao automático da rede, e um DNS fixo que você tinha configurado precisa ser colocado de novo.
 
+### Proteção
+- Linux com systemd-resolved (Fedora, Ubuntu e derivados): o filtro passa a ser **global** (drop-in com `Domains=~.`), mesmo em máquinas com NetworkManager. Antes ele era gravado em cada conexão ativa na hora de proteger, e uma rede Wi-Fi nova ou o hotspot de um celular entrava **sem filtro** (ADR-032). Quem já está protegido precisa desativar e proteger de novo para passar ao filtro global.
+- Limite novo: com o filtro ligado, nomes internos de uma VPN de trabalho podem deixar de resolver. Em Linux com NetworkManager **sem** systemd-resolved a brecha da conexão nova continua.
+
 ### Mudou
 - `guialar apply` e `guialar setup` só dizem «ativada» depois de conferir que o filtro responde, e saem com código 1 quando o DNS foi gravado mas a proteção não ficou completa. Antes imprimiam «ativada com sucesso» e saíam com 0 mesmo assim.
 - Proteger, trocar de modo e desfazer passam por um módulo só (`src/protection.rs`), usado pela linha de comando, pelas janelas e pelo processo elevado. O resultado é um tipo, não um texto: a janela deixou de reler o registro por conta própria para saber se estava danificado.
