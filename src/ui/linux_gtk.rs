@@ -100,6 +100,7 @@ mod imp {
         gtk_scrolled_window_set_child: unsafe extern "C" fn(P, P),
         gtk_widget_set_valign: unsafe extern "C" fn(P, c_int),
         gtk_widget_set_vexpand: unsafe extern "C" fn(P, c_int),
+        gtk_widget_set_size_request: unsafe extern "C" fn(P, c_int, c_int),
         gtk_widget_set_sensitive: unsafe extern "C" fn(P, c_int),
         gtk_widget_set_visible: unsafe extern "C" fn(P, c_int),
         gtk_widget_add_css_class: unsafe extern "C" fn(P, *const c_char),
@@ -339,6 +340,20 @@ mod imp {
         // SAFETY: thread principal; ponteiros guardados em UI.
         unsafe {
             (a.adw_status_page_set_icon_name)(u.status_page as P, cs(pick_icon(state)).as_ptr());
+            // Cor do estado no escudo e no título (como no Windows): verde, amarelo, vermelho.
+            let cor = match state {
+                theme::UiState::Protegido => Some("success"),
+                theme::UiState::Parcial => Some("warning"),
+                theme::UiState::Desprotegido => Some("error"),
+                theme::UiState::Trabalhando => None,
+            };
+            for c in ["success", "warning", "error"] {
+                if cor == Some(c) {
+                    (a.gtk_widget_add_css_class)(u.status_page as P, cs(c).as_ptr());
+                } else {
+                    (a.gtk_widget_remove_css_class)(u.status_page as P, cs(c).as_ptr());
+                }
+            }
             (a.adw_status_page_set_title)(u.status_page as P, cs(head).as_ptr());
             (a.adw_status_page_set_description)(u.status_page as P, cs(&desc).as_ptr());
             for (action, idx) in [
@@ -683,6 +698,10 @@ mod imp {
         );
         // Compacto: com o seletor de filtro a janela fica mais cheia e o título não pode sumir.
         (a.gtk_widget_add_css_class)(status, cs("compact").as_ptr());
+        // A página de estado tem rolagem interna e altura mínima quase zero: com «Detalhes
+        // técnicos» aberto numa tela baixa ela encolhia, cortava o escudo e escondia o título.
+        // Com altura mínima, quem rola é a janela inteira.
+        (a.gtk_widget_set_size_request)(status, -1, 290);
         (a.gtk_box_append)(content, status);
 
         let b_on = button("Proteger este computador", None, on_activate_btn);
@@ -702,7 +721,7 @@ mod imp {
             (
                 radio_family,
                 crate::config::FilterMode::Family.label(),
-                "Bloqueia sites perigosos e adultos, e instala o bloqueador de anúncios",
+                "Bloqueia sites perigosos e adultos",
             ),
             (
                 radio_ads,

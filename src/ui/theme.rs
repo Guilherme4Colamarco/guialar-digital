@@ -209,7 +209,11 @@ pub fn card_subtitle(action: Action, missing: &[String]) -> String {
         Action::Activate => "Aplica o tipo de proteção escolhido acima".into(),
         Action::Browsers => format!("Falta o bloqueador em: {}", missing.join(", ")),
         Action::Check => "Testa a conexão agora".into(),
-        Action::Restore => "Desfaz a proteção e remove o bloqueador de anúncios".into(),
+        // No Linux o programa só abre a página da extensão: não instala nem remove nada.
+        Action::Restore if cfg!(windows) => {
+            "Desfaz a proteção e remove o bloqueador de anúncios".into()
+        }
+        Action::Restore => "Desfaz a proteção e devolve o DNS de antes".into(),
     }
 }
 

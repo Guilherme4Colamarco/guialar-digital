@@ -197,14 +197,14 @@ fn layout(client_w: i32, dpi: u32, n_cards: usize, show_modes: bool) -> Layout {
         left: m,
         top: y,
         right: m + wd,
-        bottom: y + dp(64, dpi),
+        bottom: y + dp(52, dpi),
     };
-    y = header.bottom + dp(12, dpi);
+    y = header.bottom + dp(10, dpi);
     let hero = RECT {
         left: m,
         top: y,
         right: m + wd,
-        bottom: y + dp(100, dpi),
+        bottom: y + dp(92, dpi),
     };
     y = hero.bottom + dp(12, dpi);
     let mut modes = [RECT::default(); 2];
@@ -226,7 +226,7 @@ fn layout(client_w: i32, dpi: u32, n_cards: usize, show_modes: bool) -> Layout {
             left: m,
             top: y,
             right: m + wd,
-            bottom: y + dp(76, dpi),
+            bottom: y + dp(72, dpi),
         };
         y = c.bottom + dp(8, dpi);
         cards.push(c);
@@ -235,7 +235,7 @@ fn layout(client_w: i32, dpi: u32, n_cards: usize, show_modes: bool) -> Layout {
         left: m,
         top: y + dp(4, dpi),
         right: m + wd,
-        bottom: y + dp(48, dpi),
+        bottom: y + dp(40, dpi),
     };
     let details_toggle = RECT {
         left: m,
@@ -247,7 +247,7 @@ fn layout(client_w: i32, dpi: u32, n_cards: usize, show_modes: bool) -> Layout {
         left: m,
         top: details_toggle.bottom + dp(6, dpi),
         right: m + wd,
-        bottom: details_toggle.bottom + dp(6 + 176, dpi),
+        bottom: details_toggle.bottom + dp(6 + 170, dpi),
     };
     let rec_toggle = RECT {
         left: m + dp(212, dpi),
@@ -475,7 +475,6 @@ fn place_buttons(hwnd: HWND) {
     let t = l.details_toggle;
     let panel = l.details_panel;
     let cw = dp(170, dpi);
-    let ch = dp(34, dpi);
     // SAFETY: handles criados em WM_CREATE.
     unsafe {
         MoveWindow(
@@ -497,10 +496,10 @@ fn place_buttons(hwnd: HWND) {
         );
         MoveWindow(
             e[1] as HWND,
-            panel.right - dp(12, dpi) - cw,
-            panel.bottom - dp(10, dpi) - ch,
+            panel.right - cw,
+            t.top,
             cw,
-            ch,
+            t.bottom - t.top,
             1,
         );
         ShowWindow(e[1] as HWND, if open && !recs { 5 } else { SW_HIDE });
@@ -959,7 +958,7 @@ fn draw(dc: HDC, rc: &RECT, dpi: u32) {
             left: l.details_panel.left + dp(16, dpi),
             top: l.details_panel.top + dp(10, dpi),
             right: l.details_panel.right - dp(16, dpi),
-            bottom: l.details_panel.bottom - dp(54, dpi),
+            bottom: l.details_panel.bottom - dp(10, dpi),
         };
         text(dc, f.body, p.text_secondary, &body, &mut r, DT_LEFT_WORD);
     }
@@ -1365,7 +1364,7 @@ pub fn run() -> Result<()> {
             0x8000_0000u32 as i32,
             0x8000_0000u32 as i32,
             740,
-            790,
+            730,
             std::ptr::null_mut(),
             std::ptr::null_mut(),
             inst,
@@ -1375,15 +1374,28 @@ pub fn run() -> Result<()> {
             bail!("não foi possível criar a janela");
         }
         let dpi = GetDpiForWindow(hwnd).max(96);
-        SetWindowPos(
-            hwnd,
-            std::ptr::null_mut(),
-            0,
-            0,
-            dp(740, dpi),
-            dp(790, dpi),
-            0x2 | 0x4 | 0x10,
-        ); // NOMOVE|NOZORDER|NOACTIVATE
+        // Nunca maior que a área útil da tela (sem a barra de tarefas): numa tela de 768 px a
+        // janela descia para baixo da barra e o painel de detalhes ficava cortado.
+        let (mut ww, mut wh) = (dp(740, dpi), dp(730, dpi));
+        let mut work = RECT::default();
+        let tem_area = SystemParametersInfoW(0x30, 0, (&mut work as *mut RECT).cast(), 0) != 0; // SPI_GETWORKAREA
+        let (aw, ah) = (work.right - work.left, work.bottom - work.top);
+        if tem_area && aw > 0 && ah > 0 && (wh > ah - dp(40, dpi) || ww > aw) {
+            ww = ww.min(aw);
+            wh = wh.min(ah);
+            SetWindowPos(
+                hwnd,
+                std::ptr::null_mut(),
+                work.left + (aw - ww) / 2,
+                work.top + (ah - wh) / 2,
+                ww,
+                wh,
+                0x4 | 0x10,
+            ); // NOZORDER|NOACTIVATE
+        } else {
+            SetWindowPos(hwnd, std::ptr::null_mut(), 0, 0, ww, wh, 0x2 | 0x4 | 0x10);
+            // NOMOVE|NOZORDER|NOACTIVATE
+        }
         ShowWindow(hwnd, SW_SHOWNORMAL);
         UpdateWindow(hwnd);
         SetForegroundWindow(hwnd);
