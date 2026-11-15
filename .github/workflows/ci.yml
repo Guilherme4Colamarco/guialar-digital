@@ -35,6 +35,14 @@ jobs:
         run: rustup show active-toolchain || rustup toolchain install
       - name: Formato
         run: cargo fmt --all -- --check
+      - name: Guarda - links de download do site na versão do Cargo.toml
+        run: |
+          v="$(sed -n 's/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -n1)"
+          base="https://github.com/Guilherme4Colamarco/guialar-digital/releases/download/v${v}"
+          for f in "guialar-${v}-windows.exe" "guialar-${v}-x86_64.AppImage"; do
+            grep -q "${base}/${f}" docs/index.html || { echo "::error::docs/index.html sem o link ${base}/${f} (atualize o site junto com a versão)"; exit 1; }
+          done
+          echo "ok: site aponta para a v${v}"
       - name: Clippy
         run: cargo clippy --locked --all-targets -- -D warnings
       - name: Guarda - testes como usuario comum (nunca root)
