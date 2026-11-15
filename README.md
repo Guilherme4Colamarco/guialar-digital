@@ -1,4 +1,4 @@
-# GuiaLar Digital v0.4.0
+# GuiaLar Digital v0.4.1
 
 Proteção de navegação por **DNS filtrado**, com duas opções:
 

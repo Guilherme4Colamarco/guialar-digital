@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.1 — 2026-11-15
+
+### Janelas
+- Linux (GTK): com «Detalhes técnicos» aberto, a página de estado não encolhe mais: o escudo e o título ficam inteiros e quem rola é a janela.
+- Linux (GTK): o escudo e o título ficam na cor do estado (verde, amarelo, vermelho), como no Windows.
+- Windows: layout mais compacto; o texto dos detalhes aparece inteiro (o botão «Copiar detalhes» passou para a linha dos botões) e a janela não passa da área útil da tela.
+- Linux: os textos não dizem mais que o programa instala ou remove o bloqueador de anúncios; ele só abre a página da extensão na loja.
+
 ## 0.4.0 — 2026-11-15
 
 > **Ainda na beta (`beta-06af688`)?** Desative a proteção com a 0.3.x **antes** de atualizar. A 0.4.0 não lê mais o registro que a beta guardava na pasta pessoal: sem ele, o desfazer devolve o DNS ao automático da rede, e um DNS fixo que você tinha configurado precisa ser colocado de novo.
