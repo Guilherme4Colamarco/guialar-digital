@@ -208,6 +208,7 @@ extern "system" {
     pub fn EndPaint(h: HWND, ps: *const PAINTSTRUCT) -> i32;
     pub fn GetClientRect(h: HWND, r: *mut RECT) -> i32;
     pub fn MoveWindow(h: HWND, x: i32, y: i32, w: i32, hh: i32, repaint: i32) -> i32;
+    pub fn SystemParametersInfoW(action: u32, param: u32, pv: *mut c_void, win_ini: u32) -> i32;
     pub fn SetWindowPos(h: HWND, after: HWND, x: i32, y: i32, w: i32, hh: i32, flags: u32) -> i32;
     pub fn EnableWindow(h: HWND, enable: i32) -> i32;
     pub fn LoadCursorW(inst: HANDLE, name: *const u16) -> HANDLE;
