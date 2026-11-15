@@ -467,6 +467,68 @@ pub const FOLDERID_PROGRAMDATA: GUID = GUID {
     data4: [0xA9, 0xDD, 0x07, 0x0D, 0x1D, 0x49, 0x5D, 0x97],
 };
 
+pub const FOLDERID_PROGRAM_FILES: GUID = GUID {
+    data1: 0x905E_63B6,
+    data2: 0xC1BF,
+    data3: 0x494E,
+    data4: [0xB2, 0x9C, 0x65, 0xB7, 0x32, 0xD3, 0xD2, 0x1A],
+};
+
+pub const FOLDERID_PROGRAM_FILES_X86: GUID = GUID {
+    data1: 0x7C5A_40EF,
+    data2: 0xA0FB,
+    data3: 0x4BFC,
+    data4: [0x87, 0x4A, 0xC0, 0xF2, 0xE0, 0xB9, 0xFA, 0x8E],
+};
+
+pub const FOLDERID_LOCAL_APP_DATA: GUID = GUID {
+    data1: 0xF1B3_2785,
+    data2: 0x6FBA,
+    data3: 0x4FCF,
+    data4: [0x9D, 0x55, 0x7B, 0x8E, 0x7F, 0x15, 0x70, 0x91],
+};
+
+/// Pasta conhecida do Windows pela API (`SHGetKnownFolderPath`), nunca por variável de
+/// ambiente: quem chama o processo elevado controla o ambiente, mas não esta resposta.
+pub fn known_folder(id: &GUID) -> Option<std::path::PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    let mut p: *mut u16 = std::ptr::null_mut();
+    // SAFETY: GUID e ponteiro de saída válidos; o buffer é liberado com CoTaskMemFree.
+    let hr = unsafe { SHGetKnownFolderPath(id, 0, std::ptr::null_mut(), &mut p) };
+    if p.is_null() {
+        return None;
+    }
+    let out = if hr == 0 {
+        let mut n = 0usize;
+        // SAFETY: a API devolve uma string UTF-16 terminada em NUL.
+        unsafe {
+            while *p.add(n) != 0 {
+                n += 1;
+            }
+            Some(std::path::PathBuf::from(std::ffi::OsString::from_wide(
+                std::slice::from_raw_parts(p, n),
+            )))
+        }
+    } else {
+        None
+    };
+    // SAFETY: `p` veio do SHGetKnownFolderPath (a documentação manda liberar também na falha).
+    unsafe { CoTaskMemFree(p.cast()) };
+    out
+}
+
+pub const LOAD_LIBRARY_SEARCH_SYSTEM32: u32 = 0x0000_0800;
+
+/// DLLs carregadas em tempo de execução (`LoadLibrary`) só da pasta do sistema, nunca da pasta
+/// do programa. As importadas na carga do .exe são cobertas pelo `/DEPENDENTLOADFLAG` do
+/// `build.rs`. Sem isso, uma DLL deixada ao lado do `guialar.exe` roda no processo elevado.
+pub fn restrict_dll_search() {
+    // SAFETY: chamada simples, sem ponteiros. Falha (Windows antigo sem a API) é ignorada.
+    unsafe {
+        SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32);
+    }
+}
+
 #[repr(C)]
 pub struct SECURITY_ATTRIBUTES {
     pub nLength: u32,
@@ -491,6 +553,12 @@ extern "system" {
 #[link(name = "ole32")]
 extern "system" {
     pub fn CoTaskMemFree(p: *mut c_void);
+}
+
+#[link(name = "kernel32")]
+extern "system" {
+    pub fn GetSystemDirectoryW(buffer: *mut u16, size: u32) -> u32;
+    pub fn SetDefaultDllDirectories(flags: u32) -> i32;
 }
 
 #[link(name = "kernel32")]

@@ -25,6 +25,61 @@ pub fn command_exists(command: &str) -> bool {
     })
 }
 
+/// Caminho de uma ferramenta do Windows dentro da pasta do sistema `sysdir`
+/// (`reg` -> `<sysdir>\reg.exe`). O PowerShell fica em `WindowsPowerShell\v1.0`.
+/// Um `name` que já traz pasta volta como veio.
+pub fn system_tool_in(sysdir: &Path, name: &str) -> PathBuf {
+    if name.contains(['\\', '/', ':']) {
+        return PathBuf::from(name);
+    }
+    let stem = name
+        .strip_suffix(".exe")
+        .or_else(|| name.strip_suffix(".EXE"))
+        .unwrap_or(name);
+    let file = format!("{stem}.exe");
+    if stem.eq_ignore_ascii_case("powershell") {
+        sysdir.join("WindowsPowerShell").join("v1.0").join(file)
+    } else {
+        sysdir.join(file)
+    }
+}
+
+/// Pasta do sistema (`C:\Windows\System32`) pela API, nunca por variável de ambiente.
+#[cfg(windows)]
+pub fn system_dir() -> PathBuf {
+    use std::os::windows::ffi::OsStringExt;
+    let mut buf = [0u16; 261];
+    // SAFETY: o buffer tem `buf.len()` posições e a função grava no máximo isso.
+    let n =
+        unsafe { crate::win32::GetSystemDirectoryW(buf.as_mut_ptr(), buf.len() as u32) } as usize;
+    if n == 0 || n >= buf.len() {
+        return PathBuf::from(r"C:\Windows\System32");
+    }
+    PathBuf::from(std::ffi::OsString::from_wide(&buf[..n]))
+}
+
+/// Ferramenta do Windows (`reg`, `cmd`, `powershell`, `ipconfig`, `clip`) pelo caminho
+/// completo da pasta do sistema. Chamar só pelo nome faria o Windows procurar primeiro na
+/// pasta do próprio programa, e o processo elevado rodaria um `reg.exe` deixado ali.
+#[cfg(windows)]
+pub fn system_tool(name: &str) -> PathBuf {
+    system_tool_in(&system_dir(), name)
+}
+
+/// Pastas onde um navegador pode estar instalado: `Program Files`, `Program Files (x86)` e,
+/// se `per_user`, a `LocalAppData` de quem roda. Vêm da API, não de variáveis de ambiente.
+#[cfg(windows)]
+pub fn install_dirs(per_user: bool) -> Vec<PathBuf> {
+    use crate::win32::{
+        known_folder, FOLDERID_LOCAL_APP_DATA, FOLDERID_PROGRAM_FILES, FOLDERID_PROGRAM_FILES_X86,
+    };
+    let mut ids = vec![&FOLDERID_PROGRAM_FILES, &FOLDERID_PROGRAM_FILES_X86];
+    if per_user {
+        ids.push(&FOLDERID_LOCAL_APP_DATA);
+    }
+    ids.into_iter().filter_map(known_folder).collect()
+}
+
 /// UID efetivo lido de `/proc/self/status` (sem dependência de libc).
 pub fn effective_uid(status_text: &str) -> Option<u32> {
     status_text
@@ -517,6 +572,24 @@ mod tests {
     use super::*;
     #[cfg(unix)]
     use std::os::unix::fs::MetadataExt;
+
+    #[test]
+    fn ferramenta_do_windows_sai_com_caminho_completo_da_pasta_do_sistema() {
+        let sys = Path::new("SYS");
+        assert_eq!(system_tool_in(sys, "reg"), sys.join("reg.exe"));
+        assert_eq!(system_tool_in(sys, "reg.exe"), sys.join("reg.exe"));
+        assert_eq!(system_tool_in(sys, "ipconfig"), sys.join("ipconfig.exe"));
+        assert_eq!(
+            system_tool_in(sys, "powershell"),
+            sys.join("WindowsPowerShell")
+                .join("v1.0")
+                .join("powershell.exe")
+        );
+        // quem já traz pasta não é reescrito
+        let cheio = r"C:\Outra\reg.exe";
+        assert_eq!(system_tool_in(sys, cheio), PathBuf::from(cheio));
+        assert_eq!(system_tool_in(sys, "sub/reg"), PathBuf::from("sub/reg"));
+    }
 
     #[test]
     fn uid_efetivo_vem_da_terceira_coluna() {

@@ -979,7 +979,7 @@ fn copy_details() {
     };
     let mut bytes = vec![0xFF, 0xFE];
     bytes.extend(text.encode_utf16().flat_map(u16::to_le_bytes));
-    if let Ok(mut child) = std::process::Command::new("clip")
+    if let Ok(mut child) = std::process::Command::new(crate::sysutil::system_tool("clip"))
         .creation_flags(0x0800_0000)
         .stdin(std::process::Stdio::piped())
         .spawn()

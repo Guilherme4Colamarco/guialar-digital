@@ -256,10 +256,9 @@ mod win {
     use std::process::Command;
 
     fn find_exe(relative: &str) -> Option<PathBuf> {
-        ["ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"]
-            .iter()
-            .filter_map(std::env::var_os)
-            .map(|d| PathBuf::from(d).join(relative))
+        crate::sysutil::install_dirs(true)
+            .into_iter()
+            .map(|d| d.join(relative))
             .find(|p| p.is_file())
     }
 
@@ -267,10 +266,9 @@ mod win {
     /// Uma instalação por usuário (`%LOCALAPPDATA%`) fica fora: o caminho é de uma conta comum
     /// e uma junção ali faria o administrador gravar ou apagar arquivos alheios (ADR-030).
     fn find_firefox() -> Option<PathBuf> {
-        ["ProgramFiles", "ProgramFiles(x86)"]
-            .iter()
-            .filter_map(std::env::var_os)
-            .map(|d| PathBuf::from(d).join(r"Mozilla Firefox\firefox.exe"))
+        crate::sysutil::install_dirs(false)
+            .into_iter()
+            .map(|d| d.join(r"Mozilla Firefox\firefox.exe"))
             .find(|p| p.is_file())
     }
 
@@ -395,10 +393,15 @@ mod win {
             if cleanup_action_for(name, &existing) != PolicyCleanup::Remove {
                 continue;
             }
-            let status =
-                hidden(Command::new("reg").args(["delete", key, "/v", POLICY_VALUE_NAME, "/f"]))
-                    .status()
-                    .context("falha ao executar reg.exe")?;
+            let status = hidden(Command::new(crate::sysutil::system_tool("reg")).args([
+                "delete",
+                key,
+                "/v",
+                POLICY_VALUE_NAME,
+                "/f",
+            ]))
+            .status()
+            .context("falha ao executar reg.exe")?;
             if !status.success() {
                 anyhow::bail!("reg delete falhou em {key} ({:?})", status.code());
             }
@@ -431,7 +434,14 @@ mod win {
 
     /// O que há no valor `9101` da chave (ausente, `REG_SZ` ou outro tipo).
     fn read_policy_value(key: &str) -> PolicyValue {
-        match hidden(Command::new("reg").args(["query", key, "/v", POLICY_VALUE_NAME])).output() {
+        match hidden(Command::new(crate::sysutil::system_tool("reg")).args([
+            "query",
+            key,
+            "/v",
+            POLICY_VALUE_NAME,
+        ]))
+        .output()
+        {
             Ok(o) => classify_reg_query(
                 o.status.success(),
                 &String::from_utf8_lossy(&o.stdout),
@@ -448,7 +458,7 @@ mod win {
     }
 
     fn reg_add(key: &str, data: &str) -> Result<()> {
-        let status = Command::new("reg")
+        let status = Command::new(crate::sysutil::system_tool("reg"))
             .args([
                 "add",
                 key,

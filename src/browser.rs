@@ -52,7 +52,9 @@ pub fn detect_browsers() -> Vec<BrowserInfo> {
 pub fn open_extension_page(url: &str) -> std::io::Result<()> {
     #[cfg(target_os = "windows")]
     {
-        Command::new("cmd").args(["/C", "start", url]).spawn()?;
+        Command::new(crate::sysutil::system_tool("cmd"))
+            .args(["/C", "start", url])
+            .spawn()?;
     }
 
     #[cfg(target_os = "linux")]
@@ -87,10 +89,9 @@ fn windows_install_exists(cmd: &str) -> bool {
         "msedge" => r"Microsoft\Edge\Application\msedge.exe",
         _ => return false,
     };
-    ["ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"]
-        .iter()
-        .filter_map(std::env::var_os)
-        .any(|dir| std::path::Path::new(&dir).join(relative).is_file())
+    crate::sysutil::install_dirs(true)
+        .into_iter()
+        .any(|dir| dir.join(relative).is_file())
 }
 
 #[cfg(not(windows))]

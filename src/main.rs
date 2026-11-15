@@ -78,6 +78,8 @@ enum Commands {
 
 fn main() -> ExitCode {
     #[cfg(windows)]
+    win32::restrict_dll_search();
+    #[cfg(windows)]
     if std::env::args_os().len() > 1 {
         win32::attach_parent_console();
     }
