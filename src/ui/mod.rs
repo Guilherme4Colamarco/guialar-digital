@@ -8,8 +8,6 @@
 )]
 
 pub mod theme;
-#[allow(unused_imports)]
-pub use theme::{actions_for, UiState};
 
 #[cfg(target_os = "linux")]
 mod linux_gtk;

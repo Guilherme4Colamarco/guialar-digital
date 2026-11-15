@@ -116,66 +116,6 @@ pub fn apply_dns() -> Result<()> {
     }
 }
 
-/// Migra o manifesto antigo da beta, que ficava na área do usuário (ADR-031): só o `revert`
-/// elevado o lê, uma vez, e só depois de validar (a conexão existe agora, DNS são IPs,
-/// `previous_resolv_conf` só tem linhas permitidas). Válido: desfaz e apaga o antigo. Inválido:
-/// não usa nada dele, avisa e volta o DNS ao automático. Link ou dono diferente: ignora.
-/// `Ok(None)` = não há registro antigo (ou ele foi ignorado).
-pub fn migrate_legacy() -> Result<Option<String>> {
-    #[cfg(target_os = "linux")]
-    return linux::migrate_legacy();
-    #[cfg(target_os = "windows")]
-    return windows::migrate_legacy();
-    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
-    Ok(None)
-}
-
-pub(crate) fn migrate_legacy_generic(
-    active: crate::config::BackendKind,
-    known: &[String],
-    revert: impl FnOnce(&DnsStateManifest) -> Result<()>,
-    fallback: impl FnOnce() -> Result<()>,
-) -> Result<Option<String>> {
-    let legacy = match DnsStateManifest::load_legacy() {
-        Ok(None) => return Ok(None),
-        Ok(Some(m)) => m,
-        Err(e) => {
-            eprintln!("⚠️ Ignorando o registro antigo da proteção: {e:#}");
-            return Ok(None);
-        }
-    };
-    // L1: o manifesto antigo só vale se o backend dele é o que está ativo agora; um
-    // `DirectResolvConf` forjado num sistema com NetworkManager não pode regravar o resolv.conf
-    let validated = if legacy.backend == active {
-        legacy.validate_legacy(known)
-    } else {
-        Err(format!(
-            "o backend do registro ({:?}) não é o ativo agora ({:?})",
-            legacy.backend, active
-        ))
-    };
-    match validated {
-        Ok(()) => {
-            println!("🔄 Restaurando a partir do registro antigo (beta)...");
-            revert(&legacy)?;
-            DnsStateManifest::remove_legacy();
-            Ok(Some(
-                "Configurações de DNS restauradas com sucesso (registro antigo migrado).".into(),
-            ))
-        }
-        Err(motivo) => {
-            eprintln!(
-                "⚠️ O registro antigo da proteção não passou na validação ({motivo}); não vou usá-lo. Voltando o DNS ao padrão da rede."
-            );
-            DnsStateManifest::remove_legacy();
-            fallback()?;
-            Ok(Some(
-                "DNS restaurado para o padrão da rede (o registro antigo era inválido).".into(),
-            ))
-        }
-    }
-}
-
 pub fn revert_dns(manifest: &DnsStateManifest) -> Result<()> {
     let _guard = crate::sysutil::guard_operation()?;
     #[cfg(target_os = "linux")]
@@ -229,7 +169,7 @@ pub fn filter_dns_in_use() -> bool {
     configured_dns().iter().any(crate::config::is_filter_ip)
 }
 
-/// Desliga a proteção. Cobre manifesto normal, ausente, da beta e corrompido (nunca deixa o
+/// Desliga a proteção. Cobre manifesto normal, ausente e corrompido (nunca deixa o
 /// DNS preso no filtro). Devolve a mensagem final; quem chama só a exibe.
 pub fn revert_protection() -> Result<String> {
     match DnsStateManifest::load() {
@@ -239,13 +179,6 @@ pub fn revert_protection() -> Result<String> {
             Ok("Configurações de DNS restauradas com sucesso para o estado anterior.".into())
         }
         Ok(None) => {
-            // Beta: o manifesto ficava na área do usuário. O processo elevado o valida e o
-            // migra uma vez; nunca mais é gravado ali (ADR-031).
-            if crate::sysutil::is_privileged() {
-                if let Some(msg) = migrate_legacy()? {
-                    return Ok(msg);
-                }
-            }
             if filter_dns_in_use() {
                 println!("🔄 O DNS ainda usa o filtro, mas não há registro: voltando ao padrão da rede...");
                 revert_dns_fallback()?;

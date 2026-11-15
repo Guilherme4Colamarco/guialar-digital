@@ -1,4 +1,4 @@
-# GuiaLar Digital v0.3.0
+# GuiaLar Digital v0.4.0
 
 Proteção de navegação por **DNS filtrado**, com duas opções:
 
@@ -61,7 +61,7 @@ O registro que permite desfazer (`state.json`, só com endereços de DNS e nomes
 - **Linux:** `/var/lib/guialar/state.json`. A trava que impede duas operações ao mesmo tempo fica em `/run/guialar/op.lock` (some ao reiniciar). Para apagar o registro: `sudo rm -rf /var/lib/guialar`.
 - **Windows:** `%ProgramData%\GuiaLar\state.json` (e `op.lock` na mesma pasta), com acesso de escrita só para administradores. Para apagar, como administrador: `rmdir /s /q "%ProgramData%\GuiaLar"`.
 
-Apagar o registro **não desfaz o DNS**: faça isso depois de desativar a proteção (ou, sem o registro, rode `guialar revert`, que volta o DNS ao automático da rede). Quem usou a versão beta tinha o registro na pasta pessoal (`~/.config/guialar` no Linux, `%LOCALAPPDATA%\GuiaLar` no Windows): ao desativar, o programa lê esse registro antigo uma vez, confere se ainda faz sentido e o apaga; se estiver estranho, ignora e volta o DNS ao automático.
+Apagar o registro **não desfaz o DNS**: faça isso depois de desativar a proteção (ou, sem o registro, rode `guialar revert`, que volta o DNS ao automático da rede). Quem usou a versão beta tinha o registro na pasta pessoal (`~/.config/guialar` no Linux, `%LOCALAPPDATA%\GuiaLar` no Windows). A partir da 0.4.0 o programa não lê mais esse registro antigo: ao desativar, volta o DNS ao automático da rede. Pode apagar o arquivo antigo à mão.
 
 ## Requisitos
 

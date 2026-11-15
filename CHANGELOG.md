@@ -1,6 +1,17 @@
 # Changelog
 
-## Não lançado
+## 0.4.0 — não lançado
+
+> **Ainda na beta (`beta-06af688`)?** Desative a proteção com a 0.3.x **antes** de atualizar. A 0.4.0 não lê mais o registro que a beta guardava na pasta pessoal: sem ele, o desfazer devolve o DNS ao automático da rede, e um DNS fixo que você tinha configurado precisa ser colocado de novo.
+
+### Removido
+- Migração do registro da beta (pasta pessoal), como previsto na ADR-031. Com ela saem a leitura sem seguir links na área do usuário no Linux e a identificação do usuário por trás do `sudo`/`pkexec`, que só a migração usava. O processo elevado não lê mais nada que um usuário comum controle no Linux.
+- Prefixo de elevação por comando (`sudo`/`pkexec` na frente de cada `nmcli`, `tee`...): desde que o programa passou a se reexecutar elevado uma única vez, o prefixo era sempre vazio.
+- Dependência `thiserror`, que não era usada.
+
+### Build
+- `[profile.release]` com `strip`, LTO e `codegen-units = 1`.
+- A versão nos recursos do `.exe` (Propriedades do arquivo) volta a acompanhar a do programa; a 0.3.1 ainda dizia 0.3.0.
 
 ### Windows
 - Segurança: `reg`, `powershell`, `ipconfig`, `cmd` e `clip` passam a ser chamados pelo caminho completo da pasta do sistema (lida pela API, não por variável de ambiente). Antes eram chamados só pelo nome, e o Windows procura primeiro na pasta do próprio programa: um `reg.exe` deixado ao lado do `guialar.exe` era executado pelo processo elevado. Medido na 0.3.1 numa VM Windows 11 com `setup --mode family`. A correção ainda não foi executada no Windows de verdade (só compila e passa no lint para o alvo Windows).

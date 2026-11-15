@@ -190,9 +190,6 @@ mod tests {
         for (k, _) in preset {
             assert!(std::env::var_os(k).is_none(), "{k} deveria ter sido limpo");
         }
-        assert!(crate::sysutil::effective_home()
-            .unwrap()
-            .starts_with(s.dir()));
         assert!(s.manifest_path().starts_with(s.dir()));
         // assert_inside aceita o que é do sandbox e nega o resto
         assert_inside(&s.manifest_path(), "manifesto");

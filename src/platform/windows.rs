@@ -295,23 +295,6 @@ fn restore_connections(r: &dyn CommandRunner, manifest: &DnsStateManifest) -> Re
     Ok(())
 }
 
-/// Aliases das interfaces de rede de agora (para validar o manifesto antigo).
-pub fn known_connection_ids() -> Vec<String> {
-    list_active_interfaces(&RealRunner)
-        .map(|v| v.into_iter().map(|(alias, _)| alias).collect())
-        .unwrap_or_default()
-}
-
-/// Migração do manifesto antigo da beta (ADR-031); ver `platform::migrate_legacy`.
-pub fn migrate_legacy() -> Result<Option<String>> {
-    super::migrate_legacy_generic(
-        BackendKind::WindowsPowerShell,
-        &known_connection_ids(),
-        revert_dns,
-        revert_dns_fallback,
-    )
-}
-
 fn list_active_interfaces(r: &dyn CommandRunner) -> Result<Vec<(String, u32)>> {
     let out = powershell_output(
         r,
