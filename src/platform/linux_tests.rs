@@ -552,7 +552,7 @@ fn resolved_apply_e_revert_usam_o_argv_de_producao() {
     let r = resolved_machine();
     let original = r.state();
     apply_dns_with(&r).unwrap();
-    let conf = format!("[Resolve]\nDNS={V4} {V6}\n");
+    let conf = format!("[Resolve]\nDNS={V4} {V6}\nDomains=~.\n");
     let calls = r.calls();
     assert_eq!(calls.len(), 3);
     assert_eq!(calls[0].argv, v(&["mkdir", "-p", DROPIN_DIR]));
@@ -1450,4 +1450,92 @@ fn direto_sem_resolv_conf_recusa_antes_de_alterar() {
     assert!(r.argvs().is_empty(), "nada executado: {:?}", r.argvs());
     assert_eq!(r.state(), antes);
     assert!(!s.manifest_path().exists());
+}
+
+// ------------------------------------- ADR-032: filtro global pelo systemd-resolved (A2)
+
+const STUB: &str = "nameserver 127.0.0.53\noptions edns0 trust-ad\nsearch .\n";
+
+#[test]
+fn com_o_resolved_resolvendo_o_backend_e_o_dele_mesmo_com_networkmanager() {
+    let fedora = nm_machine()
+        .with_path("/run/systemd/resolve")
+        .with_file(RESOLV, STUB);
+    assert_eq!(
+        detect_active_backend_with(&fedora),
+        BackendKind::SystemdResolved
+    );
+    // resolved rodando mas sem ser o resolvedor (resolv.conf não é o stub): continua NM
+    let so_rodando = nm_machine()
+        .with_path("/run/systemd/resolve")
+        .with_file(RESOLV, "nameserver 192.168.0.1\n");
+    assert_eq!(
+        detect_active_backend_with(&so_rodando),
+        BackendKind::NetworkManager
+    );
+}
+
+#[test]
+fn o_drop_in_do_resolved_manda_toda_consulta_para_o_dns_global() {
+    let _s = Sandbox::new("adr32-dropin");
+    let r = nm_machine()
+        .with_path("/run/systemd/resolve")
+        .with_file(RESOLV, STUB);
+    apply_dns_with(&r).unwrap();
+    let conf = r
+        .state()
+        .files
+        .get("/etc/systemd/resolved.conf.d/99-guialar.conf")
+        .cloned()
+        .expect("drop-in gravado");
+    assert!(conf.contains("DNS=1.1.1.3 1.0.0.3"), "{conf}");
+    assert!(conf.lines().any(|l| l == "Domains=~."), "{conf}");
+    // nenhum perfil do NetworkManager foi alterado
+    assert!(
+        !r.argvs()
+            .iter()
+            .any(|a| a.first().map(String::as_str) == Some("nmcli")
+                && a.iter().any(|x| x == "modify")),
+        "{:?}",
+        r.argvs()
+    );
+    revert(&r).unwrap();
+    assert!(!r
+        .state()
+        .files
+        .contains_key("/etc/systemd/resolved.conf.d/99-guialar.conf"));
+}
+
+#[test]
+fn com_dominio_de_roteamento_global_o_dns_em_uso_e_o_global() {
+    let dns = "Global: 1.1.1.3 1.0.0.3 2606:4700:4700::1113\nLink 2 (enp0s2): 10.0.2.3\n";
+    let ip = |s: &str| s.parse::<std::net::IpAddr>().unwrap();
+    // global com `~.`: o DNS do link (o da rede) não responde a nada
+    assert_eq!(
+        resolved_routed_dns(dns, "Global: ~.\nLink 2 (enp0s2):\n"),
+        Some(vec![
+            ip("1.1.1.3"),
+            ip("1.0.0.3"),
+            ip("2606:4700:4700::1113")
+        ])
+    );
+    // um link que também declara `~.` (VPN) concorre com o filtro: entra na conta
+    assert_eq!(
+        resolved_routed_dns(dns, "Global: ~.\nLink 2 (enp0s2): ~. corp.example\n"),
+        Some(vec![
+            ip("1.1.1.3"),
+            ip("1.0.0.3"),
+            ip("2606:4700:4700::1113"),
+            ip("10.0.2.3")
+        ])
+    );
+    // sem `~.` no global, ou com `~.` mas sem servidor: vale a leitura comum
+    assert_eq!(
+        resolved_routed_dns(dns, "Global:\nLink 2 (enp0s2):\n"),
+        None
+    );
+    assert_eq!(
+        resolved_routed_dns("Global:\nLink 2 (enp0s2): 10.0.2.3\n", "Global: ~.\n"),
+        None
+    );
 }
